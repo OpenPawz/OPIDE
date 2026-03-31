@@ -1,0 +1,79 @@
+/* ── OPIDE Design Tokens ──────────────────────────────────────────────────────
+ * The single source of truth for OPIDE's visual language.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ── Backgrounds (wider contrast range for visible depth) ────────────── */
+  --opide-bg:              #0a0a0c;       /* deepest — editor background */
+  --opide-surface:         #151519;       /* panels — sidebar, activity bar */
+  --opide-surface-raised:  #1e1e25;       /* elevated — cards, dropdowns, headers */
+  --opide-surface-hover:   #262630;       /* hover state */
+  --opide-surface-active:  #2e2e3a;       /* active/pressed */
+  --opide-surface-card:    #1a1a22;       /* card backgrounds */
+
+  /* ── Gradient stops (for visible 3D surfaces) ──────────────────────── */
+  --opide-grad-light:      #222230;       /* lighter end of panel gradients */
+  --opide-grad-mid:        #18181f;       /* middle */
+  --opide-grad-dark:       #101014;       /* darker end */
+
+  /* ── Borders (visible luminous edges) ──────────────────────────────── */
+  --opide-border:          #333340;       /* standard borders */
+  --opide-border-subtle:   #252530;       /* subtle dividers */
+  --opide-border-light:    rgba(255, 255, 255, 0.08);  /* luminous top/left edges */
+  --opide-border-glow:     rgba(255, 255, 255, 0.12);  /* brighter edge for raised elements */
+  --opide-border-focus:    rgba(212, 168, 67, 0.5);
+
+  /* ── Accent (Gold) ───────────────────────────────────────────────────── */
+  --opide-accent:          #d4a843;
+  --opide-accent-bright:   #e4be5a;
+  --opide-accent-dim:      #b08930;
+  --opide-accent-glow:     rgba(212, 168, 67, 0.25);
+  --opide-accent-subtle:   rgba(212, 168, 67, 0.1);
+  --opide-accent-bg:       rgba(212, 168, 67, 0.06);
+
+  /* ── Text ────────────────────────────────────────────────────────────── */
+  --opide-text:            #e8e6e1;
+  --opide-text-secondary:  #a0a0a8;
+  --opide-text-muted:      #6a6a74;
+  --opide-text-accent:     #d4a843;
+
+  /* ── Semantic ────────────────────────────────────────────────────────── */
+  --opide-success:         #4ade80;
+  --opide-error:           #f87171;
+  --opide-warning:         #fbbf24;
+  --opide-info:            #60a5fa;
+
+  /* ── Radius ──────────────────────────────────────────────────────────── */
+  --opide-radius-xs:       2px;
+  --opide-radius-sm:       4px;
+  --opide-radius-md:       6px;
+  --opide-radius-lg:       8px;
+  --opide-radius-xl:       12px;
+  --opide-radius-round:    50%;
+
+  /* ── Shadows ─────────────────────────────────────────────────────────── */
+  --opide-shadow-sm:       0 1px 3px rgba(0, 0, 0, 0.4);
+  --opide-shadow-md:       0 4px 12px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --opide-shadow-lg:       0 8px 24px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --opide-shadow-glow:     0 0 20px var(--opide-accent-glow);
+  --opide-shadow-glow-sm:  0 0 10px var(--opide-accent-glow);
+  --opide-shadow-inset:    inset 0 1px 0 var(--opide-border-light), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+
+  /* ── Transitions ─────────────────────────────────────────────────────── */
+  --opide-transition-fast:    0.1s ease;
+  --opide-transition:         0.2s ease;
+  --opide-transition-slow:    0.3s ease;
+  --opide-transition-spring:  0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ── Typography ──────────────────────────────────────────────────────── */
+  --opide-font-ui:         'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --opide-font-mono:       'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+  --opide-font-size-xs:    10px;
+  --opide-font-size-sm:    11px;
+  --opide-font-size-md:    12px;
+  --opide-font-size-base:  13px;
+  --opide-font-size-lg:    14px;
+  --opide-font-size-xl:    16px;
+  --opide-font-size-2xl:   20px;
+  --opide-line-height:     1.5;
+}

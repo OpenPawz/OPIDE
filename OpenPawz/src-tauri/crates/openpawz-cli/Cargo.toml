@@ -1,0 +1,27 @@
+[package]
+name = "openpawz-cli"
+version = "0.1.0"
+description = "Command-line interface for OpenPawz — manage agents, sessions, memory, and more from the terminal."
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "openpawz"
+path = "src/main.rs"
+
+[dependencies]
+openpawz-core = { path = "../openpawz-core" }
+
+# ── CLI framework ──
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+
+# ── Output formatting ──
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+log = "0.4"
+env_logger = "0.11"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }

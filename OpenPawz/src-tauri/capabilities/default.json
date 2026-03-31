@@ -1,0 +1,38 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Scoped capability for the main window — least-privilege access",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "sql:default",
+    "sql:allow-load",
+    "sql:allow-execute",
+    "sql:allow-select",
+    "sql:allow-close",
+    "fs:default",
+    "fs:allow-read",
+    "fs:allow-write",
+    "fs:allow-exists",
+    "fs:allow-mkdir",
+    "fs:allow-remove",
+    "fs:allow-read-dir",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:allow-rename",
+    "fs:allow-copy-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$APPDATA/**",
+        "$APPDATA",
+        "/tmp/openpawz/**",
+        "/tmp/openpawz"
+      ]
+    },
+    "shell:allow-open",
+    "updater:default",
+    "updater:allow-check",
+    "updater:allow-download-and-install"
+  ]
+}

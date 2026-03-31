@@ -1,0 +1,35 @@
+[package]
+name = "opide-shell"
+version = "0.1.0"
+edition = "2021"
+description = "OPIDE IDE shell — terminal, git, LSP, DAP, file watcher, search, extensions"
+
+[dependencies]
+# Workspace shared
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+log.workspace = true
+uuid.workspace = true
+
+# Tauri (for commands, AppHandle, Emitter)
+tauri = { version = "2", features = [] }
+
+# Terminal
+portable-pty = "0.8"
+
+# File watching
+notify = { version = "7", features = ["macos_fsevent"] }
+
+# Git
+git2 = "0.19"
+
+# Search
+ignore = "0.4"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+grep-matcher = "0.1"
+regex = "1"
+
+# Utilities
+urlencoding = "2"

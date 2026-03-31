@@ -1,0 +1,178 @@
+/**
+ * OPIDE Global Stylesheet
+ *
+ * Three layers:
+ *   1. Reset / shell layout
+ *   2. VS Code theme token overrides (--vscode-* variables)
+ *   3. OPIDE component overrides (watermark, activity bar, sidebar, etc.)
+ */
+
+/* Import Londrina Shadow font — uses display=optional to prevent render blocking.
+   Font loads in background; if not ready by first paint, uses fallback until next navigation. */
+@import url('https://fonts.googleapis.com/css2?family=Londrina+Shadow&display=optional');
+
+/* ─── 1. Reset & shell ───────────────────────────────────────────────────── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #1e1e1e;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+/* ─── 2. VS Code theme token overrides ───────────────────────────────────── */
+/*
+ * All VS Code workbench colors are CSS custom properties on :root.
+ * Override any of them here to retheme without touching extension code.
+ *
+ * Full reference: https://code.visualstudio.com/api/references/theme-color
+ */
+
+/* Target .monaco-workbench — VS Code sets --vscode-* vars here, so :root has lower specificity */
+.monaco-workbench {
+  /* Activity bar */
+  --vscode-activityBar-background: #111111;
+  --vscode-activityBar-foreground: #cccccc;
+  --vscode-activityBar-inactiveForeground: #555555;
+  --vscode-activityBar-activeBorder: #E8B931;
+  --vscode-activityBarBadge-background: #E8B931;
+  --vscode-activityBarBadge-foreground: #ffffff;
+
+  /* Sidebar */
+  --vscode-sideBar-background: #161616;
+  --vscode-sideBar-foreground: #cccccc;
+  --vscode-sideBarSectionHeader-background: #111111;
+  --vscode-sideBarSectionHeader-foreground: #888888;
+
+  /* Editor */
+  --vscode-editor-background: #1a1a1a;
+  --vscode-editor-foreground: #d4d4d4;
+  --vscode-editorLineNumber-foreground: #404040;
+  --vscode-editorLineNumber-activeForeground: #888888;
+
+  /* Tabs */
+  --vscode-tab-activeBackground: #1a1a1a;
+  --vscode-tab-inactiveBackground: #131313;
+  --vscode-tab-activeForeground: #ffffff;
+  --vscode-tab-inactiveForeground: #888888;
+  --vscode-tab-border: #111111;
+  --vscode-editorGroupHeader-tabsBackground: #131313;
+
+  /* Panel (terminal / problems / output) */
+  --vscode-panel-background: #161616;
+  --vscode-panel-border: #222222;
+  --vscode-panelTitle-activeForeground: #ffffff;
+  --vscode-panelTitle-inactiveForeground: #666666;
+  --vscode-panelTitle-activeBorder: #E8B931;
+
+  /* Status bar */
+  --vscode-statusBar-background: #C49A1D;
+  --vscode-statusBar-foreground: #ffffff;
+  --vscode-statusBar-noFolderBackground: #333333;
+  --vscode-statusBarItem-hoverBackground: rgba(255, 255, 255, 0.12);
+  --vscode-statusBarItem-remoteBackground: #A88518;
+  --vscode-statusBarItem-remoteForeground: #ffffff;
+
+  /* Title bar */
+  --vscode-titleBar-activeBackground: #111111;
+  --vscode-titleBar-activeForeground: #cccccc;
+
+  /* Input / search */
+  --vscode-input-background: #1e1e1e;
+  --vscode-input-foreground: #cccccc;
+  --vscode-input-border: #333333;
+  --vscode-focusBorder: #E8B931;
+
+  /* Scrollbar */
+  --vscode-scrollbarSlider-background: rgba(255, 255, 255, 0.08);
+  --vscode-scrollbarSlider-hoverBackground: rgba(255, 255, 255, 0.14);
+  --vscode-scrollbarSlider-activeBackground: rgba(255, 255, 255, 0.2);
+
+  /* Lists */
+  --vscode-list-hoverBackground: rgba(255, 255, 255, 0.04);
+  --vscode-list-activeSelectionBackground: #E8B931;
+  --vscode-list-activeSelectionForeground: #ffffff;
+  --vscode-list-inactiveSelectionBackground: rgba(14, 124, 217, 0.3);
+
+  /* Buttons */
+  --vscode-button-background: #E8B931;
+  --vscode-button-foreground: #ffffff;
+  --vscode-button-hoverBackground: #F0CC50;
+}
+
+/* ─── 3. OPIDE Component Overrides ──────────────────────────────────────── */
+
+/* Activity bar — tighten width slightly and add vertical branding */
+.monaco-workbench .activitybar {
+  width: 46px !important;
+  position: relative !important;
+}
+
+/* Vertical OPIDE branding on activity bar */
+.monaco-workbench .activitybar::after {
+  content: 'OPIDE';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(180deg);
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-family: 'Londrina Shadow', cursive;
+  font-size: 32px;
+  color: #E8B931;
+  letter-spacing: 0.15em;
+  opacity: 0.95;
+  pointer-events: none;
+  text-shadow: 0 0 12px rgba(232,185,49,0.4);
+}
+
+/* Sidebar — remove the heavy border */
+.monaco-workbench .part.sidebar {
+  border-right: 1px solid #222222 !important;
+}
+
+/* Editor watermark — hide VS Code's default icon SVG/codicon completely */
+.monaco-workbench .editor-group-watermark .letterpress,
+.monaco-workbench .editor-group-watermark > .letterpress {
+  position: relative !important;
+  width: 180px !important;
+  height: 180px !important;
+  background: url('/brand-paw.png') center/contain no-repeat !important;
+  opacity: 1 !important;
+  filter: none !important;
+  font-size: 0 !important;
+  color: transparent !important;
+}
+
+/* Hide any SVG or span child inside letterpress (the actual VS Code icon element) */
+.monaco-workbench .editor-group-watermark .letterpress > *,
+.monaco-workbench .editor-group-watermark > .letterpress > * {
+  display: none !important;
+}
+
+/* Also target if VS Code renders the icon directly on the watermark */
+.monaco-workbench .editor-group-watermark {
+  align-items: center !important;
+}
+
+/* Status bar — make it slightly taller and more refined */
+.monaco-workbench .part.statusbar {
+  height: 24px !important;
+}
+
+/* Panel header tabs — cleaner */
+.monaco-workbench .part.panel .composite-bar .monaco-action-bar {
+  padding: 0 4px;
+}
+
+/* Remove the default VS Code loading progress bar color */
+.monaco-progress-container .progress-bit {
+  background: #E8B931 !important;
+}

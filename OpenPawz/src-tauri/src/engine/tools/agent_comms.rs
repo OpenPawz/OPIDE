@@ -1,0 +1,226 @@
+// Paw Agent Engine — Inter-agent communication tools
+//
+// Lets any agent send direct messages to other agents, check their inbox,
+// and broadcast to all agents. Independent of the project/orchestrator system.
+
+use crate::atoms::types::*;
+use crate::engine::state::EngineState;
+use log::{info, warn};
+use tauri::Emitter;
+use tauri::Manager;
+
+pub fn definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "agent_send_message".into(),
+                description: "Send a direct message to another agent. Use 'broadcast' as to_agent to message all agents. Messages persist and can be read by the recipient later.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "to_agent": { "type": "string", "description": "Target agent ID, or 'broadcast' for all agents" },
+                        "content": { "type": "string", "description": "Message content" },
+                        "channel": { "type": "string", "description": "Topic channel (default: 'general'). Use channels like 'alerts', 'status', 'handoff' to organize messages." },
+                        "metadata": { "type": "string", "description": "Optional JSON metadata for structured data" }
+                    },
+                    "required": ["to_agent", "content"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "agent_read_messages".into(),
+                description: "Read messages. If channel is specified, shows ALL messages on that channel (like a message board). Otherwise shows your inbox. Optionally filter by sender.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "channel": { "type": "string", "description": "Channel name (e.g. 'LaunchOps', 'alerts'). Shows all messages on this channel. Do NOT prefix with #." },
+                        "from_agent": { "type": "string", "description": "Filter to show only messages from this agent ID" },
+                        "limit": { "type": "integer", "description": "Max messages to return (default: 20)" },
+                        "mark_read": { "type": "boolean", "description": "Mark messages as read after retrieval (default: true)" }
+                    }
+                }),
+            },
+        },
+    ]
+}
+
+pub async fn execute(
+    name: &str,
+    args: &serde_json::Value,
+    app_handle: &tauri::AppHandle,
+    agent_id: &str,
+) -> Option<Result<String, String>> {
+    Some(match name {
+        "agent_send_message" => execute_send(args, app_handle, agent_id),
+        "agent_read_messages" => execute_read(args, app_handle, agent_id),
+        _ => return None,
+    })
+}
+
+fn execute_send(
+    args: &serde_json::Value,
+    app_handle: &tauri::AppHandle,
+    agent_id: &str,
+) -> Result<String, String> {
+    let to = args["to_agent"]
+        .as_str()
+        .ok_or_else(|| "missing 'to_agent'".to_string())?;
+    let content = args["content"]
+        .as_str()
+        .ok_or_else(|| "missing 'content'".to_string())?;
+    let channel = args["channel"].as_str().unwrap_or("general");
+    let metadata = args["metadata"].as_str().map(String::from);
+
+    // §Security: Scan inter-agent message content for prompt injection.
+    // This prevents a compromised agent from manipulating other agents
+    // via crafted messages that override their instructions.
+    // Both High and Critical severity are blocked (not just Critical).
+    let injection_scan = crate::engine::injection::scan_for_injection(content);
+    if injection_scan.is_injection
+        && injection_scan.severity >= Some(crate::engine::injection::InjectionSeverity::High)
+    {
+        warn!(
+            "[engine] agent_send_message: BLOCKED injection from '{}' → '{}' on #{} (score={}, severity={:?})",
+            agent_id, to, channel, injection_scan.score, injection_scan.severity
+        );
+        return Err(format!(
+            "Message blocked: prompt injection detected (severity: {:?}, score: {}). \
+             Inter-agent messages cannot contain instruction override attempts.",
+            injection_scan.severity, injection_scan.score
+        ));
+    }
+
+    // §Security: Also scan metadata field — injection payloads can be hidden there
+    if let Some(ref meta) = metadata {
+        let meta_scan = crate::engine::injection::scan_for_injection(meta);
+        if meta_scan.is_injection
+            && meta_scan.severity >= Some(crate::engine::injection::InjectionSeverity::High)
+        {
+            warn!(
+                "[engine] agent_send_message: BLOCKED injection in metadata from '{}' → '{}' (score={})",
+                agent_id, to, meta_scan.score
+            );
+            return Err(format!(
+                "Message metadata blocked: prompt injection detected (severity: {:?}, score: {}).",
+                meta_scan.severity, meta_scan.score
+            ));
+        }
+    }
+
+    let state = app_handle
+        .try_state::<EngineState>()
+        .ok_or_else(|| "Engine state not available".to_string())?;
+
+    let msg = AgentMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        from_agent: agent_id.to_string(),
+        to_agent: to.to_string(),
+        channel: channel.to_string(),
+        content: content.to_string(),
+        metadata,
+        read: false,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    state
+        .store
+        .send_agent_message(&msg)
+        .map_err(|e| e.to_string())?;
+
+    info!(
+        "[engine] agent_send_message: {} → {} on #{} ({} chars)",
+        agent_id,
+        to,
+        channel,
+        content.len()
+    );
+
+    app_handle
+        .emit(
+            "agent-message",
+            serde_json::json!({
+                "from": agent_id,
+                "to": to,
+                "channel": channel,
+            }),
+        )
+        .ok();
+
+    // Fire event-driven triggers for agent messages
+    let event = crate::engine::events::EngineEvent::AgentMessage {
+        from_agent: agent_id.to_string(),
+        to_agent: to.to_string(),
+        channel: channel.to_string(),
+        content: content.to_string(),
+    };
+    let app_clone = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        crate::engine::events::dispatch_event(&app_clone, &event).await;
+    });
+
+    Ok(format!("Message sent to {} on #{}", to, channel))
+}
+
+fn execute_read(
+    args: &serde_json::Value,
+    app_handle: &tauri::AppHandle,
+    agent_id: &str,
+) -> Result<String, String> {
+    // Strip leading '#' — models often write "#LaunchOps" but we store "LaunchOps"
+    let raw_channel = args["channel"]
+        .as_str()
+        .map(|c| c.strip_prefix('#').unwrap_or(c));
+    let channel: Option<&str> = raw_channel;
+    let from_agent = args["from_agent"].as_str();
+    let limit = args["limit"].as_i64().unwrap_or(20);
+    let mark_read = args["mark_read"].as_bool().unwrap_or(true);
+
+    let state = app_handle
+        .try_state::<EngineState>()
+        .ok_or_else(|| "Engine state not available".to_string())?;
+
+    // If a channel is specified, show ALL messages on that channel (squad board style)
+    // Otherwise, show messages addressed to this agent (inbox style)
+    let mut msgs = if let Some(ch) = channel {
+        state
+            .store
+            .get_channel_messages(ch, limit)
+            .map_err(|e| e.to_string())?
+    } else {
+        state
+            .store
+            .get_agent_messages(agent_id, None, limit)
+            .map_err(|e| e.to_string())?
+    };
+
+    // Apply optional from_agent filter
+    if let Some(from) = from_agent {
+        msgs.retain(|m| m.from_agent == from);
+    }
+
+    if mark_read {
+        state
+            .store
+            .mark_agent_messages_read(agent_id)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if msgs.is_empty() {
+        let ch_info = channel.map(|c| format!(" on #{}", c)).unwrap_or_default();
+        return Ok(format!("No messages{}", ch_info));
+    }
+
+    let mut output = format!("{} message(s):\n\n", msgs.len());
+    for m in &msgs {
+        let read_marker = if m.read { "" } else { " [NEW]" };
+        output.push_str(&format!(
+            "**From**: {} | **Channel**: #{} | {}{}\n{}\n\n",
+            m.from_agent, m.channel, m.created_at, read_marker, m.content
+        ));
+    }
+
+    Ok(output)
+}

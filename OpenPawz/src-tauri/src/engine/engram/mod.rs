@@ -1,0 +1,117 @@
+// ── Engram: Memory System Module ────────────────────────────────────────────
+//
+// Project Engram — a biologically-inspired, three-tier memory system.
+//
+// Architecture:
+//   Sensory Buffer (in-memory ring) → Working Memory (active slots) → Long-Term Store (SQLite)
+//
+// Sub-modules:
+//   - tokenizer: Unified token counting (replaces all chars/4 hacks)
+//   - model_caps: Per-model capability registry (replaces all hardcoded limits)
+//   - sensory_buffer: Tier 0 raw message ring buffer
+//   - working_memory: Tier 1 active context with priority eviction
+//   - schema: Tier 2 database tables and migrations
+//   - graph: Memory graph business logic (store, search, relate, decay, GC)
+//   - consolidation: Async pipeline: episodic→semantic extraction, contradiction resolution
+//   - context_builder: Budget-aware prompt assembly with token-precise allocation
+//   - bridge: Compatibility layer from old engine::memory API to Engram
+//   - retrieval_quality: NDCG + relevancy metrics on every search (§5.3/§35)
+//   - reranking: 4-strategy reranking pipeline (§35.1) + cross-type dedup (§34.3)
+//   - hybrid_search: Auto-detect text-boost weighting (§35.2)
+//   - metadata_inference: Auto-extract structured metadata during consolidation (§35.3)
+//   - emotional_memory: Affective scoring pipeline (§37) — flashbulb encoding
+//   - meta_cognition: Knowledge confidence mapping & reflection (§38)
+//   - abstraction_tree: 4-level hierarchical semantic compression (§42)
+//   - memory_bus: Multi-agent memory sync pub/sub protocol (§43)
+//   - dream_replay: Idle-time memory replay & connection discovery (§44)
+//   - cognitive_event: Observability bus for cognitive pipeline events (§47.6)
+
+pub mod abstraction_tree;
+pub mod bridge;
+pub mod cognitive_event;
+pub mod cognitive_state;
+pub mod community_detection;
+pub mod consolidation;
+pub mod context_builder;
+pub mod context_continuity;
+pub mod dream_replay;
+pub mod emotional_memory;
+pub mod encryption;
+pub mod entity_tracking;
+pub mod gated_search;
+pub mod graph;
+pub mod hnsw;
+pub mod hybrid_search;
+pub mod projection;
+pub mod intent_classifier;
+pub mod memory_bus;
+pub mod memory_fusion;
+pub mod meta_cognition;
+pub mod metadata_inference;
+pub mod model_caps;
+pub mod recall_tuner;
+pub mod reranking;
+pub mod retrieval_quality;
+pub mod schema;
+pub mod sensory_buffer;
+pub mod skill_library;
+pub mod temporal_search;
+pub mod tokenizer;
+pub mod working_memory;
+
+// Re-exports for convenience
+pub use abstraction_tree::{build_tree, pack_with_fallback, select_level};
+pub use cognitive_event::CognitiveEventBus;
+pub use cognitive_state::CognitiveState;
+pub use community_detection::{
+    communities_to_domains, detect_communities, Community, CommunityDetectionReport,
+};
+pub use consolidation::{run_consolidation, ConsolidationReport, GapKind, KnowledgeGap};
+pub use context_builder::{AssembledContext, BudgetReport, ContextBuilder};
+pub use context_continuity::{
+    capture_checkpoint, ensure_checkpoint_table, list_checkpoints, restore_checkpoint,
+    select_continuation_mode, summarize_for_continuation, CaptureCheckpointRequest,
+    CheckpointSummary,
+};
+pub use dream_replay::run_replay;
+pub use emotional_memory::{
+    affect_congruent_boost, affect_to_emotional_context, modulated_encoding_strength,
+    modulated_half_life, score_affect,
+};
+pub use encryption::get_platform_capability_key;
+pub use encryption::{apply_pii_upgrades, llm_pii_scan, LlmPiiScanReport};
+pub use encryption::{rekey_all_memories, should_rotate_keys, RekeyReport};
+pub use entity_tracking::{extract_entities, merge_entities, process_memory_entities};
+pub use gated_search::{
+    gate_decision, gated_search, DeferReason, GateDecision, GatedSearchRequest, GatedSearchResult,
+};
+pub use graph::{
+    apply_decay, boost_fast_strength, boost_slow_strength, garbage_collect, memory_stats, relate,
+    search, store_episodic_dedup, store_procedural, store_semantic_dedup, EngramStats,
+};
+pub use hybrid_search::resolve_hybrid_weight;
+pub use intent_classifier::{classify_intent, intent_weights};
+pub use memory_bus::{
+    issue_read_capability, issue_scoped_capability, verify_read_scope, AgentCapability, MemoryBus,
+};
+pub use meta_cognition::{
+    assess_query_confidence, build_reflection_prompt, rebuild_confidence_map,
+};
+pub use metadata_inference::{infer_metadata, infer_metadata_full};
+pub use model_caps::{
+    resolve_context_window, resolve_injection_resistance, resolve_max_output_tokens,
+    resolve_model_capabilities,
+};
+pub use reranking::{cross_type_dedup, rerank_results};
+pub use retrieval_quality::{
+    assess_quality, build_quality_metrics, build_recall_result, compute_average_relevancy,
+    compute_ndcg,
+};
+pub use sensory_buffer::SensoryBuffer;
+pub use skill_library::{
+    auto_extract_skill, link_sub_skill, record_outcome, suggest_skills, ExtractionResult,
+    FailureAnalysis, SkillOutcome, SkillSuggestion,
+};
+pub use temporal_search::{cluster_temporal, recency_score, temporal_search};
+pub use tokenizer::Tokenizer;
+pub use working_memory::WorkingMemory;

@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "OPIDE file system and core permissions",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "fs:default",
+    "fs:allow-read-file",
+    "fs:allow-write-file",
+    "fs:allow-read-dir",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    "fs:allow-exists",
+    "fs:allow-stat",
+    "fs:allow-lstat",
+    "fs:allow-mkdir",
+    "fs:scope-home-recursive",
+    "fs:scope-desktop-recursive",
+    "fs:scope-download-recursive",
+    "fs:scope-document-recursive",
+    "dialog:default",
+    "dialog:allow-open",
+    "shell:default",
+    "shell:allow-open"
+  ]
+}

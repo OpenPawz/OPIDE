@@ -1,0 +1,551 @@
+/* ── OPIDE VS Code Workbench Overrides ─────────────────────────────────────────
+ * Overrides VS Code's --vscode-* variables and component styles to match
+ * OPIDE's premium design language. Imported after the workbench boots.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/* ── Global Overrides ──────────────────────────────────────────────────────── */
+
+body {
+  font-family: var(--opide-font-ui) !important;
+  background: var(--opide-bg) !important;
+  color: var(--opide-text) !important;
+}
+
+/* Subtle radial gradient on the main workbench — adds depth */
+.monaco-workbench {
+  background:
+    radial-gradient(ellipse at 50% 30%, rgba(212, 168, 67, 0.015) 0%, transparent 70%),
+    var(--opide-bg) !important;
+}
+
+/* ── VS Code Variable Overrides ────────────────────────────────────────────── */
+
+.monaco-workbench {
+  --vscode-editor-background: var(--opide-bg);
+  --vscode-sideBar-background: var(--opide-surface);
+  --vscode-sideBarSectionHeader-background: var(--opide-surface);
+  --vscode-panel-background: var(--opide-surface);
+  --vscode-panel-border: var(--opide-border);
+  --vscode-activityBar-background: var(--opide-surface);
+  --vscode-activityBar-foreground: var(--opide-text);
+  --vscode-activityBar-activeBorder: var(--opide-accent);
+  --vscode-activityBar-inactiveForeground: var(--opide-text-muted);
+  --vscode-activityBar-border: var(--opide-border-subtle);
+  --vscode-activityBarBadge-background: var(--opide-accent);
+  --vscode-activityBarBadge-foreground: #000;
+  --vscode-sideBar-border: var(--opide-border-subtle);
+  --vscode-sideBarSectionHeader-border: var(--opide-border-subtle);
+  --vscode-auxiliaryBar-border: var(--opide-border-subtle);
+  --vscode-editorGroup-border: var(--opide-border-subtle);
+  --vscode-panel-border: var(--opide-border-subtle);
+  --vscode-statusBar-background: var(--opide-surface);
+  --vscode-statusBar-foreground: var(--opide-text-secondary);
+  --vscode-statusBar-border: var(--opide-border);
+  --vscode-tab-activeBackground: var(--opide-bg);
+  --vscode-tab-inactiveBackground: var(--opide-surface);
+  --vscode-tab-activeForeground: var(--opide-text);
+  --vscode-tab-inactiveForeground: var(--opide-text-muted);
+  --vscode-tab-activeBorderTop: var(--opide-accent);
+  --vscode-tab-border: var(--opide-border-subtle);
+  --vscode-editorGroupHeader-tabsBackground: var(--opide-surface);
+  --vscode-titleBar-activeBackground: var(--opide-surface);
+  --vscode-titleBar-activeForeground: var(--opide-text);
+  --vscode-input-background: var(--opide-surface-raised);
+  --vscode-input-foreground: var(--opide-text);
+  --vscode-input-border: var(--opide-border);
+  --vscode-dropdown-background: var(--opide-surface-raised);
+  --vscode-dropdown-foreground: var(--opide-text);
+  --vscode-dropdown-border: var(--opide-border);
+  --vscode-button-background: var(--opide-accent);
+  --vscode-button-foreground: #000;
+  --vscode-button-hoverBackground: var(--opide-accent-bright);
+  --vscode-focusBorder: var(--opide-border-focus);
+  --vscode-list-activeSelectionBackground: var(--opide-accent-subtle);
+  --vscode-list-activeSelectionForeground: var(--opide-text);
+  --vscode-list-hoverBackground: var(--opide-surface-hover);
+  --vscode-list-focusBackground: var(--opide-accent-subtle);
+  --vscode-list-highlightForeground: var(--opide-accent);
+  --vscode-terminal-background: #111114;
+  --vscode-terminal-foreground: var(--opide-text);
+  --vscode-textCodeBlock-background: #111114;
+  --vscode-widget-border: var(--opide-border);
+  --vscode-widget-shadow: var(--opide-shadow-lg);
+  --vscode-editorWidget-background: var(--opide-surface-raised);
+  --vscode-editorWidget-foreground: var(--opide-text);
+  --vscode-editorWidget-border: var(--opide-border);
+  --vscode-quickInput-background: var(--opide-surface-raised);
+  --vscode-quickInput-foreground: var(--opide-text);
+  --vscode-quickInputList-focusBackground: var(--opide-accent-subtle);
+  --vscode-quickInputTitle-background: var(--opide-surface);
+  --vscode-notifications-background: var(--opide-surface-raised);
+  --vscode-notifications-foreground: var(--opide-text);
+  --vscode-notifications-border: var(--opide-border);
+  --vscode-notificationCenterHeader-background: var(--opide-surface);
+  --vscode-badge-background: var(--opide-accent);
+  --vscode-badge-foreground: #000;
+  --vscode-scrollbarSlider-background: rgba(255, 255, 255, 0.06);
+  --vscode-scrollbarSlider-hoverBackground: var(--opide-accent-glow);
+  --vscode-scrollbarSlider-activeBackground: var(--opide-accent-dim);
+  --vscode-editorLineNumber-foreground: var(--opide-text-muted);
+  --vscode-editorLineNumber-activeForeground: var(--opide-text-secondary);
+  --vscode-editor-selectionBackground: rgba(212, 168, 67, 0.15);
+  --vscode-editor-selectionHighlightBackground: rgba(212, 168, 67, 0.08);
+  --vscode-editorCursor-foreground: var(--opide-accent);
+  --vscode-minimap-selectionHighlight: var(--opide-accent-glow);
+  --vscode-descriptionForeground: var(--opide-text-secondary);
+  --vscode-breadcrumb-foreground: var(--opide-text-muted);
+  --vscode-breadcrumb-focusForeground: var(--opide-accent);
+  --vscode-breadcrumb-activeSelectionForeground: var(--opide-text);
+}
+
+/* ── Scrollbars ────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  transition: background var(--opide-transition);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--opide-accent-glow);
+}
+
+/* ── Focus Rings ───────────────────────────────────────────────────────────── */
+
+*:focus-visible {
+  outline: 1px solid var(--opide-border-focus) !important;
+  outline-offset: -1px;
+  box-shadow: var(--opide-shadow-glow-sm) !important;
+}
+
+/* ── Selection ─────────────────────────────────────────────────────────────── */
+
+::selection {
+  background: rgba(212, 168, 67, 0.2);
+  color: var(--opide-text);
+}
+
+/* ── Activity Bar (D2) ─────────────────────────────────────────────────────── */
+
+.monaco-workbench .activitybar {
+  background: linear-gradient(180deg, #1c1c24 0%, var(--opide-surface) 40%, #0e0e12 100%) !important;
+  border-right: 1px solid var(--opide-border-light) !important;
+  box-shadow: inset -1px 0 0 var(--opide-border-light), 3px 0 10px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* Active icon — gold color */
+.monaco-workbench .activitybar .action-item.checked .action-label {
+  color: var(--opide-accent) !important;
+  filter: drop-shadow(0 0 4px var(--opide-accent-glow));
+}
+
+/* Active indicator bar — gold, thin, rounded */
+.monaco-workbench .activitybar .active-item-indicator {
+  background: var(--opide-accent) !important;
+  border-radius: 2px !important;
+  box-shadow: 0 0 8px var(--opide-accent-glow) !important;
+  width: 2px !important;
+  left: 0 !important;
+}
+
+/* Icon hover — gold tint with smooth transition */
+.monaco-workbench .activitybar .action-item .action-label {
+  transition: color var(--opide-transition), filter var(--opide-transition), transform var(--opide-transition) !important;
+}
+
+.monaco-workbench .activitybar .action-item:hover .action-label {
+  color: var(--opide-accent-bright) !important;
+  filter: drop-shadow(0 0 3px var(--opide-accent-glow));
+  transform: scale(1.05);
+}
+
+/* Activity bar badge — gold pill */
+.monaco-workbench .activitybar .badge .badge-content {
+  background: var(--opide-accent) !important;
+  color: #000 !important;
+  font-weight: 600;
+  font-size: 9px;
+  border-radius: 10px;
+  box-shadow: 0 0 6px var(--opide-accent-glow);
+}
+
+/* OPIDE injected activity bar icons (Memory Palace, Extensions, etc.) */
+#opide-palace-icon,
+[id^="opide-"] {
+  pointer-events: auto !important;
+  opacity: 0.6;
+  transition: opacity var(--opide-transition), color var(--opide-transition) !important;
+  z-index: 1;
+}
+
+#opide-palace-icon:hover,
+[id^="opide-"]:hover {
+  opacity: 1 !important;
+  color: var(--opide-accent) !important;
+}
+
+/* ── Sidebar (D2) ──────────────────────────────────────────────────────────── */
+
+.monaco-workbench .part.sidebar {
+  background: linear-gradient(180deg, #1a1a22 0%, var(--opide-surface) 30%, #0f0f13 100%) !important;
+  border-right: 1px solid var(--opide-border-light) !important;
+  box-shadow: inset -1px 0 0 var(--opide-border-light), 3px 0 12px rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Sidebar section headers — visible raised surface */
+.monaco-workbench .pane-header {
+  background: linear-gradient(180deg, #252530 0%, #1a1a22 100%) !important;
+  border-bottom: 1px solid var(--opide-border) !important;
+  border-top: 1px solid var(--opide-border-light) !important;
+  box-shadow: inset 0 1px 0 var(--opide-border-glow), 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.02em;
+  transition: background var(--opide-transition), box-shadow var(--opide-transition);
+}
+
+.monaco-workbench .pane-header:hover {
+  background: linear-gradient(180deg, #2a2a36 0%, #1e1e28 100%) !important;
+  box-shadow: inset 0 1px 0 var(--opide-border-glow), 0 2px 6px rgba(0, 0, 0, 0.35) !important;
+}
+
+/* File tree — more breathing room */
+.monaco-workbench .explorer-viewlet .monaco-list .monaco-list-row {
+  padding-top: 1px !important;
+  padding-bottom: 1px !important;
+}
+
+/* Explorer: selected file — gold left border + subtle background */
+.monaco-workbench .monaco-list .monaco-list-row.selected {
+  background: var(--opide-accent-subtle) !important;
+  border-left: 2px solid var(--opide-accent) !important;
+}
+
+/* Explorer: focused file */
+.monaco-workbench .monaco-list .monaco-list-row.focused {
+  background: var(--opide-accent-bg) !important;
+  border-left: 2px solid var(--opide-accent) !important;
+}
+
+/* Explorer: hovered file — smooth */
+.monaco-workbench .monaco-list .monaco-list-row {
+  transition: background var(--opide-transition-fast), border-left var(--opide-transition-fast) !important;
+  border-left: 2px solid transparent !important;
+}
+
+.monaco-workbench .monaco-list .monaco-list-row:hover {
+  background: var(--opide-surface-hover) !important;
+}
+
+/* Folder chevron — smooth rotation */
+.monaco-workbench .monaco-tl-twistie {
+  transition: transform 0.15s ease !important;
+}
+
+/* Collapsed: chevron points right ▶ (0deg = default icon orientation) */
+.monaco-workbench .monaco-tl-twistie.collapsible.collapsed {
+  transform: rotate(0deg);
+}
+
+/* Expanded: chevron rotates down ▼ */
+.monaco-workbench .monaco-tl-twistie.collapsible:not(.collapsed) {
+  transform: rotate(90deg);
+}
+
+/* Sidebar title actions — subtle on hover */
+.monaco-workbench .part.sidebar .title-actions .action-label {
+  transition: color var(--opide-transition), opacity var(--opide-transition) !important;
+  opacity: 0.6;
+}
+
+.monaco-workbench .part.sidebar .title-actions .action-label:hover {
+  opacity: 1;
+  color: var(--opide-accent) !important;
+}
+
+/* Auxiliary sidebar (chat panel) — visible depth */
+.monaco-workbench .part.auxiliarybar {
+  background: linear-gradient(180deg, #1a1a22 0%, var(--opide-surface) 30%, #0f0f13 100%) !important;
+  border-left: 1px solid var(--opide-border-light) !important;
+  box-shadow: inset 1px 0 0 var(--opide-border-light), -3px 0 12px rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Sidebar border — prevent gold bleeds */
+
+/* The sash (resize handle between panels) — luminous on hover */
+.monaco-workbench .monaco-sash {
+  background: transparent !important;
+  transition: background var(--opide-transition), box-shadow var(--opide-transition) !important;
+}
+
+.monaco-workbench .monaco-sash:hover {
+  background: rgba(212, 168, 67, 0.12) !important;
+  box-shadow: 0 0 6px rgba(212, 168, 67, 0.15) !important;
+}
+
+.monaco-workbench .monaco-sash.active {
+  background: rgba(212, 168, 67, 0.2) !important;
+  box-shadow: 0 0 10px rgba(212, 168, 67, 0.2) !important;
+}
+
+/* ── Editor Tabs (D3) ──────────────────────────────────────────────────────── */
+
+/* Tab bar background — visible raised gradient */
+.monaco-workbench .part.editor > .content .editor-group-container > .title {
+  background: linear-gradient(180deg, #1e1e26 0%, var(--opide-surface) 100%) !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3) !important;
+  border-bottom: 1px solid var(--opide-border) !important;
+}
+
+/* All tabs — smooth transitions */
+.monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab {
+  transition: background var(--opide-transition), color var(--opide-transition), border-color var(--opide-transition) !important;
+  border-top: 2px solid transparent !important;
+  border-bottom: none !important;
+}
+
+/* Active tab — gold top border, elevated background */
+.monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab.active {
+  border-top: 2px solid var(--opide-accent) !important;
+  background: var(--opide-bg) !important;
+  color: var(--opide-text) !important;
+  box-shadow: 0 -1px 0 var(--opide-accent-glow) !important;
+}
+
+/* Active tab label — slightly brighter */
+.monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab.active .tab-label a {
+  color: var(--opide-text) !important;
+}
+
+/* Inactive tabs — muted */
+.monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab:not(.active) {
+  background: var(--opide-surface) !important;
+  color: var(--opide-text-muted) !important;
+}
+
+.monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab:not(.active) .tab-label a {
+  color: var(--opide-text-muted) !important;
+}
+
+/* Tab hover — subtle gold glow underneath */
+.monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab:not(.active):hover {
+  background: var(--opide-surface-hover) !important;
+  border-top-color: var(--opide-accent-glow) !important;
+}
+
+.monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab:not(.active):hover .tab-label a {
+  color: var(--opide-text-secondary) !important;
+}
+
+/* Tab close button — fade in on hover */
+.monaco-workbench .part.editor .tabs-container > .tab .tab-actions {
+  opacity: 0;
+  transition: opacity var(--opide-transition-fast) !important;
+}
+
+.monaco-workbench .part.editor .tabs-container > .tab:hover .tab-actions,
+.monaco-workbench .part.editor .tabs-container > .tab.active .tab-actions {
+  opacity: 1;
+}
+
+/* Close button hover — gold */
+.monaco-workbench .part.editor .tabs-container > .tab .tab-actions .action-label:hover {
+  color: var(--opide-accent) !important;
+  background: var(--opide-accent-subtle) !important;
+  border-radius: var(--opide-radius-xs) !important;
+}
+
+/* Modified dot — gold */
+.monaco-workbench .part.editor .tabs-container > .tab.dirty .tab-label::after {
+  color: var(--opide-accent) !important;
+}
+
+/* Modified dot — use a gold circle when close button is hidden */
+.monaco-workbench .part.editor .tabs-container > .tab.dirty:not(:hover) .tab-actions .action-label {
+  color: var(--opide-accent) !important;
+  opacity: 1 !important;
+}
+
+/* Tab border separator — very subtle */
+.monaco-workbench .part.editor .tabs-container > .tab {
+  border-right: 1px solid var(--opide-border-subtle) !important;
+}
+
+/* ── Status Bar ────────────────────────────────────────────────────────────── */
+
+.monaco-workbench .part.statusbar {
+  background: linear-gradient(90deg, #101014 0%, #1a1a22 50%, #101014 100%) !important;
+  border-top: 1px solid var(--opide-border-light) !important;
+  box-shadow: inset 0 1px 0 var(--opide-border-light), 0 -3px 10px rgba(0, 0, 0, 0.3) !important;
+}
+
+.monaco-workbench .part.statusbar .statusbar-item a:hover {
+  background: var(--opide-surface-hover) !important;
+  transition: background var(--opide-transition);
+}
+
+/* ── Panel (Terminal, Problems, Output) ────────────────────────────────────── */
+
+.monaco-workbench .part.panel {
+  background: linear-gradient(0deg, #0c0c0f 0%, #181820 100%) !important;
+  border-top: 1px solid var(--opide-border-light) !important;
+  box-shadow: inset 0 1px 0 var(--opide-border-light), 0 -3px 10px rgba(0, 0, 0, 0.3) !important;
+}
+
+.monaco-workbench .part.panel .panel-switcher-container .action-item.checked {
+  border-bottom-color: var(--opide-accent) !important;
+}
+
+/* ── Quick Input (Command Palette) ─────────────────────────────────────────── */
+
+.monaco-workbench .quick-input-widget {
+  background: linear-gradient(180deg, #262632 0%, #1a1a22 100%) !important;
+  border: 1px solid var(--opide-border-glow) !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--opide-border-glow) !important;
+  border-radius: var(--opide-radius-lg) !important;
+}
+
+.monaco-workbench .quick-input-widget .quick-input-box input {
+  background: var(--opide-surface) !important;
+  border: 1px solid var(--opide-border) !important;
+  border-radius: var(--opide-radius-sm) !important;
+  transition: border-color var(--opide-transition);
+}
+
+.monaco-workbench .quick-input-widget .quick-input-box input:focus {
+  border-color: var(--opide-border-focus) !important;
+  box-shadow: var(--opide-shadow-glow-sm) !important;
+}
+
+.monaco-workbench .quick-input-widget .quick-input-list .monaco-list-row.focused {
+  background: var(--opide-accent-subtle) !important;
+}
+
+/* ── Notifications ─────────────────────────────────────────────────────────── */
+
+.monaco-workbench .notifications-list-container .notification-list-item {
+  background: var(--opide-surface-raised) !important;
+  border-radius: var(--opide-radius-md) !important;
+}
+
+/* ── Editor Widgets (Find, Hover, Suggest) ─────────────────────────────────── */
+
+.monaco-editor .find-widget {
+  background: var(--opide-surface-raised) !important;
+  border: 1px solid var(--opide-border) !important;
+  box-shadow: var(--opide-shadow-md) !important;
+  border-radius: var(--opide-radius-md) !important;
+}
+
+.monaco-editor .suggest-widget {
+  background: var(--opide-surface-raised) !important;
+  border: 1px solid var(--opide-border) !important;
+  border-radius: var(--opide-radius-md) !important;
+}
+
+.monaco-editor .suggest-widget .monaco-list .monaco-list-row.focused {
+  background: var(--opide-accent-subtle) !important;
+}
+
+/* ── Title Bar ─────────────────────────────────────────────────────────────── */
+
+.monaco-workbench .part.titlebar {
+  background: linear-gradient(90deg, #101014 0%, #1c1c24 50%, #101014 100%) !important;
+  border-bottom: 1px solid var(--opide-border-light) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* ── Breadcrumbs (D3) ──────────────────────────────────────────────────────── */
+
+.monaco-workbench .breadcrumbs-control {
+  background: var(--opide-bg) !important;
+  padding: 2px 8px !important;
+}
+
+.monaco-workbench .breadcrumbs-control .monaco-breadcrumb-item {
+  color: var(--opide-text-muted) !important;
+  font-size: var(--opide-font-size-sm) !important;
+  transition: color var(--opide-transition) !important;
+}
+
+.monaco-workbench .breadcrumbs-control .monaco-breadcrumb-item:hover {
+  color: var(--opide-text-secondary) !important;
+}
+
+.monaco-workbench .breadcrumbs-control .monaco-breadcrumb-item.focused {
+  color: var(--opide-accent) !important;
+}
+
+/* Active (last) breadcrumb — brighter */
+.monaco-workbench .breadcrumbs-control .monaco-breadcrumb-item:last-child {
+  color: var(--opide-text) !important;
+}
+
+/* Breadcrumb separator — thinner, more muted */
+.monaco-workbench .breadcrumbs-control .codicon-breadcrumb-separator {
+  color: var(--opide-text-muted) !important;
+  opacity: 0.5;
+  font-size: 10px !important;
+}
+
+/* Breadcrumb dropdown */
+.monaco-workbench .breadcrumbs-control .monaco-breadcrumb-item .monaco-dropdown {
+  background: var(--opide-surface-raised) !important;
+  border: 1px solid var(--opide-border) !important;
+  border-radius: var(--opide-radius-md) !important;
+  box-shadow: var(--opide-shadow-md) !important;
+}
+
+/* ── Smooth transitions on interactive elements ────────────────────────────── */
+
+/* ── Buttons with depth ────────────────────────────────────────────────────── */
+
+.monaco-workbench .monaco-button,
+.monaco-workbench .monaco-text-button {
+  transition: all var(--opide-transition) !important;
+  background: linear-gradient(180deg, var(--opide-accent-bright) 0%, var(--opide-accent) 100%) !important;
+  color: #000 !important;
+  border: none !important;
+  border-radius: var(--opide-radius-sm) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+  font-weight: 500 !important;
+}
+
+.monaco-workbench .monaco-button:hover,
+.monaco-workbench .monaco-text-button:hover {
+  background: linear-gradient(180deg, #ecd06a 0%, var(--opide-accent-bright) 100%) !important;
+  box-shadow: 0 2px 8px rgba(212, 168, 67, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+  transform: translateY(-1px);
+}
+
+.monaco-workbench .monaco-button:active,
+.monaco-workbench .monaco-text-button:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 2px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Inputs and selects with depth */
+.monaco-workbench input,
+.monaco-workbench select {
+  transition: all var(--opide-transition) !important;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2) !important;
+  border-radius: var(--opide-radius-sm) !important;
+}
+
+.monaco-workbench input:focus,
+.monaco-workbench select:focus {
+  border-color: var(--opide-border-focus) !important;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2), 0 0 0 1px var(--opide-border-focus), 0 0 8px rgba(212, 168, 67, 0.1) !important;
+}
+
+.monaco-workbench .action-item .action-label {
+  transition: all var(--opide-transition) !important;
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Open Pawz Desktop",
+  "version": "0.1.0",
+  "identifier": "com.openpawz.openpawz",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "Open Pawz Desktop",
+        "width": 800,
+        "height": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ws://127.0.0.1:1420 wss://127.0.0.1:1420 http://127.0.0.1:1420 http://127.0.0.1:11434 http://127.0.0.1:5678 ws://127.0.0.1:5678; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/OpenPawz/openpawz/releases/latest/download/latest.json"
+      ],
+      "pubkey": "GENERATE_WITH_tauri_signer_generate_AND_REPLACE_THIS"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": [
+      "../resources/node/*"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist"
+    }
+  }
+}

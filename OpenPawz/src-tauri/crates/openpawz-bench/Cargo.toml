@@ -1,0 +1,50 @@
+[package]
+name = "openpawz-bench"
+version = "0.1.0"
+description = "Benchmark suite for the OpenPawz AI engine — sessions, memory, engram, audit, crypto, injection, pricing, and more."
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+openpawz-core = { path = "../openpawz-core" }
+
+# ── Benchmark framework ──
+criterion = { version = "0.8", features = ["html_reports"] }
+
+# ── Utilities ──
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = "0.4"
+serde_json = "1"
+
+[lib]
+name = "openpawz_bench"
+path = "src/lib.rs"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Benchmark targets — each is a Criterion harness
+# ═══════════════════════════════════════════════════════════════════════════
+
+[[bench]]
+name = "session_bench"
+harness = false
+
+[[bench]]
+name = "memory_bench"
+harness = false
+
+[[bench]]
+name = "engram_bench"
+harness = false
+
+[[bench]]
+name = "audit_bench"
+harness = false
+
+[[bench]]
+name = "security_bench"
+harness = false
+
+[[bench]]
+name = "reasoning_bench"
+harness = false

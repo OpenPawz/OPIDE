@@ -1,0 +1,479 @@
+# Security
+
+Pawz is a Tauri v2 desktop AI agent. Every system call flows through the Rust backend before reaching the OS, making it the natural enforcement point for all security controls.
+
+## Trust at a Glance
+
+| Metric | Value |
+|--------|-------|
+| Automated tests | 1,128 (554 core + 508 app + 66 integration) + TypeScript |
+| CI jobs | 3 parallel (Rust + TypeScript + Security Audit) |
+| Clippy warnings | 0 (enforced via `-D warnings`) |
+| Known CVEs | 0 (`cargo audit` + `npm audit` in CI) |
+| Credential encryption | AES-256-GCM (OS keychain + HKDF per-agent key derivation) |
+| Error handling | 12-variant typed `EngineError` enum (no `String` errors) |
+| Network attack surface | Zero open ports (Tauri IPC only) |
+| Memory encryption layers | 3 (HKDF per-agent keys + SQL scope filtering + signed capability tokens) |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph User["User (Pawz UI)"]
+    direction TB
+    subgraph Frontend["Frontend · TypeScript"]
+      F1["Approval modal\n(Allow / Deny / type ALLOW)"]
+      F2["Security policy toggles"]
+      F3["Audit dashboard with export"]
+    end
+
+    Frontend -->|"Tauri IPC\n(structured commands)"| Engine
+
+    subgraph Engine["Rust Engine Backend"]
+      E1["Tool executor with HIL approval flow"]
+      E2["Command risk classifier"]
+      E3["Prompt injection scanner"]
+      E4["OS keychain (keyring crate)"]
+      E5["AES-256-GCM field encryption"]
+      E6["Filesystem scope enforcement"]
+      E7["Container sandbox (Docker via bollard)"]
+      E8["Channel access control (pairing + allowlists)"]
+    end
+
+    Engine -->|"Sandboxed access"| OS["Operating System"]
+  end
+```
+
+**Key design principle**: The agent never touches the OS directly. Every tool call goes through the Rust tool executor. Read-only tools (fetch, read_file, web_search, etc.) are auto-approved at the Rust level. Side-effect tools (exec, write_file, delete_file) emit a `ToolRequest` event → the frontend shows a risk-classified approval modal → user decides → `engine_approve_tool` resolves.
+
+---
+
+## Human-in-the-Loop (HIL) Approval
+
+Tool calls are classified into two tiers at the Rust engine level:
+
+**Auto-approved (no modal):** Read-only and informational tools — `fetch`, `read_file`, `list_directory`, `web_search`, `web_read`, `memory_search`, `soul_read`, `soul_write`, `self_info`, `email_read`, `slack_read`, `create_task`, `image_generate`, etc.
+
+**Requires user approval (modal shown):** Side-effect tools — `exec`, `write_file`, `append_file`, `delete_file`, and all trading write operations (swaps, transfers). The approval modal classifies each request by risk:
+
+| Risk Level | Behavior | Example |
+|------------|----------|---------|
+| **Critical** | Auto-denied by default; red modal if auto-deny disabled, user must type "ALLOW" | `sudo rm -rf /`, `curl \| bash` |
+| **High** | Orange warning modal | `chmod 777`, `kill -9` |
+| **Medium** | Yellow caution modal | `npm install`, outbound HTTP |
+| **Low** | Standard approval modal | unknown exec commands |
+| **Safe** | Auto-approved if matches allowlist (90+ default patterns) | `git status`, `ls`, `cat` |
+
+### Danger Pattern Detection
+
+58+ patterns across multiple categories:
+
+- **Privilege escalation** — `sudo`, `su`, `doas`, `pkexec`, `runas`
+- **Destructive deletion** — `rm -rf /`, `rm -rf ~`, `rm -rf /*`
+- **Permission exposure** — `chmod 777`, `chmod -R 777`
+- **Disk destruction** — `dd if=`, `mkfs`, `fdisk`
+- **Remote code execution** — `curl | sh`, `wget | bash`
+- **Code injection** — `eval`, `exec` with untrusted input
+- **Process termination** — `kill -9 1`, `killall`
+- **Firewall disabling** — `iptables -F`, `ufw disable`
+- **Account modification** — `passwd`, `chpasswd`, `usermod`
+- **Network exfiltration** — `curl | cat`, `scp` outbound, `/dev/tcp`
+- **Reverse shells** — `bash -i >& /dev/tcp`, `nc -e`, `python -c import socket`, `ruby -rsocket`, `perl -e socket`, `php -r fsockopen`, `socat tcp-connect`, `ncat -e`, `telnet \| /bin/sh`, `openssl s_client`
+- **Data staging / exfiltration** — `base64` piped to `curl`/`nc`, `tar` piped to `curl`/`nc`, `xxd` piped to `curl`/`nc`, `gzip` piped to `curl`/`nc`
+- **Credential harvesting** — `cat /etc/shadow`, `cat ~/.ssh/id_rsa`, `cat ~/.aws/credentials`, `security find-generic-password` (macOS Keychain dump)
+
+### Command Allowlist / Denylist
+
+Configurable regex patterns in Settings:
+- **Allowlist** — ~90+ default safe patterns (git, npm, node, python, ls, cat, etc.) — auto-approved
+- **Denylist** — default dangerous patterns — auto-denied
+- **Custom rules** — users can add their own regex patterns
+- Patterns validated before saving; invalid regex is rejected
+
+### Session Override
+
+Timed "allow all" mode with configurable duration (30min, 1hr, 2hr). Privilege escalation commands remain blocked even during override. Auto-expires. Cancellable from Settings banner.
+
+### Trading Approval Policy
+
+Financial tools (swaps, transfers) require HIL approval by default. A configurable trading policy can auto-approve within limits:
+
+- **Max trade size** — per-transaction USD cap
+- **Daily loss limit** — cumulative daily spending cap
+- **Allowed pairs** — whitelist of tradeable pairs
+- **Transfer toggle + cap** — opt-in with per-transfer limit
+- Applies to all chains: Coinbase, Solana (Jupiter), EVM DEX (Uniswap)
+- Read-only trading tools (balances, quotes, portfolio, prices) are always auto-approved
+
+---
+
+## Prompt Injection Detection
+
+Dual implementation (TypeScript + Rust) scanning for 30+ injection patterns across 4 severity levels. Detects attempts to override system prompts, extract secrets, or manipulate agent behavior.
+
+---
+
+## Container Sandboxing
+
+Docker-based sandboxing via the `bollard` crate:
+- `cap_drop ALL` — no Linux capabilities
+- Memory and CPU limits
+- Network isolation configurable
+- Configurable per-agent sandbox policies
+
+---
+
+## Credential Security
+
+### OS Keychain
+All sensitive credentials stored in the platform keychain:
+- macOS: Keychain
+- Linux: libsecret
+- Windows: Credential Manager
+
+Config files contain keychain references, never plaintext secrets.
+
+### Database Encryption — AES-256-GCM
+
+Sensitive database fields are encrypted at rest using **AES-256-GCM** via the Web Crypto API (`crypto.subtle`).
+
+**Key management:**
+- A 256-bit encryption key is stored in the OS keychain (macOS Keychain / Linux libsecret / Windows Credential Manager)
+- The Rust backend exposes `get_db_encryption_key` which returns the hex-encoded key via Tauri IPC
+- The frontend imports the raw key bytes with `crypto.subtle.importKey('raw', ..., 'AES-GCM')`
+- The key is held in memory only (`CryptoKey` object) — never written to disk or localStorage
+
+**Encryption process:**
+1. A fresh 12-byte IV is generated per field via `crypto.getRandomValues()`
+2. Plaintext is UTF-8 encoded and encrypted with `crypto.subtle.encrypt({ name: 'AES-GCM', iv })`
+3. IV and ciphertext are concatenated and base64-encoded
+4. The stored value is prefixed with `enc:` — e.g. `enc:<base64(iv ‖ ciphertext)>`
+
+**Decryption:** Values starting with `enc:` are detected automatically. The first 12 bytes of the decoded payload are extracted as the IV, the remainder as ciphertext, and decrypted with `crypto.subtle.decrypt()`.
+
+**Fallback behavior:** If the keychain is unavailable, encryption initialization fails with a user-facing error dialog. Credential storage is blocked — the app continues operating but will not silently store secrets in plaintext.
+
+**Applies to:** Channel credentials, API tokens, and other sensitive configuration stored in the local SQLite database (`paw.db`).
+
+### Credential Audit Trail
+Every credential access is logged to `credential_activity_log` with:
+- Action performed
+- Tool that requested access
+- Whether access was allowed or denied
+- Timestamp
+
+### Enterprise Hardening
+
+The following hardening measures were applied as part of a systematic enterprise audit:
+
+- **XOR → AES-256-GCM**: The original XOR cipher for skill credentials was replaced with AES-256-GCM. Existing XOR-encrypted values are auto-migrated on first read. 11 unit tests validate encrypt/decrypt roundtrips and wrong-key rejection.
+- **Silent fallback removed**: Missing OS keychain previously fell back to plaintext storage silently. Now shows a user-facing error and blocks credential operations.
+- **Typed error handling**: All engine functions use a 12-variant `EngineError` enum via `thiserror 2` — no `Result<T, String>` in the engine internals.
+- **Retry with circuit breakers**: Provider and bridge calls use exponential backoff (base 1s, max 30s, 3 retries) with `Retry-After` support. Circuit breaker trips after 5 consecutive failures (60s cooldown).
+- **Persistent logging**: Structured log files with daily rotation and 7-day pruning. In-app log viewer with filtering.
+- **530 automated tests**: 164 Rust tests (14 modules + 4 integration test files) + 366 TypeScript tests (24 test files) covering all security-critical paths.
+- **3-job CI pipeline**: `cargo check` + `cargo test` + `cargo clippy -- -D warnings` + `cargo audit` + `npm audit` on every push.
+- **TLS certificate pinning**: All provider connections use a custom `rustls::ClientConfig` pinned to Mozilla root certificates only. The OS trust store is explicitly excluded — a compromised or rogue system CA cannot intercept API traffic.
+- **Outbound request signing**: Every AI provider request is SHA-256 signed before transmission (`provider ‖ model ‖ timestamp ‖ body`). Hashes are logged to an in-memory ring buffer (500 entries) for tamper detection and compliance auditing.
+- **Memory encryption (secure zeroing)**: API keys in provider structs are wrapped in `Zeroizing<String>` from the `zeroize` crate. When a provider is dropped, the key memory is immediately zeroed using `write_volatile` to prevent dead-store elimination by the compiler.
+- **Anti-forensic vault-size quantization (KDBX-equivalent)**: The Engram memory store uses three mitigations to prevent file-size side-channel leakage:
+  1. **Bucket padding** — The SQLite database is padded to 512KB bucket boundaries (via `_engram_padding` table) so an attacker observing the file can only determine a coarse size bucket, not the exact memory count. Re-padded after every GC cycle. This is the SQLite equivalent of KDBX inner-content padding.
+  2. **Secure erasure** — Memory deletion is two-phase: content fields are overwritten with empty values *before* the row is deleted, preventing plaintext recovery from freed SQLite pages or WAL replay. Complements `PRAGMA secure_delete = ON`.
+  3. **8KB pages + incremental auto-vacuum** — Larger page size reduces file-size granularity; incremental vacuum prevents the file from shrinking immediately after deletions (which would reveal deletion count).
+
+### Keychain Key Management
+
+All cryptographic keys are read from the OS keychain exactly **once per process lifetime** and cached in-memory using a hardened pattern:
+
+| Property | Implementation |
+|----------|---------------|
+| **Cache type** | `RwLock<Option<Zeroizing<T>>>` — concurrent readers, exclusive writers |
+| **Locking pattern** | Double-check locking — after acquiring write lock, re-check cache before hitting keychain (prevents TOCTOU race) |
+| **Key generation** | `OsRng` (kernel CSPRNG via `getrandom` syscall) for all 256-bit keys — vault, DB, memory, and audit signing keys |
+| **Zeroization** | All cached keys wrapped in `Zeroizing<T>` (`zeroize` crate) — zeroed on drop via `write_volatile` |
+| **Poison recovery** | `unwrap_or_else(\|e\| e.into_inner())` on all lock operations — poisoned mutex never crashes the app |
+| **Key length validation** | 32 bytes for binary keys, 32+ chars for hex-encoded keys — rejects truncated or corrupted keychain entries |
+- **Passphrase hashing** | Lock screen passphrase hashed with **Argon2id** (memory-hard, timing-resistant). Legacy SHA-256 hashes are transparently verified for backward compatibility. New passphrases always use Argon2id |
+| **Passphrase comparison** | Argon2id verification is constant-time by design; legacy SHA-256 fallback uses `subtle::ConstantTimeEq` |
+
+This eliminates repeated macOS Keychain password prompts during normal operation (keychain was previously hit 5–20+ times per chat turn for encrypt/decrypt operations).
+
+### SSRF Protection
+
+The `fetch` tool validates all URLs against a blocklist of internal and cloud metadata endpoints before making any outbound request:
+
+- **Loopback** — `127.0.0.1`, `::1`, `localhost`
+- **RFC-1918 private ranges** — `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+- **Link-local** — `169.254.0.0/16`
+- **Cloud metadata** — `169.254.169.254` (AWS/GCP/Azure instance metadata endpoint)
+
+Blocked requests return an error to the agent without making any network call.
+
+### Audit Chain Integrity (HMAC)
+
+Every entry in the security audit log is signed with **HMAC-SHA256** using a dedicated signing key stored in the unified key vault (`audit-chain` purpose), separate from all encryption keys. The signing key is cached in a `LazyLock<Option<Zeroizing<Vec<u8>>>>` and generated with `OsRng` on first use. Each audit entry's HMAC covers the timestamp, category, action, agent ID, session ID, and the previous entry's hash — forming a tamper-evident hash chain. Chain integrity can be verified end-to-end via `verify_chain()`, which uses **constant-time comparison** (`subtle::ConstantTimeEq`) for all hash and signature checks.
+
+### Session Continuity Certificates (SCC)
+
+The audit chain proves within-session integrity, but a separate mechanism is needed to chain sessions together. **Session Continuity Certificates** solve the *Ghost Agent Problem* — the risk that an attacker could swap model weights or objectives between sessions while reusing the same OS keychain credentials.
+
+At every engine startup, a signed SCC is issued that commits to:
+
+| Field | Purpose |
+|-------|---------|
+| `model_id` | Which LLM model is configured |
+| `capability_hash` | SHA-256 of the sorted Tauri capability set |
+| `memory_hash` | Signature of the latest audit chain entry (anchors to audit state) |
+| `prior_cert_hash` | HMAC of the previous SCC (or genesis hash on first boot) |
+
+The SCC is HMAC-SHA256 signed with a dedicated key (`scc-signing` purpose in the unified key vault). Each certificate chains to the previous one — any gap or substitution in the chain is detectable by walking the certificates via `scc::verify_chain()`. Verification uses constant-time comparison to prevent timing side-channels.
+
+This provides **cross-session identity attestation**: you can cryptographically prove that session N was started by the same agent configuration as session N-1, or detect exactly where the chain broke.
+
+### Inter-Agent Communication Security
+
+All messages sent between agents via `agent_send_message` are scanned for prompt injection before delivery. Both the **content** field and the **metadata** field are independently scanned. Messages with High or Critical injection severity are **blocked** — preventing a compromised agent from manipulating other agents via crafted messages that override their instructions.
+
+### Worker Delegate Hardening
+
+Worker agents (spawned by the orchestrator for delegated subtasks) operate under a restricted tool policy:
+
+- **Blocked tools** — `exec`, `write_file`, `delete_file`, `append_file`, and all trading write operations are removed from the worker's tool set
+- **MCP pattern blocking** — MCP tools whose names contain dangerous operation keywords (`exec`, `shell`, `run_command`, `terminal`, `system`, `write_file`, `delete_file`, `remove_file`, `rm_rf`, `rmdir`, `unlink`) are blocked at the name level, preventing rogue MCP servers from bypassing the direct tool blocklist
+
+### MCP Registry Injection Scanning
+
+Results returned from MCP tool executions are scanned for prompt injection on **both success and error paths**. This prevents a malicious MCP server from embedding instruction overrides in tool output or error messages that would be forwarded to the agent's context.
+
+### Memory Tool Hardening
+
+The `memory_store` and `memory_update` tools enforce:
+
+- **Fail-closed ownership** — If the requesting agent's ID is missing or empty, the operation is rejected (no silent fallback to a default scope)
+- **Field size limits** — Content and metadata fields are capped at 2,000 characters to prevent context-stuffing attacks
+
+### Swarm Orchestration Security
+
+The multi-agent swarm subsystem uses atomic operations for all shared state:
+
+- **Global run counter** — `AtomicU64` with compare-and-swap (CAS) for incrementing; `Acquire`/`Release` memory ordering ensures cross-thread visibility
+- **Stale run GC** — Periodic garbage collection removes runs older than 10 minutes to prevent resource exhaustion from abandoned swarm runs
+
+### Event / Webhook Rate Limiting
+
+The event dispatch system enforces cooldown-based rate limiting on webhook triggers to prevent abuse:
+
+- **Cooldown period** — Configurable per-event minimum interval between fires
+- **Prefix-based matching** — Webhook URL patterns use prefix matching to prevent bypass via query parameters or path suffixes
+
+---
+
+## Engram Memory Security
+
+The Engram memory subsystem applies defense-in-depth to all stored agent memories (episodic, knowledge, and procedural). This protects user data even if an attacker gains access to the SQLite database file.
+
+### Field-Level Encryption
+
+Memories containing personally identifiable information (PII) are automatically encrypted before storage using **AES-256-GCM** with a dedicated key vault entry (`memory-vault` purpose), separate from the credential vault key.
+
+**Automatic PII detection** uses a two-layer defense scanning memory content for 17 pattern types before storage:
+
+| # | Pattern | Example | Tier |
+|---|---------|---------|------|
+| 1 | Social Security Numbers | `123-45-6789`, `123456789` | Confidential |
+| 2 | Credit card numbers | `4111-1111-1111-1111` | Confidential |
+| 3 | Email addresses | `user@example.com` | Sensitive |
+| 4 | Phone numbers | `+1-555-0123` | Sensitive |
+| 5 | International phone numbers | `+44 20 7946 0958` | Sensitive |
+| 6 | Physical addresses | Street address patterns | Sensitive |
+| 7 | Person names | `Mr./Mrs./Dr.` prefixed names | Sensitive |
+| 8 | Geographic locations | City/state/country patterns | Sensitive |
+| 9 | Government IDs | Passport, driver's license | Confidential |
+| 10 | JWT tokens | `eyJhbGciOi...` (header.payload.signature) | Confidential |
+| 11 | AWS access keys | `AKIA...` (20-char key IDs) | Confidential |
+| 12 | Private keys (RSA/EC/DSA) | `-----BEGIN ... PRIVATE KEY-----` | Confidential |
+| 13 | IBAN | `GB82 WEST 1234 5698 7654 32` | Confidential |
+| 14 | IPv4 addresses | `192.168.1.1` | Sensitive |
+| 15 | Generic API keys | `sk-`, `api_key=`, Bearer tokens | Confidential |
+| 16 | Credentials (passwords) | `password=`, `secret=` patterns | Confidential |
+| 17 | Dates of birth | `1990-01-15` | Sensitive |
+
+**Layer 2: LLM PII scan** — An LLM-assisted secondary scanner catches context-dependent PII that static regex cannot detect (e.g., "my mother's maiden name is Smith", "I was born in Springfield"). Content flagged by Layer 1 or exceeding a configurable character threshold is sent to the active LLM model for classification. The LLM returns structured JSON with detected PII types and a confidence score. Results above the confidence threshold trigger encryption, with the LLM classification stored alongside the regex tier for auditability.
+
+**Three security tiers:**
+
+| Tier | Content | Treatment |
+|------|---------|-----------||
+| **Cleartext** | No PII detected | Stored as-is |
+| **Sensitive** | PII detected (email, name, phone, IP) | AES-256-GCM encrypted, `enc:` prefix |
+| **Confidential** | High-sensitivity PII (SSN, credit card, JWT, AWS key, private key) | AES-256-GCM encrypted, `enc:` prefix |
+
+Encrypted content uses the format `enc:<base64(nonce ‖ ciphertext ‖ tag)>`. A fresh 96-bit nonce is generated per encryption. Decryption is automatic on retrieval.
+
+### Query Sanitization
+
+- **Parameterized query sanitization** — All user-supplied search queries are sanitized before reaching the storage backend. Search operators (`AND`, `OR`, `NOT`, `NEAR`, `*`, `"`, `{`, `}`, `^`) are stripped or escaped to prevent query injection.
+- **Input validation** — Memory content is capped at 256 KB. Null bytes are rejected. Category strings are validated against the 18-variant enum with graceful fallback to `general`.
+
+### Prompt Injection Scanning
+
+Recalled memories are scanned for 10 prompt injection patterns before being returned to the agent context:
+- System prompt overrides (`ignore previous instructions`, `you are now`)
+- Data exfiltration attempts (`output all`, `dump`, `show me the`)
+- Role manipulation (`act as`, `pretend to be`)
+- Instruction injection (`new instruction`, `from now on`)
+- Delimiter attacks and encoding bypass attempts
+
+Suspicious content is **redacted** with `[REDACTED:injection]` markers before storage to prevent poisoned memories from manipulating agent behavior on future recalls.
+
+### Log Redaction
+
+Memory content in log output is automatically redacted:
+- PII patterns are replaced with type-specific placeholders (e.g., `[EMAIL]`, `[SSN]`, `[CREDIT_CARD]`)
+- Log previews are truncated to 80 characters
+- Full content never appears in log files
+
+### Inter-Agent Memory Bus Trust
+
+The cross-agent memory bus (pub/sub system for sharing memories between agents) enforces publish-side authentication to prevent memory poisoning attacks:
+
+| Defense | Implementation |
+|---------|----------------|
+| **Capability tokens** | Each agent holds an `AgentCapability` with HMAC-SHA256 signature — specifies max publication scope, importance ceiling, rate limit, and write permission |
+| **Signature verification** | Every publish and read call requires a valid capability token; HMAC is verified in constant time (`subtle` crate) before any bus operation |
+| **Scope enforcement** | Agents cannot publish or read beyond their assigned scope (e.g., an agent scoped to `Agent` cannot publish to `Global`) |
+| **Importance ceiling** | Publication importance is clamped to the agent's maximum — prevents low-trust agents from asserting high-confidence facts |
+| **Per-agent rate limiting** | Publish count tracked per GC window; agents exceeding their rate limit are rejected |
+| **Publish-side injection scan** | All publication content is scanned for prompt injection patterns before entering the bus |
+| **Trust-weighted contradiction resolution** | When two agents publish contradictory facts, the memory with the higher trust-weighted importance wins. Trust scores are per-agent and adjustable. |
+| **Signed scope tokens on read path** | Every `gated_search()` call verifies a signed capability token: (1) HMAC signature integrity, (2) identity binding (token agent_id == requester), (3) scope ceiling check, (4) squad/project membership verification |
+
+**Threat model:**
+
+| Attack | Mitigation |
+|--------|------------|
+| Compromised agent floods bus with poisoned memories | Rate limit + injection scan on publish side |
+| Low-trust agent overwrites high-trust facts | Trust-weighted contradiction resolution — lower trust score reduces effective importance |
+| Agent publishes beyond its authority scope | Scope ceiling enforcement — publish rejected if scope exceeds capability |
+| Forged capability token | HMAC-SHA256 verification against platform-held secret key |
+| Unauthorized cross-agent memory reads | Signed read-path tokens with 4-step verification (signature, identity, scope ceiling, membership) |
+
+### Per-Agent Key Derivation (HKDF)
+
+Every agent's memory is encrypted with a **unique derived key** using HKDF-SHA256 domain separation. A single master key in the OS keychain produces three independent key families:
+
+| Domain | HKDF Salt | Purpose |
+|--------|-----------|----------|
+| Agent encryption | `engram-agent-key-v1` | Per-agent AES-256-GCM memory encryption |
+| Snapshot HMAC | `engram-snapshot-hmac-v1` | Tamper detection for working memory snapshots |
+| Capability signing | `engram-platform-cap-v1` | HMAC-SHA256 signing of capability tokens |
+
+This means: even if an attacker compromises one agent's derived key, other agents' memories remain cryptographically isolated. Cross-agent decryption is **mathematically impossible** without the master key.
+
+### Key Versioning & Rotation
+
+Encrypted content is prefixed with a version tag (`enc:v1:`) for forward-compatible upgrades. An automated key rotation scheduler runs on a configurable interval (default: 90 days) and re-encrypts all agent memories with fresh HKDF-derived keys. The rotation is atomic — if any re-encryption fails, the entire batch rolls back.
+
+### Snapshot HMAC
+
+Working memory snapshots (saved on agent switch or session end) include an HMAC-SHA256 integrity tag computed over the serialized snapshot content. On restore, the HMAC is verified before the snapshot is loaded — tampered snapshots are rejected and logged.
+
+### GDPR Right to Erasure
+
+Article 17 compliance via the `engine_memory_purge_user` Tauri command:
+- Accepts a list of user identifiers (names, emails, usernames)
+- Securely erases all matching records across episodic, knowledge, and procedural memory tables
+- Purges working memory snapshots and audit log entries
+- Two-phase deletion: content zeroed before row deletion
+- Returns a count of erased records for compliance reporting
+
+---
+
+## Anti-Fixation Defenses (§59)
+
+Five defense layers prevent agents from ignoring user instructions or getting stuck on old topics:
+
+| Defense | Layer | Description |
+|---------|-------|-------------|
+| **Response loop detection** | Pre-turn | Jaccard similarity, question loops, topic fixation checks with system redirect injection (now active on ALL channels, not just chat UI) |
+| **User override detection** | Pre-turn | Detects explicit stop/redirect commands ("stop", "focus on my question", "that's not what I asked") with 3-level escalation |
+| **Unidirectional topic ignorance** | Pre-turn | Catches unique-but-wrong responses after a prior redirect — fires when model's response has zero entity overlap with user keywords |
+| **Momentum clearing** | Cognitive | Clears working memory trajectory embeddings on topic switch so recalled context serves the new topic |
+| **Tool-call loop breaker** | Intra-loop | Hash-based signature detection stops repeated identical tool calls after 3 consecutive matches |
+
+---
+
+## Filesystem Sandboxing
+
+### Tauri Scope
+Filesystem access scoped via Tauri capabilities (`capabilities/default.json`). The IPC filesystem scope is narrowed to **`$APPDATA`** and **`/tmp/openpawz/`** only — `$HOME` is explicitly excluded. Shell access is limited to the `open` command only.
+
+### Sensitive Path Blocking
+20+ sensitive paths blocked from project file browsing:
+`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, filesystem root, home directory root.
+
+### Per-Project Scope
+File operations validated against the active project root. Path traversal blocked. Violations logged to the security audit.
+
+### Read-Only Mode
+Toggle in Security Policies blocks all agent filesystem write tools (create, edit, delete, move, chmod, etc.).
+
+---
+
+## Channel Access Control
+
+Each of the 11 channel bridges supports:
+- **DM policy** — pairing / allowlist / open
+- **Pairing approval** — new users send a request → approved in Pawz → confirmation sent back
+- **Per-channel allowlist** — specific user IDs
+- **Per-agent routing** — configure which agents handle which channels
+
+---
+
+## Network Security
+
+### Content Security Policy (CSP)
+Restrictive CSP in `tauri.conf.json`:
+- `default-src 'self'`
+- `script-src 'self'` — no external scripts
+- `connect-src 'self'` + localhost WebSocket only
+- `object-src 'none'`
+- `frame-ancestors 'none'`
+
+### Network Request Auditing
+Outbound tool calls are inspected for exfiltration patterns. URL extraction and domain analysis with audit logging.
+
+### Outbound Domain Allowlist
+Configurable allow/block lists with wildcard subdomain matching. Enforced in the `execute_fetch` tool handler. Test URL button in settings.
+
+---
+
+## Skill Vetting
+
+Before every skill install:
+1. **Safety confirmation modal** — shows security checks
+2. **Known-safe list** — built-in set of community-vetted skill names
+3. **npm registry risk intelligence** — fetches download count, last publish date, deprecation status, maintainer count, license
+4. **Risk score display** — visual risk panel in the confirmation dialog
+5. **Post-install sandbox check** — verifies skill metadata for suspicious tool registrations (`exec`, `shell`, `eval`, `spawn`)
+
+---
+
+## Audit Dashboard
+
+Unified security audit log (`security_audit_log` table) capturing all security-relevant events:
+- Event type, risk level, tool name
+- Command details
+- Session context
+- Decision (allowed/denied)
+- Matched pattern
+
+Filterable by type, date, and severity. Export to JSON or CSV.
+
+---
+
+## Reporting Vulnerabilities
+
+If you discover a security vulnerability, please report it responsibly by emailing the maintainer directly rather than opening a public issue. See the repository's contact information for details.

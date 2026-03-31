@@ -1,0 +1,77 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+tmp_docs/*
+coverage
+node_modules
+dist
+dist-ssr
+*.local
+package-lock.json
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+resources/node/*.tar.gz
+*.bak
+
+# SQLite database files
+*.db
+*.db-wal
+*.db-shm
+*.pdf
+
+# Local secrets (never commit)
+.env
+.env.local
+.env.build
+src-tauri/.env
+
+# Private planning docs
+.credential-architecture.md
+LAUNCH_PLAN.md
+N8N_INTEGRATION_PLAN.md
+MINI_HUB_PLAN.md
+KINETIC_DESIGN_PLAN.md
+DASHBOARD_OVERHAUL_PLAN.md
+SKILLS_WORKSPACE_PLAN.md
+ZERO_GAP_PLAN.md
+ENTERPRISE_PLAN.md
+launch-content/
+
+# Docusaurus build cache
+docs/.docusaurus/
+
+# Agent workspace artifacts (written by Pawz during sessions)
+src-tauri/trading_journal.md
+src-tauri/market_data_log.csv
+src-tauri/web_access_research.md
+src-tauri/~/
+slice.mjs
+agent_sprites.png
+
+# Misc data files
+*.csv
+*.nohup
+nohup.out
+
+# Rust build artifacts (cargo target dirs)
+**/target/
+.tauri-updater-key
+
+# Private website (separate repo)
+website/
+# Private planning docs
+.oauth-implementation.md

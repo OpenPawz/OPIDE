@@ -1,0 +1,869 @@
+/* ═══ Backend Agent Cards ═══ */
+.agent-card-backend {
+  border-left: 3px solid var(--accent);
+}
+.agent-stat-backend {
+  color: var(--accent);
+  font-weight: 600;
+}
+.agent-minichat-btn {
+  font-size: 14px !important;
+  padding: 2px 8px !important;
+}
+
+/* ═══ Mini-Chat Popups (FB Messenger–style) ═══ */
+.mini-chat {
+  position: fixed;
+  bottom: 0;
+  width: 300px;
+  height: 400px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  z-index: 9000;
+  opacity: 0;
+  transform: translateY(20px);
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+}
+.mini-chat-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.mini-chat-minimized {
+  height: 44px;
+  overflow: hidden;
+}
+.mini-chat-minimized .mini-chat-body {
+  display: none;
+}
+
+/* Header */
+.mini-chat-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 0;
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+}
+.mini-chat-avatar {
+  line-height: 1;
+  display: flex;
+  align-items: center;
+}
+.mini-chat-avatar img {
+  image-rendering: auto;
+}
+.mini-chat-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-on-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mini-chat-controls {
+  display: flex;
+  gap: 2px;
+}
+.mini-chat-btn {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: var(--text-on-accent);
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  line-height: 24px;
+  text-align: center;
+  cursor: pointer;
+  padding: 0;
+}
+.mini-chat-btn:hover {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+/* Body */
+.mini-chat-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.mini-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mini-chat-msg {
+  max-width: 100%;
+  padding: 6px 12px;
+  border-radius: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  border-left: 2px solid var(--border);
+}
+.mini-chat-msg-user {
+  align-self: stretch;
+  background: transparent;
+  color: var(--text-secondary);
+  border-left-color: var(--text-muted);
+}
+.mini-chat-msg-assistant {
+  align-self: stretch;
+  background: transparent;
+  color: var(--text-primary);
+  border-left-color: var(--accent);
+}
+.mini-chat-msg-assistant a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.mini-chat-msg-assistant code {
+  background: var(--bg-tertiary);
+  padding: 1px 4px;
+  border-radius: 0;
+  font-size: 12px;
+}
+.mini-chat-msg-assistant pre.mini-chat-code {
+  background: var(--bg-tertiary);
+  padding: 6px 8px;
+  border-radius: 0;
+  font-size: 11px;
+  overflow-x: auto;
+  margin: 4px 0;
+  white-space: pre-wrap;
+}
+.mini-chat-streaming {
+  opacity: 0.85;
+}
+
+/* Tool step indicator (▶ toolName…) */
+.mini-chat-tool-step {
+  font-size: 10px;
+  color: var(--kinetic-sage, #8fb0a0);
+  font-family: var(--font-mono);
+  margin-top: 4px;
+  opacity: 0.75;
+}
+
+/* Thinking indicator */
+.mini-chat-thinking {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.35);
+  font-family: var(--font-mono);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Feedback buttons */
+.mini-chat-feedback {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.mini-chat-fb-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  opacity: 0.6;
+  transition: opacity 0.15s, background 0.15s;
+}
+.mini-chat-fb-btn:hover {
+  opacity: 1;
+  background: var(--bg-secondary);
+}
+.mini-chat-fb-done {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.mini-chat-dots {
+  animation: miniChatDots 1s infinite;
+  display: inline-block;
+}
+@keyframes miniChatDots {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Input */
+.mini-chat-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.mini-chat-input {
+  flex: 1;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 0;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: var(--text-primary);
+  outline: none;
+}
+.mini-chat-input:focus {
+  border-color: var(--accent);
+}
+.mini-chat-input:disabled {
+  opacity: 0.5;
+}
+.mini-chat-send {
+  background: var(--accent);
+  border: none;
+  color: var(--text-on-accent);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.mini-chat-send:hover {
+  filter: brightness(1.1);
+}
+
+/* ═══ Mini-Chat Unread Badge ═══ */
+.mini-chat-unread {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--status-error);
+  color: var(--text-on-accent);
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  padding: 0 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+  line-height: 1;
+}
+
+/* ═══ Agent Dock / Tray (FB Messenger–style) ═══ */
+.agent-dock {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0;
+  z-index: 8999; /* just below mini-chat popups */
+  pointer-events: none;
+}
+
+/* Toggle button  */
+.agent-dock-toggle {
+  pointer-events: all;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+  flex-shrink: 0;
+}
+.agent-dock-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+  border-color: var(--accent-muted);
+}
+
+/* Items container */
+.agent-dock-items {
+  display: flex;
+  flex-direction: column-reverse; /* newest at bottom */
+  gap: 8px;
+  transition:
+    opacity 0.2s,
+    max-height 0.3s ease;
+  max-height: 600px;
+  opacity: 1;
+  overflow: visible; /* allow tooltips to extend outside */
+}
+.agent-dock-collapsed .agent-dock-items {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.agent-dock-item {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  cursor: pointer;
+  pointer-events: all;
+  transition: border-color 0.15s;
+  border: 2px solid transparent;
+}
+.agent-dock-item:hover {
+  border-color: var(--accent);
+}
+.agent-dock-active {
+  border-color: var(--accent);
+}
+.agent-dock-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  user-select: none;
+}
+.agent-dock-avatar img {
+  image-rendering: auto;
+}
+
+/* Hover tooltip — appears to the left of the avatar */
+.agent-dock-tooltip {
+  position: absolute;
+  right: 56px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.agent-dock-tooltip::after {
+  content: '';
+  position: absolute;
+  right: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 5px solid transparent;
+  border-right: none;
+  border-left-color: var(--border);
+}
+.agent-dock-item:hover .agent-dock-tooltip {
+  opacity: 1;
+}
+
+.agent-dock-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  background: var(--status-error);
+  color: var(--text-on-accent);
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 18px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  border: 2px solid var(--bg-primary);
+  pointer-events: none;
+}
+
+/* ═══ Agent Dock — New Group Button ═══ */
+.agent-dock-new-group {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px dashed var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  margin-top: 4px;
+}
+.agent-dock-new-group:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(var(--accent-rgb, 59,130,246), 0.1);
+}
+
+/* ═══ Agent Dock — Streaming Indicator ═══ */
+.agent-dock-streaming .agent-dock-avatar {
+  animation: dockBreathe 2s ease-in-out infinite;
+}
+@keyframes dockBreathe {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent); }
+  50% { box-shadow: 0 0 8px 3px var(--accent); }
+}
+
+/* ═══ Mini-Hub Windows (Phase 3+) ═══ */
+.mini-hub {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.28),
+    0 2px 8px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(16px) scale(0.97);
+  animation: miniHubAppear 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  /* Responsive constraints */
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  min-width: 260px;
+  min-height: 220px;
+}
+@keyframes miniHubAppear {
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Minimized state */
+.mini-hub-minimized {
+  height: 0 !important;
+  width: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* ── Titlebar ── */
+.mini-hub-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: grab;
+  user-select: none;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  flex-shrink: 0;
+  border-radius: 12px 12px 0 0;
+}
+.mini-hub-titlebar:active {
+  cursor: grabbing;
+}
+.mini-hub-avatar {
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.mini-hub-avatar img {
+  image-rendering: auto;
+  border-radius: 4px;
+}
+.mini-hub-title {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.01em;
+}
+
+/* Streaming pulsing dot in titlebar */
+.mini-hub-streaming-dot {
+  display: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-on-accent);
+  flex-shrink: 0;
+}
+.mini-hub-streaming-dot.active {
+  display: inline-block;
+  animation: miniHubPulse 1.2s ease-in-out infinite;
+}
+@keyframes miniHubPulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+/* Unread badge in titlebar */
+.mini-hub-unread-badge {
+  background: var(--status-error);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* Titlebar button group */
+.mini-hub-btn-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* Titlebar buttons */
+.mini-hub-minimize,
+.mini-hub-maximize,
+.mini-hub-close {
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  color: var(--text-on-accent);
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.mini-hub-minimize .ms,
+.mini-hub-maximize .ms,
+.mini-hub-close .ms {
+  font-size: 15px;
+}
+.mini-hub-minimize:hover,
+.mini-hub-maximize:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+.mini-hub-close:hover {
+  background: rgba(220, 38, 38, 0.85);
+}
+
+/* ── Toolbar (below titlebar) ── */
+.mini-hub-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Model selector in toolbar */
+.mini-hub-model-select {
+  font-size: 11px;
+  padding: 3px 8px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  transition: border-color 0.15s;
+}
+.mini-hub-model-select:hover {
+  border-color: var(--accent-muted);
+}
+.mini-hub-model-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.mini-hub-model-select option {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* ── Messages ── */
+.mini-hub-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  background: var(--bg-primary);
+}
+
+/* Compact message sizing for mini-hub */
+.mini-hub-messages .message {
+  margin-bottom: 4px;
+}
+.mini-hub-messages .message-content {
+  font-size: 12.5px;
+  line-height: 1.55;
+  padding: 4px 0;
+}
+.mini-hub-messages .message.user .message-content {
+  border-left-width: 2px;
+  padding-left: 10px;
+}
+.mini-hub-messages .message.assistant .message-content {
+  border-left-width: 2px;
+  padding-left: 10px;
+}
+.mini-hub-messages .message-prefix {
+  font-size: 10px;
+  margin-bottom: 1px;
+}
+.mini-hub-messages .message-time {
+  font-size: 10px;
+  padding-left: 12px;
+}
+
+/* Compact code blocks */
+.mini-hub-messages pre {
+  font-size: 11.5px;
+  padding: 8px 10px;
+  margin: 4px 0;
+  border-radius: 6px;
+}
+.mini-hub-messages code {
+  font-size: 11.5px;
+}
+
+/* Compact thinking blocks */
+.mini-hub-messages .thinking-block {
+  margin-bottom: 4px;
+}
+.mini-hub-messages .thinking-block summary {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+.mini-hub-messages .thinking-content {
+  padding: 6px 8px;
+  font-size: 11px;
+  max-height: 150px;
+}
+
+/* Compact lists */
+.mini-hub-messages ul,
+.mini-hub-messages ol {
+  padding-left: 18px;
+  margin: 4px 0;
+}
+.mini-hub-messages li {
+  margin-bottom: 2px;
+  font-size: 12.5px;
+}
+
+/* Scrollbar styling for mini-hub */
+.mini-hub-messages::-webkit-scrollbar {
+  width: 5px;
+}
+.mini-hub-messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mini-hub-messages::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 4px;
+  opacity: 0.3;
+}
+.mini-hub-messages::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* ── Input area ── */
+.mini-hub-input-area {
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--bg-primary);
+  border-radius: 0 0 12px 12px;
+}
+
+/* Input row layout for mini-hub */
+.mini-hub-input-area .chat-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.mini-hub-input-area .chat-input {
+  font-size: 13px;
+  padding: 6px 4px;
+  max-height: 80px;
+}
+.mini-hub-input-area .chat-attach-btn {
+  width: 30px;
+  height: 30px;
+}
+.mini-hub-input-area .chat-attach-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.mini-hub-input-area .chat-send {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+.mini-hub-input-area .chat-send svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ── Streaming border glow ── */
+.mini-hub-streaming {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 16px rgba(var(--accent-rgb, 99, 102, 241), 0.2),
+    0 8px 32px rgba(0, 0, 0, 0.28);
+}
+
+/* ── Drag-and-drop overlay ── */
+.mini-hub-messages.drag-active {
+  background: var(--accent-subtle);
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
+/* ── Talk mode (voice) in mini-hub ── */
+.mini-hub-input-area .chat-talk-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+.mini-hub-input-area .chat-talk-btn .ms {
+  font-size: 16px;
+}
+.mini-hub-input-area .chat-talk-btn.talk-active {
+  color: var(--status-error);
+  animation: miniHubTalkPulse 1s ease-in-out infinite;
+}
+@keyframes miniHubTalkPulse {
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ── Attachment preview in mini-hub ── */
+.mini-hub-input-area .chat-attachment-preview {
+  padding: 4px 8px;
+  gap: 4px;
+  max-height: 60px;
+  overflow-y: auto;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid var(--border);
+}
+.mini-hub-input-area .attachment-chip {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+/* ═══ Multi-Agent (Squad) Message Styling ═══ */
+
+/* Colored agent prefix in squad messages */
+.mini-hub-messages .message-prefix {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  transition: color 0.15s;
+}
+
+/* Squad avatar inline (next to agent name in messages) */
+.squad-avatar-inline {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+  display: inline-block;
+}
+
+/* ═══ Agent Dock — Focus & Active Enhancements ═══ */
+
+/* Active hub ring with subtle glow */
+.agent-dock-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+/* Hover scale-up */
+.agent-dock-item {
+  transition: border-color 0.15s, transform 0.15s;
+}
+.agent-dock-item:hover {
+  transform: scale(1.08);
+}
+.agent-dock-item:active {
+  transform: scale(0.96);
+}
+
+/* Dock toggle — accent glow when hubs are open */
+.agent-dock-toggle.has-active-hubs {
+  border-color: var(--accent-muted);
+  color: var(--accent);
+}
+
+/* ── Push dock above the chat input when chat view is visible ── */
+:root:has(#chat-view.active) .agent-dock {
+  bottom: 80px;
+}

@@ -1,0 +1,50 @@
+---
+title: "Discord"
+description: "Connect a Discord bot to your Pawz agents."
+---
+
+# Discord
+
+Connect a Discord bot to your Pawz agents.
+
+## Setup
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
+2. Create a new application
+3. Go to **Bot** → create a bot → copy the token
+4. Enable **Message Content Intent** under Privileged Gateway Intents
+5. Invite the bot to your server with the OAuth2 URL generator (scopes: `bot`, permissions: `Send Messages`, `Read Message History`)
+6. Copy your **Server (Guild) ID**: enable Developer Mode in Discord → Settings → App Settings → Advanced, then right-click the server name and select **Copy Server ID**
+7. In Pawz, go to **Settings → Channels**
+8. Select **Discord**
+9. Paste your **Bot Token** and **Server ID**
+10. Start the channel
+
+## Configuration
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| Bot token | Yes | From Discord Developer Portal |
+| Server (Guild) ID | No | Right-click your server → Copy Server ID (enable Developer Mode first). Needed for server management features like listing channels, roles, and members. |
+| DM policy | Yes | Who can message the bot |
+| Allowed users | For allowlist | Discord usernames |
+
+## Features
+
+- DMs and server channel messages
+- Per-user sessions with memory
+- Long messages auto-split for Discord's 2000 char limit
+- Prompt injection scanning
+- Agent routing via channel routing rules
+
+## Routing
+
+Route specific channels or users to different agents using routing rules:
+
+- **Channel ID filter** — route messages from specific Discord channels
+- **User filter** — route messages from specific users
+
+## Tips
+
+- Use `DISCORD_BOT_TOKEN` in the Skills vault if you also want agents to send messages proactively via the Discord skill
+- The bot responds to mentions and DMs by default

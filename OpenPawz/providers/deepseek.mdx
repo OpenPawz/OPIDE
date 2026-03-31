@@ -1,0 +1,45 @@
+---
+title: "DeepSeek"
+description: "Use DeepSeek's reasoning and coding models."
+---
+
+# DeepSeek
+
+Use DeepSeek's reasoning and coding models.
+
+## Setup
+
+1. Get an API key at [platform.deepseek.com](https://platform.deepseek.com/)
+2. In Pawz → **Settings → Providers** → **Add Provider** → **DeepSeek**
+3. Paste your API key
+
+## Configuration
+
+| Setting | Default |
+|---------|---------|
+| Base URL | `https://api.deepseek.com/v1` |
+| API key | Required |
+| Default model | — |
+
+## Models
+
+| Model | Context | Best for |
+|-------|---------|----------|
+| `deepseek-chat` | 64K | General conversation, coding, analysis |
+| `deepseek-reasoner` | 64K | Complex multi-step reasoning with chain-of-thought |
+
+## Reasoning tokens
+
+The `deepseek-reasoner` model uses extended "thinking" tokens during complex tasks. These reasoning tokens count toward your usage but produce significantly better results on math, logic, and multi-step problems. Pawz displays thinking content in a collapsible block in the chat UI.
+
+## Cost
+
+DeepSeek is one of the most affordable providers — significantly cheaper than OpenAI or Anthropic for comparable quality. A great choice as a `worker_model` in multi-agent orchestration.
+
+## Tips
+
+:::tip
+- **Use `deepseek-chat` as your `cheap_model`** — excellent quality at a fraction of frontier model pricing.
+- **Pair with Ollama** — test locally with Ollama, then use DeepSeek for production tasks that need a hosted model.
+- DeepSeek uses an OpenAI-compatible API, so it works through the standard `OpenAiProvider`.
+:::

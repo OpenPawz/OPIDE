@@ -1,0 +1,17 @@
+[package]
+name = "opide-sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "OPIDE Execution Engine — sandboxed JS runtime for agent code execution"
+
+[dependencies]
+# JS sandbox (dynamic agent code)
+rquickjs = { version = "0.8", features = ["bindgen", "parallel"] }
+
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"

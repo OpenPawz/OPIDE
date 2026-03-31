@@ -1,0 +1,50 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+serde_json.workspace = true
+serde.workspace = true
+log.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+
+tauri = { version = "2.10.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+
+# Utility (used in lib.rs for multi-window URL encoding)
+urlencoding = "2"
+
+# OpenPawz engine — pulled in as a local path dependency (NOT workspace member)
+openpawz = { path = "../OpenPawz/src-tauri", default-features = false }
+
+# OPIDE ↔ OpenPawz bridge — hook implementations
+opide-bridge = { path = "../crates/opide-bridge" }
+
+# OPIDE Shell — terminal, git, LSP, DAP, watcher, search, extensions
+opide-shell = { path = "../crates/opide-shell" }
+
+# OPIDE AI — AST indexer, WASM skills, tool executor, diff editor
+opide-ai = { path = "../crates/opide-ai" }
