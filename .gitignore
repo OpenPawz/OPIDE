@@ -38,3 +38,6 @@ src-tauri/flipcash/
 # Internal plan docs
 ACTIVITY-FEED-UPGRADE-PLAN.md
 INDEXER-FIX-PLAN.md
+
+# OVST runtime — proprietary extension host implementation
+crates/opide-shell/src/extension_host.rs

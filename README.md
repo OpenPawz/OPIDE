@@ -243,14 +243,9 @@ No raw filesystem access. No network access. No child process spawning outside t
 
 ## OVST Extensions
 
-OPIDE does **not** use VS Code's extension API. It runs its own extension system:
+OPIDE does **not** use VS Code's extension API. It runs **OVST** (OPIDE Virtual Sidecar Transport) — a proprietary extension runtime built from the ground up in Rust.
 
-- **Node.js sidecar process** — extensions get full Node.js capabilities (fs, child_process, net)
-- **JSON-RPC communication** — Content-Length framed messages over stdio
-- **Auto-restart on crash** — health monitoring with crash counter to prevent infinite loops
-- **No sandbox restrictions** — extensions are trusted code with full system access
-
-This is simpler, faster, and more powerful than VS Code's sandboxed extension host.
+OVST is the first working extension system for a Rust-native IDE. The runtime source is not included in this repository. The public API and stub fallbacks are provided so the IDE compiles and runs without extension support — full OVST is available in OPIDE V2.
 
 ---
 
