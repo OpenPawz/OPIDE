@@ -41,3 +41,8 @@ INDEXER-FIX-PLAN.md
 
 # OVST runtime — proprietary extension host implementation
 crates/opide-shell/src/extension_host.rs
+
+# Internal docs — never commit
+OpenPawz/.AGENT_EXECUTION_ROADMAP.md
+OpenPawz/.paw-architecture.md
+OpenPawz/docs/.flow_strategy.md
