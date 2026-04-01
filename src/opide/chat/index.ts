@@ -860,7 +860,7 @@ export function registerOpideChat(): void {
       })
       loadAgents().catch(() => {})
       loadSessions().catch(() => {})
-      loadModels().catch(() => {})
+      loadModels().then(() => updateModelSelect()).catch(() => {})
       listen('provider-updated', () => updateModelSelect()).catch(() => {})
 
       return {

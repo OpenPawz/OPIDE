@@ -80,17 +80,25 @@ export function renderProviderSetup(): void {
   async function buildConfigArea(pDef: typeof PROVIDER_DEFS[0]): Promise<void> {
     configArea.innerHTML = ''
 
+    // Load existing saved provider data
+    let existing: any = null
+    try {
+      const config = await invoke<any>('engine_get_config')
+      existing = config?.providers?.find((p: any) => p.id === pDef.id) ?? null
+    } catch { /* no config yet */ }
+
     const keyLabel = lbl('API Key')
     configArea.appendChild(keyLabel)
     const keyInp = inp()
     keyInp.type = 'password'
     keyInp.placeholder = pDef.placeholder
+    if (existing?.api_key) keyInp.value = existing.api_key
     configArea.appendChild(keyInp)
 
     const urlLabel = lbl('Base URL')
     configArea.appendChild(urlLabel)
     const urlInp = inp()
-    urlInp.value = pDef.url
+    urlInp.value = existing?.base_url || pDef.url
     urlInp.placeholder = 'https://api.example.com/v1'
     configArea.appendChild(urlInp)
 
@@ -102,16 +110,12 @@ export function renderProviderSetup(): void {
     configArea.appendChild(lbl('Model'))
     const modelInp = inp()
     modelInp.placeholder = 'Type or click a preset below'
+    if (existing?.default_model) modelInp.value = existing.default_model
     configArea.appendChild(modelInp)
 
     // Model selection: click to set default, checkboxes to enable in dropdown
-    // Load existing enabled_models from config if this provider was previously saved
     let existingEnabled: string[] | null = null
-    try {
-      const config = await invoke<any>('engine_get_config')
-      const existing = config?.providers?.find((p: any) => p.id === pDef.id)
-      if (existing?.enabled_models?.length) existingEnabled = existing.enabled_models
-    } catch { /* no config yet */ }
+    if (existing?.enabled_models?.length) existingEnabled = existing.enabled_models
     const enabledSet = new Set<string>(existingEnabled ?? pDef.models)
     if (pDef.models.length) {
       configArea.appendChild(lbl('Available Models (check to show in selector, click to set default)'))

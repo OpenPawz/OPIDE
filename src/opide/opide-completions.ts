@@ -7,13 +7,13 @@
  * Uses OpenPawz engine with a lightweight completion prompt.
  * Debounced — only triggers after the user pauses typing.
  *
- * This module registers the completion infrastructure.
- * Actual editor integration (inline suggestions API) will be wired
- * when the editor pipeline is fully functional.
+ * Registers as a Monaco InlineCompletionsProvider so suggestions
+ * appear as native ghost text in the editor.
  */
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getService, ICodeEditorService } from '@codingame/monaco-vscode-api/services'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -33,25 +33,97 @@ let _debounceTimer: ReturnType<typeof setTimeout> | null = null
 let _currentRunId: string | null = null
 let _unlisten: UnlistenFn | null = null
 let _lastSuggestion: string | null = null
+let _providerDisposable: any = null
 
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 export function registerGhostCompletions(): void {
   if (!ENABLED) return
 
-  // TODO: When editor integration is complete, hook into:
-  //   - monaco.editor.onDidChangeModelContent → trigger debounced completion
-  //   - monaco.languages.registerInlineCompletionsProvider → show ghost text
-  //   - Tab key → accept suggestion
-  //   - Esc / any other key → dismiss
-  //
-  // For now, the infrastructure is ready. The functions below handle
-  // the LLM communication. They'll be wired to the editor in a follow-up.
+  // We need to wait for the editor service to be available, then register
+  // our inline completion provider on all languages.
+  registerInlineProvider().catch((e) => {
+    console.warn('[opide-completions] initial registration deferred, retrying in 3s:', e)
+    // Retry once after workbench is more likely ready
+    setTimeout(() => registerInlineProvider().catch(console.warn), 3000)
+  })
 
-  console.log('[opide-completions] ghost completion engine registered (awaiting editor integration)')
+  console.log('[opide-completions] ghost completion engine registered')
 }
 
-// ─── Completion Functions (ready for editor wiring) ──────────────────────────
+async function registerInlineProvider(): Promise<void> {
+  const monaco = await import('monaco-editor')
+  const editorService = await getService(ICodeEditorService)
+
+  // Dispose previous registration if re-registering
+  _providerDisposable?.dispose()
+
+  // Register for all languages (wildcard)
+  _providerDisposable = monaco.languages.registerInlineCompletionsProvider(
+    { pattern: '**' },
+    {
+      provideInlineCompletions: async (model: any, position: any, _context: any, token: any) => {
+        // Only trigger if the active editor matches this model
+        const activeEditor = (editorService as any).getActiveCodeEditor?.()
+        if (!activeEditor || activeEditor.getModel?.() !== model) {
+          return { items: [] }
+        }
+
+        // Don't trigger inside comments or strings if position is at start of line
+        // (simple heuristic — let the LLM decide for more complex cases)
+
+        // Get code before cursor
+        const range = new (monaco as any).Range(1, 1, position.lineNumber, position.column)
+        const codeBeforeCursor = model.getValueInRange(range)
+
+        // Debounce: cancel previous pending request
+        cancelCompletion()
+
+        // Check cancellation
+        if (token.isCancellationRequested) return { items: [] }
+
+        // Wait for debounce
+        const shouldProceed = await new Promise<boolean>((resolve) => {
+          if (_debounceTimer) clearTimeout(_debounceTimer)
+          _debounceTimer = setTimeout(() => resolve(true), DEBOUNCE_MS)
+          token.onCancellationRequested(() => {
+            if (_debounceTimer) clearTimeout(_debounceTimer)
+            resolve(false)
+          })
+        })
+
+        if (!shouldProceed || token.isCancellationRequested) return { items: [] }
+
+        // Request completion from engine
+        const language = model.getLanguageId()
+        const filePath = model.uri.fsPath || model.uri.path
+        const suggestion = await requestCompletion(codeBeforeCursor, filePath, language)
+
+        if (!suggestion || token.isCancellationRequested) return { items: [] }
+
+        return {
+          items: [{
+            insertText: suggestion,
+            range: new (monaco as any).Range(
+              position.lineNumber,
+              position.column,
+              position.lineNumber,
+              position.column,
+            ),
+          }],
+        }
+      },
+
+      freeInlineCompletions: () => {
+        // Nothing to clean up
+      },
+    },
+  )
+
+  console.log('[opide-completions] inline completion provider registered on all languages')
+}
+
+// ─── Completion Functions ───────────────────────────────────────────────────
 
 /**
  * Trigger a ghost completion request. Called when the user pauses typing.
@@ -119,6 +191,10 @@ export function cancelCompletion(): void {
   _lastSuggestion = null
   _unlisten?.()
   _unlisten = null
+  if (_debounceTimer) {
+    clearTimeout(_debounceTimer)
+    _debounceTimer = null
+  }
 }
 
 /**

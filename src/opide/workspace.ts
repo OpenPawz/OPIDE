@@ -148,8 +148,10 @@ export async function listenForWorkspaceOpen(): Promise<void> {
 
     console.log('[opide-workspace] Agent opening workspace:', path)
 
+    let opened = false
+
+    // Attempt 1: Use VS Code's IWorkspaceEditingService.addFolders
     try {
-      // Use VS Code's IWorkspaceEditingService — REPLACE current workspace, not just add
       const { getService, IWorkspaceEditingService, IWorkspaceContextService } = await import(
         '@codingame/monaco-vscode-api/services'
       )
@@ -166,51 +168,59 @@ export async function listenForWorkspaceOpen(): Promise<void> {
           }
         }
 
-        // Add the new folder
         await editingService.addFolders([{ uri: URI.file(path) }])
-        console.log('[opide-workspace] Workspace replaced with:', path)
 
-        // Update hash so it persists across manual reloads
-        window.location.hash = encodeURIComponent(path)
+        // Verify addFolders actually worked — give the context service a tick to sync,
+        // then check if the folder appears in the workspace
+        await new Promise((r) => setTimeout(r, 100))
+        const folders = ctxService?.getWorkspace?.()?.folders ?? []
+        const folderAdded = folders.some((f: any) => f.uri?.path === path)
 
-        // Initialize workspace services for the new folder
-        try {
-          await initScmProvider(path)
-        } catch (e) {
-          console.warn('[opide-workspace] SCM init for new folder:', e)
+        if (folderAdded) {
+          console.log('[opide-workspace] Workspace replaced with:', path)
+          window.location.hash = encodeURIComponent(path)
+
+          // Initialize workspace services for the new folder
+          try { await initScmProvider(path) } catch (e) {
+            console.warn('[opide-workspace] SCM init for new folder:', e)
+          }
+          try { await registerSearchProviders(path) } catch (e) {
+            console.warn('[opide-workspace] Search init for new folder:', e)
+          }
+          opened = true
+        } else {
+          console.warn('[opide-workspace] addFolders returned but folder not in workspace — falling through')
         }
-        try {
-          await registerSearchProviders(path)
-        } catch (e) {
-          console.warn('[opide-workspace] Search init for new folder:', e)
-        }
-
-        return
       }
     } catch (e) {
-      console.warn('[opide-workspace] addFolders failed, trying enterWorkspace:', e)
+      console.warn('[opide-workspace] addFolders failed:', e)
     }
 
-    // Fallback: try enterWorkspace
-    try {
-      const { getService, IWorkspaceEditingService } = await import(
-        '@codingame/monaco-vscode-api/services'
-      )
-      const editingService = (await getService(IWorkspaceEditingService)) as any
-      if (editingService?.enterWorkspace) {
-        await editingService.enterWorkspace(URI.file(path))
-        window.location.hash = encodeURIComponent(path)
-        return
+    // Attempt 2: try enterWorkspace
+    if (!opened) {
+      try {
+        const { getService, IWorkspaceEditingService } = await import(
+          '@codingame/monaco-vscode-api/services'
+        )
+        const editingService = (await getService(IWorkspaceEditingService)) as any
+        if (editingService?.enterWorkspace) {
+          await editingService.enterWorkspace(URI.file(path))
+          window.location.hash = encodeURIComponent(path)
+          opened = true
+        }
+      } catch (e) {
+        console.warn('[opide-workspace] enterWorkspace failed:', e)
       }
-    } catch (e) {
-      console.warn('[opide-workspace] enterWorkspace failed:', e)
     }
 
-    // Last resort: update hash for next manual reload but DO NOT auto-reload.
-    // Reloading destroys chat state, streaming context, and pending tool calls.
-    // The workspace will be picked up on the next manual restart.
-    console.warn('[opide-workspace] All API methods failed — updated hash but NOT reloading to preserve chat state')
-    window.location.hash = encodeURIComponent(path)
+    // Attempt 3: reload the page with the new workspace in the hash.
+    // This destroys chat state but is the only reliable way to open a new
+    // workspace when the Monaco API methods silently fail.
+    if (!opened) {
+      console.warn('[opide-workspace] API methods failed — reloading to open workspace')
+      window.location.hash = encodeURIComponent(path)
+      window.location.reload()
+    }
   })
 }
 

@@ -359,10 +359,21 @@ fn mcp_tool_to_paw_def(server_id: &str, tool: &McpToolDef) -> ToolDefinition {
         (prefixed, desc)
     };
 
+    // Sanitize tool name for API compatibility:
+    // - Replace hyphens and dots with underscores (some APIs reject them)
+    // - Strip any char that isn't alphanumeric or underscore
+    // - Truncate to 64 chars (OpenAI/Azure limit)
+    let sanitized_name: String = clean_name
+        .replace(['-', '.'], "_")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect();
+
     ToolDefinition {
         tool_type: "function".into(),
         function: FunctionDefinition {
-            name: clean_name,
+            name: sanitized_name,
             description,
             parameters: tool.input_schema.clone(),
         },
@@ -415,6 +426,7 @@ fn pascal_to_snake(name: &str) -> String {
 /// Given a tool name with the `mcp_` prefix stripped (i.e. `{server_id}_{tool_name}`),
 /// find the matching server and original tool name.
 /// We need this because server IDs themselves may contain underscores.
+/// Also handles sanitized names where hyphens/dots were replaced with underscores.
 fn find_server_and_tool<'a>(
     stripped: &'a str,
     clients: &'a HashMap<String, McpClient>,
@@ -424,7 +436,15 @@ fn find_server_and_tool<'a>(
     ids.sort_by_key(|b| std::cmp::Reverse(b.len())); // longest first
 
     for id in ids {
+        // Try exact match first
         if let Some(rest) = stripped.strip_prefix(id.as_str()) {
+            if let Some(tool_name) = rest.strip_prefix('_') {
+                return Some((id.as_str(), tool_name));
+            }
+        }
+        // Try sanitized match (hyphens/dots → underscores)
+        let sanitized_id = id.replace(['-', '.'], "_");
+        if let Some(rest) = stripped.strip_prefix(sanitized_id.as_str()) {
             if let Some(tool_name) = rest.strip_prefix('_') {
                 return Some((id.as_str(), tool_name));
             }

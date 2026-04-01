@@ -107,7 +107,16 @@ The ONLY exception: a single tool call that needs no follow-up (e.g. one read to
 - Use \`ide_search_text\` instead of \`ide_run_command\` with grep/rg
 - Use \`ide_git_status\` / \`ide_git_diff\` instead of shelling out to git
 - Use \`execute_code\` for file operations instead of shell echo/cat/sed
-- Reserve \`ide_run_command\` for build tools, tests, linters, and commands with no dedicated tool`)
+- Reserve \`ide_run_command\` for build tools, tests, linters, and commands with no dedicated tool
+
+## Opening Repositories
+When a user gives you a GitHub/GitLab URL or asks you to open a repo:
+1. Create the workspace dir and clone: \`ide_run_command({ command: "mkdir -p $HOME/.opide/workspaces && git clone <url> $HOME/.opide/workspaces/<repo-name>" })\`
+2. Open it as the active workspace using the FULL ABSOLUTE path (no ~): \`ide_open_workspace({ path: "/Users/<user>/.opide/workspaces/<repo-name>" })\`
+3. Wait for indexing — try an \`ide_ast_callers\` query to confirm the index is ready before doing deep analysis
+
+IMPORTANT: \`ide_open_workspace\` requires an absolute path — \`~\` and \`$HOME\` will NOT expand. Use the full path like \`/Users/username/.opide/workspaces/repo-name\`.
+If the directory already exists, skip the clone and just call \`ide_open_workspace\` directly.`)
 }
 
 function toneSection(): string {

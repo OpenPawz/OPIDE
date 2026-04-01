@@ -89,7 +89,7 @@ function handleNotification(server: LspServerState, method: string, params: any)
   switch (method) {
     case 'textDocument/publishDiagnostics':
       console.log(`[opide-lsp:${server.language}] diagnostics for ${params?.uri}: ${params?.diagnostics?.length ?? 0} issues`)
-      // TODO: Forward to monaco's diagnostic system
+      publishDiagnosticsToMonaco(params)
       break
 
     case 'window/logMessage':
@@ -99,6 +99,62 @@ function handleNotification(server: LspServerState, method: string, params: any)
 
     default:
       console.debug(`[opide-lsp:${server.language}] notification: ${method}`)
+  }
+}
+
+// ─── Diagnostics → Monaco Markers ──────────────────────────────────────────
+
+/** LSP DiagnosticSeverity → Monaco MarkerSeverity */
+function lspSeverityToMonaco(severity: number | undefined): number {
+  // LSP: 1=Error, 2=Warning, 3=Information, 4=Hint
+  // Monaco MarkerSeverity: 1=Hint, 2=Info, 4=Warning, 8=Error
+  switch (severity) {
+    case 1: return 8  // Error
+    case 2: return 4  // Warning
+    case 3: return 2  // Info
+    case 4: return 1  // Hint
+    default: return 2 // Info
+  }
+}
+
+/**
+ * Forward LSP publishDiagnostics to Monaco's marker system so errors/warnings
+ * show as squiggly underlines in the editor.
+ */
+async function publishDiagnosticsToMonaco(params: any): Promise<void> {
+  if (!params?.uri) return
+  try {
+    const monaco = await import('monaco-editor')
+    const uri = monaco.Uri.parse(params.uri)
+    const model = monaco.editor.getModel(uri)
+    if (!model) {
+      console.debug('[opide-lsp] no model for URI, skipping diagnostics:', params.uri)
+      return
+    }
+
+    const markers = (params.diagnostics ?? []).map((d: any) => ({
+      severity: lspSeverityToMonaco(d.severity),
+      message: d.message || 'Unknown issue',
+      source: d.source || 'lsp',
+      code: typeof d.code === 'object' ? d.code?.value?.toString() : d.code?.toString(),
+      startLineNumber: (d.range?.start?.line ?? 0) + 1,
+      startColumn: (d.range?.start?.character ?? 0) + 1,
+      endLineNumber: (d.range?.end?.line ?? 0) + 1,
+      endColumn: (d.range?.end?.character ?? 0) + 1,
+      relatedInformation: d.relatedInformation?.map((ri: any) => ({
+        resource: monaco.Uri.parse(ri.location?.uri ?? ''),
+        message: ri.message ?? '',
+        startLineNumber: (ri.location?.range?.start?.line ?? 0) + 1,
+        startColumn: (ri.location?.range?.start?.character ?? 0) + 1,
+        endLineNumber: (ri.location?.range?.end?.line ?? 0) + 1,
+        endColumn: (ri.location?.range?.end?.character ?? 0) + 1,
+      })),
+    }))
+
+    monaco.editor.setModelMarkers(model, 'lsp', markers)
+    console.debug(`[opide-lsp] set ${markers.length} markers on ${params.uri}`)
+  } catch (e) {
+    console.warn('[opide-lsp] failed to publish diagnostics to Monaco:', e)
   }
 }
 

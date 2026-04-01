@@ -112,10 +112,13 @@ export async function initToolBridge(): Promise<void> {
         `\x1b[90m[exit: ${exit_code}]\x1b[0m\r\n`,
       ].join('')
 
+      // Display-only: emit as terminal-data (renders in xterm.js) NOT terminal_write
+      // (which would pipe text into the shell's stdin as if the user typed it)
       try {
-        await invoke('terminal_write', { terminalId: _activeTerminalId, data: output })
+        const { emit } = await import('@tauri-apps/api/event')
+        await emit('terminal-data', { terminal_id: _activeTerminalId, data: output })
       } catch (e) {
-        console.warn('[opide-tool-bridge] agent-command-echo terminal write failed:', e)
+        console.warn('[opide-tool-bridge] agent-command-echo display failed:', e)
       }
     }
   ).catch(e => console.warn('[opide-tool-bridge] agent-command-echo listener failed:', e))

@@ -129,7 +129,9 @@ pub async fn ide_run_command(
     command: String,
     cwd: Option<String>,
 ) -> Result<CommandResult, String> {
-    let cwd = cwd.unwrap_or_else(|| "/tmp".to_string());
+    let cwd = cwd.unwrap_or_else(|| {
+        std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+    });
 
     let output = tokio::process::Command::new("zsh")
         .arg("-l")
