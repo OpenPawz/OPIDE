@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License" />
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License" />
   <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="Rust" />
   <img src="https://img.shields.io/badge/tauri-2.x-blue" alt="Tauri" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-green" alt="Platform" />
@@ -315,7 +315,7 @@ On first launch, the provider setup panel appears. Pick a provider, paste your A
 
 ## Contributing
 
-We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+We welcome contributions — open an issue or submit a PR.
 
 1. Fork the repo
 2. Create a feature branch (`git checkout -b feat/my-feature`)
@@ -335,9 +335,7 @@ We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-OPIDE is licensed under the [GNU Affero General Public License v3.0](LICENSE).
-
-You are free to use, modify, and distribute OPIDE. If you run a modified version as a service, you must make your source code available under the same license.
+OPIDE is licensed under the [Apache License 2.0](LICENSE).
 
 ---
 
