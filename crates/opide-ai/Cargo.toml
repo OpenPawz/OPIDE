@@ -2,6 +2,7 @@
 name = "opide-ai"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 description = "OPIDE AI — AST indexer, WASM skill registry, tool executor, diff editor, embeddings"
 
 [dependencies]

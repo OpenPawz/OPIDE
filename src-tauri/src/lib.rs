@@ -143,6 +143,26 @@ pub fn run() {
                 // Skill library seeding (startup noise)
                 .level_for("paw_temp_lib::engine::engram::skill_library", log::LevelFilter::Warn)
                 .level_for("paw_temp_lib::engine::skills", log::LevelFilter::Warn)
+
+                // MCP server lifecycle (spawning, connecting, tool counts)
+                .level_for("paw_temp_lib::engine::mcp::client", log::LevelFilter::Warn)
+                .level_for("paw_temp_lib::engine::mcp::transport", log::LevelFilter::Warn)
+
+                // Extension host / bridge (adapter scan, registration)
+                .level_for("opide_shell::extension_host", log::LevelFilter::Warn)
+
+                // File watcher (watch/unwatch every folder open)
+                .level_for("opide_shell::watcher", log::LevelFilter::Warn)
+
+                // Terminal spawn/kill
+                .level_for("opide_shell::terminal", log::LevelFilter::Warn)
+
+                // Indexer (workspace open, cache load)
+                .level_for("opide_ai::indexer", log::LevelFilter::Warn)
+                .level_for("opide_ai::indexer::index", log::LevelFilter::Warn)
+
+                // Bridge (procedural memory seeding)
+                .level_for("opide_bridge", log::LevelFilter::Warn)
                 .build(),
         )
         .plugin(tauri_plugin_sql::Builder::default().build())
@@ -153,12 +173,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // ── Startup background tasks ──────────────────────────────────────────
         .setup(|app| {
-            // DevTools: uncomment to auto-open (causes __TAURI_INTERNALS__ errors in devtools context)
-            // #[cfg(debug_assertions)]
-            // {
-            //     let window = app.get_webview_window("main").unwrap();
-            //     window.open_devtools();
-            // }
             // Set OPIDE identity on the default agent
             {
                 let state = app.state::<paw_temp_lib::engine::state::EngineState>();
@@ -181,9 +195,8 @@ pub fn run() {
                 cfg.daily_budget_usd = 0.0; // Disable — OPIDE has no budget cap
             }
 
-            // Cron heartbeat removed (Phase 9c) — OPIDE doesn't use cron tasks or trading positions.
-            // run_cron_heartbeat calls check_positions() (Solana trading) + due cron tasks.
-            // Neither applies to OPIDE. Re-add if OPIDE ever needs scheduled tasks.
+            // Cron heartbeat removed — OPIDE doesn't use cron tasks.
+            // Re-add if OPIDE ever needs scheduled background tasks.
 
             // Codebase indexer: listen for workspace open events and index in background
             let idx_handle = app.handle().clone();
@@ -255,6 +268,7 @@ pub fn run() {
             open_new_window,
             opide_shell::ide_mcp::ide_read_file,
             opide_shell::ide_mcp::ide_write_file,
+            opide_shell::ide_mcp::ide_delete_file,
             opide_shell::ide_mcp::ide_list_dir,
             opide_shell::ide_mcp::ide_run_command,
             opide_shell::ide_mcp::ide_get_git_status,

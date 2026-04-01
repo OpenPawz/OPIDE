@@ -1,10 +1,10 @@
 [package]
-name = "app"
+name = "opide"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+description = "AI-native IDE built in Rust"
+authors = ["Eli Bury <eli@openpawz.ai>"]
+license = "Apache-2.0"
+repository = "https://github.com/OpenPawz/OPIDE"
 edition = "2021"
 rust-version = "1.77.2"
 

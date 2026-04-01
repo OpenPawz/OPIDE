@@ -15,7 +15,7 @@ import {
   ViewContainerLocation,
 } from '@codingame/monaco-vscode-workbench-service-override'
 import { marked } from 'marked'
-import { installExtensionFromOpenVsx } from './extension-mcp.ts'
+import { installExtensionFromOpenVsx, uninstallExtension } from './extension-mcp.ts'
 
 marked.setOptions({ async: false, breaks: true, gfm: true })
 
@@ -63,6 +63,8 @@ let _installStatus = new Map<string, InstallStatus>()
 let _debounceTimer: ReturnType<typeof setTimeout> | null = null
 let _detailView: OvsxExtension | null = null
 let _detailReadme = ''
+// Cache extension metadata so the installed tab can show apply buttons
+const _extMetadataCache = new Map<string, OvsxExtension>()
 
 // ─── Open VSX API ────────────────────────────────────────────────────────────
 
@@ -381,6 +383,43 @@ function injectStyles(): void {
       color: #E8B931;
       cursor: wait;
     }
+    .opide-ext-uninstall-btn {
+      padding: 5px 12px;
+      border-radius: 14px;
+      font-size: 11px;
+      font-weight: 500;
+      border: 1px solid rgba(255,80,80,0.4);
+      background: transparent;
+      color: #ff5050;
+      cursor: pointer;
+      transition: all 0.15s;
+      margin-left: 6px;
+    }
+    .opide-ext-uninstall-btn:hover {
+      background: rgba(255,80,80,0.12);
+      border-color: rgba(255,80,80,0.6);
+    }
+    .opide-ext-uninstall-btn.uninstalling {
+      color: var(--vscode-descriptionForeground);
+      border-color: rgba(255,255,255,0.15);
+      cursor: wait;
+    }
+    .opide-ext-apply-btn {
+      padding: 5px 12px;
+      border-radius: 14px;
+      font-size: 11px;
+      font-weight: 500;
+      border: 1px solid rgba(232,185,49,0.5);
+      background: rgba(232,185,49,0.1);
+      color: #E8B931;
+      cursor: pointer;
+      transition: all 0.15s;
+      margin-left: 6px;
+    }
+    .opide-ext-apply-btn:hover {
+      background: rgba(232,185,49,0.2);
+      border-color: #E8B931;
+    }
 
     /* ── Loading ──────────────────────────────── */
     .opide-ext-loading {
@@ -553,7 +592,7 @@ function render(): void {
     searchInput.addEventListener('input', () => {
       _query = searchInput.value
       if (_debounceTimer) clearTimeout(_debounceTimer)
-      _debounceTimer = setTimeout(() => doSearch(), 300)
+      _debounceTimer = setTimeout(() => doSearch(), 600)
     })
     searchWrap.appendChild(searchIcon)
     searchWrap.appendChild(searchInput)
@@ -682,6 +721,18 @@ function renderCard(ext: OvsxExtension): HTMLElement {
   if (isInstalled || status === 'complete') {
     btn.className = 'opide-ext-install-btn installed'
     btn.textContent = 'Installed'
+
+    // Show apply button for themes / icon themes
+    addApplyButton(actions, ext)
+
+    const unBtn = document.createElement('button')
+    unBtn.className = 'opide-ext-uninstall-btn'
+    unBtn.textContent = 'Uninstall'
+    unBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      doUninstall(ext.id, unBtn)
+    })
+    actions.appendChild(unBtn)
   } else if (status) {
     btn.className = 'opide-ext-install-btn installing'
     btn.textContent = status === 'downloading' ? 'Getting...'
@@ -719,7 +770,6 @@ function renderInstalledTab(list: HTMLElement): void {
     return
   }
   for (const id of _installedIds) {
-    if (id === 'opide.test-extension') continue
     const card = document.createElement('div')
     card.className = 'opide-ext-card'
     card.appendChild(makeIconPlaceholder(id))
@@ -736,10 +786,21 @@ function renderInstalledTab(list: HTMLElement): void {
     card.appendChild(info)
     const actions = document.createElement('div')
     actions.className = 'opide-ext-actions'
-    const btn = document.createElement('button')
-    btn.className = 'opide-ext-install-btn installed'
-    btn.textContent = 'Installed'
-    actions.appendChild(btn)
+
+    // Show apply button if we have cached metadata
+    const cached = _extMetadataCache.get(id)
+    if (cached) {
+      addApplyButton(actions, cached)
+    }
+
+    const unBtn = document.createElement('button')
+    unBtn.className = 'opide-ext-uninstall-btn'
+    unBtn.textContent = 'Uninstall'
+    unBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      doUninstall(id, unBtn)
+    })
+    actions.appendChild(unBtn)
     card.appendChild(actions)
     list.appendChild(card)
   }
@@ -826,6 +887,16 @@ function renderDetailView(container: HTMLElement): void {
   if (isInstalled) {
     btn.className = 'opide-ext-install-btn installed'
     btn.textContent = 'Installed'
+
+    // Apply buttons for themes/icon themes in detail view
+    addApplyButton(headerActions, ext)
+
+    const unBtn = document.createElement('button')
+    unBtn.className = 'opide-ext-uninstall-btn'
+    unBtn.textContent = 'Uninstall'
+    unBtn.style.cssText = 'padding:7px 16px;font-size:12px;border-radius:16px;margin-left:8px'
+    unBtn.addEventListener('click', () => doUninstall(ext.id, unBtn))
+    headerActions.appendChild(unBtn)
   } else {
     btn.className = 'opide-ext-install-btn get'
     btn.textContent = 'Get'
@@ -881,8 +952,14 @@ function renderDetailView(container: HTMLElement): void {
 // ─── Actions ─────────────────────────────────────────────────────────────────
 
 async function doSearch(): Promise<void> {
+  // Don't search for partial words — wait until the user has typed something meaningful
+  if (_query.length > 0 && _query.length < 2) return
+
   _loading = true
-  render()
+  // Only update the list area, not the whole panel — avoids stealing input focus
+  if (_listEl) {
+    _listEl.innerHTML = '<div class="opide-ext-loading"><div class="opide-ext-spinner"></div></div>'
+  }
   try {
     _results = await searchOpenVsx(_query)
   } catch (e) {
@@ -905,6 +982,7 @@ async function doInstall(ext: OvsxExtension): Promise<void> {
     if (success) {
       _installStatus.set(ext.id, 'complete')
       _installedIds.add(ext.id)
+      _extMetadataCache.set(ext.id, ext)
     } else {
       _installStatus.set(ext.id, 'error')
     }
@@ -912,6 +990,139 @@ async function doInstall(ext: OvsxExtension): Promise<void> {
     _installStatus.set(ext.id, 'error')
   }
   render()
+}
+
+// ─── Apply theme / icon theme ───────────────────────────────────────────────
+
+function isThemeExtension(ext: OvsxExtension): boolean {
+  const cats = (ext.categories || []).map((c) => c.toLowerCase())
+  return cats.includes('themes') || cats.includes('color themes')
+}
+
+function isIconThemeExtension(ext: OvsxExtension): boolean {
+  const cats = (ext.categories || []).map((c) => c.toLowerCase())
+  return cats.includes('icon themes')
+}
+
+async function applyTheme(extensionId: string): Promise<void> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const themeServiceMod = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service'
+    )
+    const IWorkbenchThemeService = themeServiceMod?.IWorkbenchThemeService
+    if (!IWorkbenchThemeService) return
+
+    const themeService = StandaloneServices.get(IWorkbenchThemeService) as any
+    if (!themeService?.getColorThemes) return
+
+    const themes = await themeService.getColorThemes()
+    // Find theme(s) from this extension
+    const extThemes = themes.filter((t: any) => {
+      const extId = t.extensionData?.extensionId?.toLowerCase() || ''
+      return extId === extensionId.toLowerCase() || extId.includes(extensionId.split('.').pop()?.toLowerCase() || '___')
+    })
+
+    if (extThemes.length > 0) {
+      await themeService.setColorTheme(extThemes[0].id, 'memory')
+    } else {
+      // Fallback: open the theme picker via command palette
+      const { StandaloneServices: SS2 } = await import('@codingame/monaco-vscode-api/services')
+      const { ICommandService } = await import(
+        '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+      )
+      const cmdService = SS2.get(ICommandService) as any
+      await cmdService?.executeCommand?.('workbench.action.selectTheme')
+    }
+  } catch (e) {
+    console.warn('[opide-ext] Apply theme failed:', e)
+  }
+}
+
+async function applyIconTheme(extensionId: string): Promise<void> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const themeServiceMod = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service'
+    )
+    const IWorkbenchThemeService = themeServiceMod?.IWorkbenchThemeService
+    if (!IWorkbenchThemeService) return
+
+    const themeService = StandaloneServices.get(IWorkbenchThemeService) as any
+    if (!themeService?.getFileIconThemes) return
+
+    const themes = await themeService.getFileIconThemes()
+    const extThemes = themes.filter((t: any) => {
+      const extId = t.extensionData?.extensionId?.toLowerCase() || ''
+      return extId === extensionId.toLowerCase() || extId.includes(extensionId.split('.').pop()?.toLowerCase() || '___')
+    })
+
+    if (extThemes.length > 0) {
+      await themeService.setFileIconTheme(extThemes[0].id, 'memory')
+    } else {
+      const { StandaloneServices: SS2 } = await import('@codingame/monaco-vscode-api/services')
+      const { ICommandService } = await import(
+        '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+      )
+      const cmdService = SS2.get(ICommandService) as any
+      await cmdService?.executeCommand?.('workbench.action.selectFileIconTheme')
+    }
+  } catch (e) {
+    console.warn('[opide-ext] Apply icon theme failed:', e)
+  }
+}
+
+function addApplyButton(
+  container: HTMLElement,
+  ext: OvsxExtension,
+): void {
+  if (isThemeExtension(ext)) {
+    const btn = document.createElement('button')
+    btn.className = 'opide-ext-apply-btn'
+    btn.textContent = 'Apply Theme'
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      btn.textContent = 'Applying...'
+      applyTheme(ext.id).then(() => { btn.textContent = 'Applied ✓' })
+        .catch(() => { btn.textContent = 'Apply Theme' })
+    })
+    container.appendChild(btn)
+  }
+  if (isIconThemeExtension(ext)) {
+    const btn = document.createElement('button')
+    btn.className = 'opide-ext-apply-btn'
+    btn.textContent = 'Apply Icons'
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      btn.textContent = 'Applying...'
+      applyIconTheme(ext.id).then(() => { btn.textContent = 'Applied ✓' })
+        .catch(() => { btn.textContent = 'Apply Icons' })
+    })
+    container.appendChild(btn)
+  }
+}
+
+// ─── Uninstall ──────────────────────────────────────────────────────────────
+
+async function doUninstall(extensionId: string, btn: HTMLButtonElement): Promise<void> {
+  btn.textContent = 'Removing...'
+  btn.className = 'opide-ext-uninstall-btn uninstalling'
+
+  try {
+    const success = await uninstallExtension(extensionId)
+    if (success) {
+      _installedIds.delete(extensionId)
+      _installStatus.delete(extensionId)
+      _initialized = false
+      render()
+    } else {
+      btn.textContent = 'Failed'
+      setTimeout(() => { btn.textContent = 'Uninstall'; btn.className = 'opide-ext-uninstall-btn' }, 2000)
+    }
+  } catch {
+    btn.textContent = 'Failed'
+    setTimeout(() => { btn.textContent = 'Uninstall'; btn.className = 'opide-ext-uninstall-btn' }, 2000)
+  }
 }
 
 // ─── Registration ────────────────────────────────────────────────────────────

@@ -60,8 +60,9 @@ async function resolveAdapterPath(relativePath: string): Promise<string> {
     if (root && root.length > 3) return `${root}/${relativePath}`
   } catch {}
 
-  // Fallback: known dev path
-  return `/Users/elibury/Desktop/OPIDE PROJECT/OPIDE V2/${relativePath}`
+  // Fallback: derive from home directory
+  const home = await getHomeDir()
+  return `${home}/Desktop/OPIDE/${relativePath}`
 }
 
 // ─── Register all adapters ───────────────────────────────────────────────────
@@ -167,9 +168,8 @@ export async function formatDocumentViaMcp(
 export async function registerFormatCommand(): Promise<void> {
   try {
     const actionsModule = await import(
-      // @ts-ignore
       '@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions'
-    ) as any
+    )
 
     const { Action2, registerAction2 } = actionsModule
     if (!registerAction2 || !Action2) return
@@ -322,6 +322,14 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
 
     await log(`Extension ${extensionId} installed to ${extDir}`)
 
+    // Register with the workbench (themes, grammars, icons, activation)
+    try {
+      const { loadExtensionFromDisk } = await import('./extension-loader.ts')
+      await loadExtensionFromDisk(extDir, extensionId)
+    } catch (e) {
+      await log(`Workbench registration failed (non-fatal): ${e}`)
+    }
+
     // Check for matching MCP adapter and register
     await registerAdapterForExtension(extensionId, extDir)
 
@@ -332,32 +340,40 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
   }
 }
 
-/** Get the base extensions directory (~/.opide/extensions) */
-async function getExtensionsBase(): Promise<string> {
-  // Try workspace path first
+/** Resolve the user's home directory dynamically */
+async function getHomeDir(): Promise<string> {
+  // Try Tauri's path API first
   try {
-    const { getWorkspace } = await import('./ide-context.ts')
-    const ws = getWorkspace()
-    if (ws?.startsWith('/Users/')) {
-      return `/Users/${ws.split('/')[2]}/.opide/extensions`
-    }
-    if (ws?.startsWith('/home/')) {
-      return `/home/${ws.split('/')[2]}/.opide/extensions`
-    }
+    const { homeDir } = await import('@tauri-apps/api/path')
+    const home = await homeDir()
+    if (home && home.length > 1) return home.replace(/\/+$/, '')
   } catch {}
 
-  // Try to get home dir from Tauri
+  // Fallback: shell $HOME
   try {
     const result = await invoke('ide_run_command', {
       command: 'echo $HOME',
       cwd: '/',
     }) as any
     const home = (result?.stdout || '').trim()
-    if (home && home.length > 1) return `${home}/.opide/extensions`
+    if (home && home.length > 1) return home
   } catch {}
 
-  // Hardcoded fallback — NEVER use /tmp (doesn't persist across reboots)
-  return '/Users/elibury/.opide/extensions'
+  // Last resort: derive from workspace path
+  try {
+    const { getWorkspace } = await import('./ide-context.ts')
+    const ws = getWorkspace()
+    if (ws?.startsWith('/Users/')) return `/Users/${ws.split('/')[2]}`
+    if (ws?.startsWith('/home/')) return `/home/${ws.split('/')[2]}`
+  } catch {}
+
+  return '/tmp'
+}
+
+/** Get the base extensions directory (~/.opide/extensions) */
+async function getExtensionsBase(): Promise<string> {
+  const home = await getHomeDir()
+  return `${home}/.opide/extensions`
 }
 
 /** Check for a matching adapter and register it as an MCP server */
@@ -482,9 +498,8 @@ async function getWorkspacePath(): Promise<string | null> {
 export async function registerInstallCommand(): Promise<void> {
   try {
     const actionsModule = await import(
-      // @ts-ignore
       '@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions'
-    ) as any
+    )
 
     const { Action2, registerAction2 } = actionsModule
     if (!registerAction2 || !Action2) return
@@ -503,9 +518,8 @@ export async function registerInstallCommand(): Promise<void> {
           // Get VS Code's quick input service for the input dialog
           const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
           const { IQuickInputService } = await import(
-            // @ts-ignore
             '@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service'
-          ) as any
+          )
 
           const quickInput = StandaloneServices.get(IQuickInputService) as any
           if (!quickInput?.input) {
@@ -539,6 +553,81 @@ export async function registerInstallCommand(): Promise<void> {
   }
 }
 
+// ─── Uninstall Extension ────────────────────────────────────────────────────
+
+/**
+ * Uninstall a VS Code extension.
+ * Removes ~/.opide/extensions/{extensionId}/ and disconnects MCP server.
+ */
+export async function uninstallExtension(extensionId: string): Promise<boolean> {
+  const log = (msg: string) => invoke('ext_host_log', { message: `[uninstall] ${msg}` }).catch(() => {})
+
+  try {
+    await log(`Uninstalling ${extensionId}...`)
+
+    const extBase = await getExtensionsBase()
+    const extDir = `${extBase}/${extensionId}`
+
+    // Verify directory exists before deleting
+    const checkResult = await invoke('ide_run_command', {
+      command: `test -d "${extDir}" && echo "exists" || echo "missing"`,
+      cwd: '/',
+    }) as any
+    if ((checkResult?.stdout || '').trim() !== 'exists') {
+      await log(`Extension directory not found: ${extDir}`)
+      return false
+    }
+
+    // Unload from the workbench (themes, grammars, etc.) — with timeout
+    try {
+      const { unloadExtension } = await import('./extension-loader.ts')
+      await Promise.race([
+        unloadExtension(extensionId),
+        new Promise((resolve) => setTimeout(resolve, 3000)),
+      ])
+    } catch (e) {
+      await log(`Workbench unload failed (non-fatal): ${e}`)
+    }
+
+    // Disconnect MCP server if registered — with timeout
+    const serverId = `ext-${extensionId.replace(/\./g, '-')}`
+    if (_registeredServers.has(serverId)) {
+      try {
+        await Promise.race([
+          invoke('engine_mcp_disconnect', { id: serverId }),
+          new Promise((resolve) => setTimeout(resolve, 2000)),
+        ])
+        await log(`Disconnected MCP server: ${serverId}`)
+      } catch (e) {
+        await log(`MCP disconnect failed (non-fatal): ${e}`)
+      }
+      _registeredServers.delete(serverId)
+    }
+
+    // Remove the extension directory
+    await invoke('ide_run_command', {
+      command: `rm -rf "${extDir}"`,
+      cwd: '/',
+    })
+
+    // Verify removal
+    const verifyResult = await invoke('ide_run_command', {
+      command: `test -d "${extDir}" && echo "exists" || echo "removed"`,
+      cwd: '/',
+    }) as any
+    if ((verifyResult?.stdout || '').trim() === 'removed') {
+      await log(`Extension ${extensionId} uninstalled successfully`)
+      return true
+    } else {
+      await log(`Failed to remove ${extDir}`)
+      return false
+    }
+  } catch (e) {
+    invoke('ext_host_log', { message: `[uninstall] FAILED: ${e}` }).catch(() => {})
+    return false
+  }
+}
+
 // ─── Scan and register all installed extensions on startup ───────────────────
 
 export async function scanAndRegisterInstalledExtensions(): Promise<void> {
@@ -558,11 +647,44 @@ export async function scanAndRegisterInstalledExtensions(): Promise<void> {
     await log(`Found ${dirs.length} installed extension(s)`)
 
     for (const extId of dirs) {
-      // Skip test extension
-      if (extId === 'opide.test-extension') continue
 
-      const extDir = `${extBase}/${extId}`
-      await registerAdapterForExtension(extId, extDir)
+      // On startup, ONLY register extensions that already have a pre-built adapter.
+      // Do NOT generate adapters — that calls AI APIs and blocks for 30-120 seconds.
+      // Adapter generation only happens during explicit user install (doInstall flow).
+      const serverId = `ext-${extId.replace(/\./g, '-')}`
+      if (_registeredServers.has(serverId)) continue
+
+      const adapterName = `${extId}.mcp.cjs`
+      const adapterPath = await resolveAdapterPath(`extension-adapters/${adapterName}`)
+
+      const checkResult = await invoke('ide_run_command', {
+        command: `test -f "${adapterPath}" && echo "exists" || echo "missing"`,
+        cwd: '/',
+      }) as any
+
+      if ((checkResult?.stdout || '').trim() === 'exists') {
+        try {
+          const wsPath = await getWorkspacePath()
+          const config: McpServerConfig = {
+            id: serverId,
+            name: extId.split('.').pop() || extId,
+            transport: 'stdio',
+            command: 'node',
+            args: [adapterPath],
+            env: wsPath ? { OPIDE_WORKSPACE: wsPath } : {},
+            url: '',
+            enabled: true,
+          }
+          await invoke('engine_mcp_save_server', { server: config })
+          await invoke('engine_mcp_connect', { id: config.id })
+          _registeredServers.add(serverId)
+          await log(`Registered existing adapter: ${serverId}`)
+        } catch (e) {
+          await log(`Failed to register ${serverId}: ${e}`)
+        }
+      } else {
+        await log(`No adapter for ${extId} — skipping (will generate on next install)`)
+      }
     }
   } catch (e) {
     invoke('ext_host_log', { message: `[scan] FAILED: ${e}` }).catch(() => {})

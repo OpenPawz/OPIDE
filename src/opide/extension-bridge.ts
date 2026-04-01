@@ -321,42 +321,42 @@ function routeNotification(method: string, params: any, id?: number): void {
     // ── Window messages ──────────────────────────────────────────
     case 'window/showMessage': {
       const { type, message, items } = params || {}
-      console.log(`[ext-bridge] ${type}: ${message}`)
-      // TODO: Show via VS Code notification service
-      // For now, just log and respond
-      if (id) sendResponse(id, items?.[0] ?? undefined)
+      handleShowMessage(type, message, items).then((picked) => {
+        if (id) sendResponse(id, picked)
+      })
       break
     }
 
     case 'window/showQuickPick': {
-      // TODO: Show via VS Code quick pick service
-      if (id) sendResponse(id, undefined)
+      handleQuickPick(params).then((picked) => {
+        if (id) sendResponse(id, picked)
+      })
       break
     }
 
     case 'window/showInputBox': {
-      // TODO: Show via VS Code input box service
-      if (id) sendResponse(id, undefined)
+      handleInputBox(params).then((value) => {
+        if (id) sendResponse(id, value)
+      })
       break
     }
 
     case 'window/showOutputChannel': {
-      const { name, content } = params || {}
-      console.log(`[ext-bridge] Output [${name}]:\n${content}`)
-      // TODO: Create/show output channel in VS Code workbench
+      handleOutputChannel(params)
       if (id) sendResponse(id, null)
       break
     }
 
     case 'window/statusBarItem': {
-      // TODO: Create/update status bar item in VS Code workbench
+      handleStatusBarItem(params)
       if (id) sendResponse(id, null)
       break
     }
 
     case 'window/showTextDocument': {
-      // TODO: Open file in editor via VS Code editor service
-      if (id) sendResponse(id, null)
+      handleShowTextDocument(params).then(() => {
+        if (id) sendResponse(id, null)
+      })
       break
     }
 
@@ -373,28 +373,61 @@ function routeNotification(method: string, params: any, id?: number): void {
 
     // ── Diagnostics ──────────────────────────────────────────────
     case 'languages/publishDiagnostics': {
-      const { uri, diagnostics } = params || {}
-      console.log(`[ext-bridge] Diagnostics for ${uri}: ${diagnostics?.length || 0} issues`)
-      // TODO: Forward to VS Code diagnostics service via monaco markers
+      handlePublishDiagnostics(params)
       if (id) sendResponse(id, null)
       break
     }
 
     // ── Language providers ────────────────────────────────────────
-    case 'languages/registerCompletionProvider':
-    case 'languages/registerHoverProvider':
-    case 'languages/registerDefinitionProvider':
-    case 'languages/registerCodeActionsProvider':
+    case 'languages/registerCompletionProvider': {
+      handleRegisterLanguageProvider('completion', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerHoverProvider': {
+      handleRegisterLanguageProvider('hover', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerDefinitionProvider': {
+      handleRegisterLanguageProvider('definition', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerCodeActionsProvider': {
+      handleRegisterLanguageProvider('codeAction', params)
+      if (id) sendResponse(id, null)
+      break
+    }
     case 'languages/registerFormattingProvider': {
-      console.log(`[ext-bridge] Language provider registered: ${method}`)
-      // TODO: Bridge to monaco language features
+      handleRegisterLanguageProvider('formatting', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerReferenceProvider': {
+      handleRegisterLanguageProvider('reference', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerDocumentSymbolProvider': {
+      handleRegisterLanguageProvider('documentSymbol', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerRenameProvider': {
+      handleRegisterLanguageProvider('rename', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerSignatureHelpProvider': {
+      handleRegisterLanguageProvider('signatureHelp', params)
       if (id) sendResponse(id, null)
       break
     }
 
     // ── Configuration ────────────────────────────────────────────
     case 'configuration/update': {
-      // TODO: Update VS Code workbench configuration
+      handleConfigurationUpdate(params)
       if (id) sendResponse(id, null)
       break
     }
@@ -510,8 +543,15 @@ function routeNotification(method: string, params: any, id?: number): void {
     }
 
     case 'fs/delete': {
-      // TODO: Add ide_delete_file Tauri command
-      if (id) sendResponse(id, null)
+      const { uri: delUri, recursive: delRecursive } = params || {}
+      if (delUri) {
+        const { invoke } = await import('@tauri-apps/api/core')
+        invoke('ide_delete_file', { path: delUri, recursive: delRecursive ?? false })
+          .then(() => { if (id) sendResponse(id, null) })
+          .catch((e: unknown) => { if (id) sendResponse(id, { error: String(e) }) })
+      } else {
+        if (id) sendResponse(id, null)
+      }
       break
     }
 
@@ -522,17 +562,47 @@ function routeNotification(method: string, params: any, id?: number): void {
     }
 
     // ── Environment ──────────────────────────────────────────────
-    case 'env/clipboardRead':
-    case 'env/clipboardWrite':
+    case 'env/clipboardRead': {
+      navigator.clipboard.readText().then((text) => {
+        if (id) sendResponse(id, text)
+      }).catch(() => {
+        if (id) sendResponse(id, '')
+      })
+      break
+    }
+    case 'env/clipboardWrite': {
+      const text = params?.text || params?.value || ''
+      navigator.clipboard.writeText(text).then(() => {
+        if (id) sendResponse(id, null)
+      }).catch(() => {
+        if (id) sendResponse(id, null)
+      })
+      break
+    }
     case 'env/openExternal': {
-      if (id) sendResponse(id, null)
+      const url = params?.uri || params?.url || ''
+      if (url) {
+        invoke('ide_run_command', { command: `open "${url}"`, cwd: '/' }).catch(() => {})
+      }
+      if (id) sendResponse(id, true)
       break
     }
 
-    // ── Secrets ──────────────────────────────────────────────────
-    case 'secrets/get':
-    case 'secrets/store':
+    // ── Secrets (stored in memory for now) ───────────────────────
+    case 'secrets/get': {
+      const key = params?.key || ''
+      if (id) sendResponse(id, _secretStore.get(key) ?? null)
+      break
+    }
+    case 'secrets/store': {
+      const storeKey = params?.key || ''
+      const storeVal = params?.value ?? ''
+      _secretStore.set(storeKey, storeVal)
+      if (id) sendResponse(id, null)
+      break
+    }
     case 'secrets/delete': {
+      _secretStore.delete(params?.key || '')
       if (id) sendResponse(id, null)
       break
     }
@@ -545,8 +615,11 @@ function routeNotification(method: string, params: any, id?: number): void {
 
     case 'commands/execute': {
       // Extension wants to execute a VS Code built-in command
-      // TODO: Forward to VS Code command service
-      if (id) sendResponse(id, null)
+      handleCommandExecute(params).then((result) => {
+        if (id) sendResponse(id, result)
+      }).catch(() => {
+        if (id) sendResponse(id, null)
+      })
       break
     }
 
@@ -554,6 +627,691 @@ function routeNotification(method: string, params: any, id?: number): void {
       console.log(`[ext-bridge] Unhandled notification: ${method}`)
       if (id) sendResponse(id, null)
       break
+  }
+}
+
+// ─── In-memory secret store ─────────────────────────────────────────────────
+
+const _secretStore = new Map<string, string>()
+
+// ─── Registered language providers (for proxying requests back to sidecar) ──
+
+const _languageProviders = new Map<string, Set<string>>() // type → languages
+
+// ─── Output channels ────────────────────────────────────────────────────────
+
+const _outputChannels = new Map<string, string>() // name → accumulated content
+
+// ─── Window API handlers ────────────────────────────────────────────────────
+
+async function handleShowMessage(
+  type: string,
+  message: string,
+  items?: string[],
+): Promise<string | undefined> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { INotificationService, Severity } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification'
+    )
+
+    const notifService = StandaloneServices.get(INotificationService) as any
+    if (!notifService) {
+      debugLog(`showMessage (no service): ${type}: ${message}`)
+      return items?.[0]
+    }
+
+    const severity = type === 'error' ? Severity?.Error
+      : type === 'warning' ? Severity?.Warning
+      : Severity?.Info ?? 2
+
+    if (items && items.length > 0) {
+      // Show with action buttons, return the picked item
+      return new Promise<string | undefined>((resolve) => {
+        const actions = items.map((label: string) => ({
+          label,
+          run: () => resolve(label),
+        }))
+        notifService.prompt(severity, message, actions, {
+          onCancel: () => resolve(undefined),
+        })
+      })
+    } else {
+      notifService.notify({ severity, message })
+      return undefined
+    }
+  } catch (e) {
+    debugLog(`showMessage fallback: ${type}: ${message}`)
+    return items?.[0]
+  }
+}
+
+async function handleQuickPick(params: any): Promise<any> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IQuickInputService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput'
+    )
+
+    const quickInput = StandaloneServices.get(IQuickInputService) as any
+    if (!quickInput?.pick) return undefined
+
+    const items = (params?.items || []).map((item: any) => {
+      if (typeof item === 'string') return { label: item }
+      return { label: item.label, description: item.description, detail: item.detail, picked: item.picked }
+    })
+
+    const options = {
+      placeHolder: params?.placeHolder || '',
+      canPickMany: params?.canPickMany || false,
+      title: params?.title,
+    }
+
+    const result = await quickInput.pick(items, options)
+    if (!result) return undefined
+    if (Array.isArray(result)) return result.map((r: any) => r.label ?? r)
+    return result.label ?? result
+  } catch (e) {
+    debugLog(`quickPick failed: ${e}`)
+    return undefined
+  }
+}
+
+async function handleInputBox(params: any): Promise<string | undefined> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IQuickInputService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput'
+    )
+
+    const quickInput = StandaloneServices.get(IQuickInputService) as any
+    if (!quickInput?.input) return undefined
+
+    return await quickInput.input({
+      placeHolder: params?.placeHolder || '',
+      prompt: params?.prompt || '',
+      value: params?.value || '',
+      password: params?.password || false,
+      title: params?.title,
+    })
+  } catch (e) {
+    debugLog(`inputBox failed: ${e}`)
+    return undefined
+  }
+}
+
+function handleOutputChannel(params: any): void {
+  const { name, content, append, show } = params || {}
+  if (!name) return
+
+  if (append) {
+    _outputChannels.set(name, (_outputChannels.get(name) || '') + (content || ''))
+  } else if (content !== undefined) {
+    _outputChannels.set(name, content)
+  }
+
+  // Log to console with channel prefix for visibility
+  if (content) {
+    console.log(`[output:${name}] ${content}`)
+  }
+
+  // Show in the Output panel if requested
+  if (show) {
+    showOutputPanel(name).catch(() => {})
+  }
+}
+
+async function showOutputPanel(channelName: string): Promise<void> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IOutputService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/workbench/services/output/common/output'
+    )
+
+    if (!IOutputService) return
+    const outputService = StandaloneServices.get(IOutputService) as any
+    if (!outputService) return
+
+    // Try to show the output channel
+    const channel = outputService.getChannel?.(channelName)
+    if (channel) {
+      outputService.showChannel?.(channelName)
+    }
+  } catch {
+    // Output panel service may not be available
+  }
+}
+
+async function handleStatusBarItem(params: any): Promise<void> {
+  try {
+    const { id: itemId, text, tooltip, color, command, alignment, priority } = params || {}
+    if (!itemId || !text) return
+
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IStatusbarService, StatusbarAlignment } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/workbench/services/statusbar/browser/statusbar'
+    )
+
+    if (!IStatusbarService) return
+    const statusbar = StandaloneServices.get(IStatusbarService) as any
+    if (!statusbar?.addEntry) return
+
+    const align = alignment === 'right'
+      ? StatusbarAlignment?.RIGHT ?? 1
+      : StatusbarAlignment?.LEFT ?? 0
+
+    // Remove previous entry with same ID if it exists
+    const prev = _statusBarDisposables.get(itemId)
+    if (prev) prev.dispose()
+
+    const entry = {
+      name: itemId,
+      text: text || '',
+      tooltip: tooltip || '',
+      color: color || undefined,
+      command: command || undefined,
+    }
+
+    const disposable = statusbar.addEntry(entry, itemId, align, priority ?? 0)
+    _statusBarDisposables.set(itemId, disposable)
+  } catch (e) {
+    debugLog(`statusBarItem failed: ${e}`)
+  }
+}
+
+const _statusBarDisposables = new Map<string, any>()
+
+async function handleShowTextDocument(params: any): Promise<void> {
+  try {
+    const filePath = params?.uri || params?.path
+    if (!filePath) return
+
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IEditorService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService'
+    )
+
+    if (!IEditorService) return
+    const editorService = StandaloneServices.get(IEditorService) as any
+    if (!editorService?.openEditor) return
+
+    const { URI } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
+    )
+
+    const uri = URI.file(filePath)
+    const options: any = {}
+
+    // Support selection/range parameter
+    if (params?.selection) {
+      options.selection = {
+        startLineNumber: (params.selection.start?.line ?? 0) + 1,
+        startColumn: (params.selection.start?.character ?? 0) + 1,
+        endLineNumber: (params.selection.end?.line ?? params.selection.start?.line ?? 0) + 1,
+        endColumn: (params.selection.end?.character ?? params.selection.start?.character ?? 0) + 1,
+      }
+    }
+
+    await editorService.openEditor({ resource: uri, options })
+  } catch (e) {
+    debugLog(`showTextDocument failed: ${e}`)
+  }
+}
+
+// ─── Diagnostics handler ────────────────────────────────────────────────────
+
+async function handlePublishDiagnostics(params: any): Promise<void> {
+  try {
+    const { uri, diagnostics } = params || {}
+    if (!uri || !diagnostics) return
+
+    const monacoMod = await import('monaco-editor') as any
+    const monaco = monacoMod.default || monacoMod
+    const models = monaco.editor.getModels()
+
+    // Find the matching model
+    const model = models.find((m: any) => {
+      const mPath = m.uri.fsPath || m.uri.path
+      return mPath === uri || m.uri.toString() === uri
+    })
+
+    if (!model) {
+      debugLog(`publishDiagnostics: no model for ${uri}`)
+      return
+    }
+
+    // Map VS Code severity: 0=Error, 1=Warning, 2=Info, 3=Hint
+    // Monaco MarkerSeverity: 1=Hint, 2=Info, 4=Warning, 8=Error
+    const severityMap: Record<number, number> = { 0: 8, 1: 4, 2: 2, 3: 1 }
+
+    const markers = diagnostics.map((d: any) => ({
+      severity: severityMap[d.severity] ?? 8,
+      startLineNumber: (d.range?.start?.line ?? 0) + 1,
+      startColumn: (d.range?.start?.character ?? 0) + 1,
+      endLineNumber: (d.range?.end?.line ?? 0) + 1,
+      endColumn: (d.range?.end?.character ?? 0) + 1,
+      message: d.message || '',
+      source: d.source || 'extension',
+      code: d.code != null ? String(d.code) : undefined,
+    }))
+
+    monaco.editor.setModelMarkers(model, 'extension-diagnostics', markers)
+    debugLog(`publishDiagnostics: set ${markers.length} markers for ${uri}`)
+  } catch (e) {
+    debugLog(`publishDiagnostics failed: ${e}`)
+  }
+}
+
+// ─── Language provider registration ─────────────────────────────────────────
+// Extensions register language providers in the sidecar. We create Monaco
+// provider registrations that proxy requests back through the sidecar.
+
+async function handleRegisterLanguageProvider(
+  type: string,
+  params: any,
+): Promise<void> {
+  const { languageId, selector } = params || {}
+  const languages = languageId
+    ? [languageId]
+    : (selector || []).map((s: any) => (typeof s === 'string' ? s : s.language)).filter(Boolean)
+
+  if (languages.length === 0) {
+    debugLog(`registerLanguageProvider(${type}): no languages specified`)
+    return
+  }
+
+  // Track registered providers
+  if (!_languageProviders.has(type)) _languageProviders.set(type, new Set())
+  for (const lang of languages) _languageProviders.get(type)!.add(lang)
+
+  debugLog(`registerLanguageProvider(${type}): ${languages.join(', ')}`)
+
+  try {
+    const monacoMod = await import('monaco-editor') as any
+    const monaco = monacoMod.default || monacoMod
+
+    for (const lang of languages) {
+      switch (type) {
+        case 'completion':
+          monaco.languages.registerCompletionItemProvider(lang, {
+            provideCompletionItems: async (model: any, position: any) => {
+              try {
+                const result = await sendRequest('languages/provideCompletionItems', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  languageId: lang,
+                })
+                if (!result?.items) return { suggestions: [] }
+                return {
+                  suggestions: result.items.map((item: any) => ({
+                    label: item.label || '',
+                    kind: item.kind ?? monaco.languages.CompletionItemKind.Text,
+                    insertText: item.insertText || item.label || '',
+                    detail: item.detail,
+                    documentation: item.documentation,
+                    sortText: item.sortText,
+                    filterText: item.filterText,
+                    range: item.range ? {
+                      startLineNumber: (item.range.start?.line ?? 0) + 1,
+                      startColumn: (item.range.start?.character ?? 0) + 1,
+                      endLineNumber: (item.range.end?.line ?? 0) + 1,
+                      endColumn: (item.range.end?.character ?? 0) + 1,
+                    } : undefined,
+                  })),
+                }
+              } catch {
+                return { suggestions: [] }
+              }
+            },
+          })
+          break
+
+        case 'hover':
+          monaco.languages.registerHoverProvider(lang, {
+            provideHover: async (model: any, position: any) => {
+              try {
+                const result = await sendRequest('languages/provideHover', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  languageId: lang,
+                })
+                if (!result?.contents) return null
+                const contents = Array.isArray(result.contents) ? result.contents : [result.contents]
+                return {
+                  contents: contents.map((c: any) =>
+                    typeof c === 'string' ? { value: c } : { value: c.value || '' }
+                  ),
+                  range: result.range ? {
+                    startLineNumber: (result.range.start?.line ?? 0) + 1,
+                    startColumn: (result.range.start?.character ?? 0) + 1,
+                    endLineNumber: (result.range.end?.line ?? 0) + 1,
+                    endColumn: (result.range.end?.character ?? 0) + 1,
+                  } : undefined,
+                }
+              } catch {
+                return null
+              }
+            },
+          })
+          break
+
+        case 'definition':
+          monaco.languages.registerDefinitionProvider(lang, {
+            provideDefinition: async (model: any, position: any) => {
+              try {
+                const result = await sendRequest('languages/provideDefinition', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  languageId: lang,
+                })
+                if (!result) return null
+                const locations = Array.isArray(result) ? result : [result]
+                return locations.map((loc: any) => ({
+                  uri: monaco.Uri.file(loc.uri || loc.path || ''),
+                  range: {
+                    startLineNumber: (loc.range?.start?.line ?? 0) + 1,
+                    startColumn: (loc.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (loc.range?.end?.line ?? 0) + 1,
+                    endColumn: (loc.range?.end?.character ?? 0) + 1,
+                  },
+                }))
+              } catch {
+                return null
+              }
+            },
+          })
+          break
+
+        case 'reference':
+          monaco.languages.registerReferenceProvider(lang, {
+            provideReferences: async (model: any, position: any, context: any) => {
+              try {
+                const result = await sendRequest('languages/provideReferences', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  context: { includeDeclaration: context.includeDeclaration },
+                  languageId: lang,
+                })
+                if (!result) return null
+                const locations = Array.isArray(result) ? result : [result]
+                return locations.map((loc: any) => ({
+                  uri: monaco.Uri.file(loc.uri || loc.path || ''),
+                  range: {
+                    startLineNumber: (loc.range?.start?.line ?? 0) + 1,
+                    startColumn: (loc.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (loc.range?.end?.line ?? 0) + 1,
+                    endColumn: (loc.range?.end?.character ?? 0) + 1,
+                  },
+                }))
+              } catch {
+                return null
+              }
+            },
+          })
+          break
+
+        case 'documentSymbol':
+          monaco.languages.registerDocumentSymbolProvider(lang, {
+            provideDocumentSymbols: async (model: any) => {
+              try {
+                const result = await sendRequest('languages/provideDocumentSymbols', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  languageId: lang,
+                })
+                if (!result) return []
+                return (Array.isArray(result) ? result : []).map((sym: any) => ({
+                  name: sym.name || '',
+                  detail: sym.detail || '',
+                  kind: sym.kind ?? monaco.languages.SymbolKind.Variable,
+                  range: {
+                    startLineNumber: (sym.range?.start?.line ?? 0) + 1,
+                    startColumn: (sym.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (sym.range?.end?.line ?? 0) + 1,
+                    endColumn: (sym.range?.end?.character ?? 0) + 1,
+                  },
+                  selectionRange: {
+                    startLineNumber: (sym.selectionRange?.start?.line ?? sym.range?.start?.line ?? 0) + 1,
+                    startColumn: (sym.selectionRange?.start?.character ?? sym.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (sym.selectionRange?.end?.line ?? sym.range?.end?.line ?? 0) + 1,
+                    endColumn: (sym.selectionRange?.end?.character ?? sym.range?.end?.character ?? 0) + 1,
+                  },
+                  tags: sym.tags || [],
+                  children: [],  // Flatten for now
+                }))
+              } catch {
+                return []
+              }
+            },
+          })
+          break
+
+        case 'codeAction':
+          monaco.languages.registerCodeActionProvider(lang, {
+            provideCodeActions: async (model: any, range: any) => {
+              try {
+                const result = await sendRequest('languages/provideCodeActions', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  range: {
+                    start: { line: range.startLineNumber - 1, character: range.startColumn - 1 },
+                    end: { line: range.endLineNumber - 1, character: range.endColumn - 1 },
+                  },
+                  languageId: lang,
+                })
+                if (!result) return { actions: [], dispose() {} }
+                const actions = (Array.isArray(result) ? result : result.actions || []).map((a: any) => ({
+                  title: a.title || '',
+                  kind: a.kind,
+                  isPreferred: a.isPreferred,
+                  command: a.command ? {
+                    id: a.command.command || a.command.id || '',
+                    title: a.command.title || '',
+                    arguments: a.command.arguments || [],
+                  } : undefined,
+                  edit: a.edit ? convertWorkspaceEdit(a.edit, monaco) : undefined,
+                }))
+                return { actions, dispose() {} }
+              } catch {
+                return { actions: [], dispose() {} }
+              }
+            },
+          })
+          break
+
+        case 'formatting':
+          monaco.languages.registerDocumentFormattingEditProvider(lang, {
+            provideDocumentFormattingEdits: async (model: any, options: any) => {
+              try {
+                const result = await sendRequest('languages/provideDocumentFormattingEdits', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
+                  languageId: lang,
+                })
+                if (!result) return []
+                return (Array.isArray(result) ? result : []).map((edit: any) => ({
+                  range: {
+                    startLineNumber: (edit.range?.start?.line ?? 0) + 1,
+                    startColumn: (edit.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (edit.range?.end?.line ?? 0) + 1,
+                    endColumn: (edit.range?.end?.character ?? 0) + 1,
+                  },
+                  text: edit.newText ?? '',
+                }))
+              } catch {
+                return []
+              }
+            },
+          })
+          break
+
+        case 'rename':
+          monaco.languages.registerRenameProvider(lang, {
+            provideRenameEdits: async (model: any, position: any, newName: any) => {
+              try {
+                const result = await sendRequest('languages/provideRenameEdits', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  newName,
+                  languageId: lang,
+                })
+                if (!result) return { edits: [] }
+                return convertWorkspaceEdit(result, monaco)
+              } catch {
+                return { edits: [] }
+              }
+            },
+            resolveRenameLocation: async (model: any, position: any) => {
+              try {
+                const result = await sendRequest('languages/prepareRename', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  languageId: lang,
+                })
+                if (!result) return { range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 }, text: '' }
+                return {
+                  range: {
+                    startLineNumber: (result.range?.start?.line ?? 0) + 1,
+                    startColumn: (result.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (result.range?.end?.line ?? 0) + 1,
+                    endColumn: (result.range?.end?.character ?? 0) + 1,
+                  },
+                  text: result.placeholder || '',
+                }
+              } catch {
+                return { range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 }, text: '' }
+              }
+            },
+          })
+          break
+
+        case 'signatureHelp':
+          monaco.languages.registerSignatureHelpProvider(lang, {
+            signatureHelpTriggerCharacters: params?.triggerCharacters || ['(', ','],
+            provideSignatureHelp: async (model: any, position: any) => {
+              try {
+                const result = await sendRequest('languages/provideSignatureHelp', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  languageId: lang,
+                })
+                if (!result) return null
+                return {
+                  value: {
+                    signatures: (result.signatures || []).map((sig: any) => ({
+                      label: sig.label || '',
+                      documentation: sig.documentation,
+                      parameters: (sig.parameters || []).map((p: any) => ({
+                        label: p.label || '',
+                        documentation: p.documentation,
+                      })),
+                    })),
+                    activeSignature: result.activeSignature ?? 0,
+                    activeParameter: result.activeParameter ?? 0,
+                  },
+                  dispose() {},
+                }
+              } catch {
+                return null
+              }
+            },
+          })
+          break
+      }
+    }
+  } catch (e) {
+    debugLog(`registerLanguageProvider(${type}) failed: ${e}`)
+  }
+}
+
+// ─── WorkspaceEdit conversion helper ────────────────────────────────────────
+
+function convertWorkspaceEdit(edit: any, monaco: any): any {
+  const edits: any[] = []
+  const changes = edit.changes || {}
+  for (const [uri, textEdits] of Object.entries(changes)) {
+    for (const te of textEdits as any[]) {
+      edits.push({
+        resource: monaco.Uri.file(uri),
+        textEdit: {
+          range: {
+            startLineNumber: (te.range?.start?.line ?? 0) + 1,
+            startColumn: (te.range?.start?.character ?? 0) + 1,
+            endLineNumber: (te.range?.end?.line ?? 0) + 1,
+            endColumn: (te.range?.end?.character ?? 0) + 1,
+          },
+          text: te.newText ?? '',
+        },
+        versionId: undefined,
+      })
+    }
+  }
+  // Also handle documentChanges format
+  if (edit.documentChanges) {
+    for (const change of edit.documentChanges) {
+      if (change.textDocument && change.edits) {
+        for (const te of change.edits) {
+          edits.push({
+            resource: monaco.Uri.file(change.textDocument.uri || ''),
+            textEdit: {
+              range: {
+                startLineNumber: (te.range?.start?.line ?? 0) + 1,
+                startColumn: (te.range?.start?.character ?? 0) + 1,
+                endLineNumber: (te.range?.end?.line ?? 0) + 1,
+                endColumn: (te.range?.end?.character ?? 0) + 1,
+              },
+              text: te.newText ?? '',
+            },
+            versionId: change.textDocument.version,
+          })
+        }
+      }
+    }
+  }
+  return { edits }
+}
+
+// ─── Configuration handler ──────────────────────────────────────────────────
+
+async function handleConfigurationUpdate(params: any): Promise<void> {
+  try {
+    const { section, value } = params || {}
+    if (!section) return
+
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IConfigurationService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration'
+    )
+
+    if (!IConfigurationService) return
+    const configService = StandaloneServices.get(IConfigurationService) as any
+    if (!configService?.updateValue) return
+
+    await configService.updateValue(section, value)
+    debugLog(`configuration/update: ${section} = ${JSON.stringify(value)}`)
+  } catch (e) {
+    debugLog(`configuration/update failed: ${e}`)
+  }
+}
+
+// ─── Command execution handler ──────────────────────────────────────────────
+
+async function handleCommandExecute(params: any): Promise<any> {
+  try {
+    const { command, args } = params || {}
+    if (!command) return null
+
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { ICommandService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+    )
+
+    if (!ICommandService) return null
+    const commandService = StandaloneServices.get(ICommandService) as any
+    if (!commandService?.executeCommand) return null
+
+    return await commandService.executeCommand(command, ...(args || []))
+  } catch (e) {
+    debugLog(`commands/execute failed: ${e}`)
+    return null
   }
 }
 
@@ -599,9 +1357,8 @@ async function registerAllCommandsInWorkbench(): Promise<void> {
     // Use registerAction2 — this both registers the command handler AND adds it
     // to the command palette (f1: true). CommandsRegistry alone doesn't show in palette.
     const actionsModule = await import(
-      // @ts-ignore
       '@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions'
-    ) as any
+    )
 
     const { Action2, registerAction2 } = actionsModule
 
@@ -726,17 +1483,15 @@ export async function initExtensionInstallSync(): Promise<void> {
     // Try both import paths — the .service suffix varies by version
     try {
       const mod = await import(
-        // @ts-ignore
         '@codingame/monaco-vscode-api/vscode/vs/platform/extensionManagement/common/extensionManagement.service'
-      ) as any
+      )
       serviceId = mod?.IExtensionManagementService
     } catch {}
     if (!serviceId) {
       try {
         const mod = await import(
-          // @ts-ignore
           '@codingame/monaco-vscode-api/vscode/vs/platform/extensionManagement/common/extensionManagement'
-        ) as any
+        )
         serviceId = mod?.IExtensionManagementService
       } catch {}
     }
@@ -851,13 +1606,11 @@ export async function installVsixFile(vsixPath: string): Promise<void> {
       '@codingame/monaco-vscode-api/services'
     )
     const extMgmtModule = await import(
-      // @ts-ignore
       '@codingame/monaco-vscode-api/vscode/vs/platform/extensionManagement/common/extensionManagement'
-    ) as any
+    )
     const uriModule = await import(
-      // @ts-ignore
       '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
-    ) as any
+    )
 
     const serviceId = extMgmtModule?.IExtensionManagementService
     const URI = uriModule?.URI

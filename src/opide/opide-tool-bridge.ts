@@ -268,7 +268,6 @@ async function openFile(path: string, line?: number): Promise<any> {
       }
     }
 
-    // @ts-ignore
     await editorService.openEditor({
       resource: monaco.Uri.file(path),
       options,
@@ -444,7 +443,6 @@ function openStandaloneDiffEditor(
   overlay.appendChild(editorContainer)
   document.body.appendChild(overlay)
 
-  // @ts-ignore
   const diffEditor = (window as any).monaco?.editor?.createDiffEditor?.(editorContainer, {
     readOnly: true,
     renderSideBySide: true,

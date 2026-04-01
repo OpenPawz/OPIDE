@@ -2,6 +2,7 @@
 name = "opide-sandbox"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 description = "OPIDE Execution Engine — sandboxed JS runtime for agent code execution"
 
 [dependencies]

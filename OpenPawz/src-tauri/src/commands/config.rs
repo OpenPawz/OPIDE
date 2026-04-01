@@ -8,11 +8,13 @@ use tauri::{Emitter, State};
 
 // ── Sandbox ────────────────────────────────────────────────────────────
 
+#[cfg(feature = "docker")]
 #[tauri::command]
 pub async fn engine_sandbox_check() -> Result<bool, String> {
     Ok(crate::engine::sandbox::is_docker_available().await)
 }
 
+#[cfg(feature = "docker")]
 #[tauri::command]
 pub fn engine_sandbox_get_config(
     state: State<'_, EngineState>,
@@ -20,6 +22,7 @@ pub fn engine_sandbox_get_config(
     Ok(crate::engine::sandbox::load_sandbox_config(&state.store))
 }
 
+#[cfg(feature = "docker")]
 #[tauri::command]
 pub fn engine_sandbox_set_config(
     state: State<'_, EngineState>,

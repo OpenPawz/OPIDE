@@ -66,6 +66,7 @@ pub fn build_chat_tools(
     }
 
     // Auto-add telegram tools when bridge configured but skill not enabled
+    #[cfg(feature = "channels")]
     if !enabled_ids.contains(&"telegram".to_string()) {
         if let Ok(tg_cfg) = crate::engine::telegram::load_telegram_config(app_handle) {
             if !tg_cfg.bot_token.is_empty() {

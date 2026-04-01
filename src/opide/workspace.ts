@@ -11,6 +11,37 @@ import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { initScmProvider } from './scm-provider.ts'
 import { registerSearchProviders } from './search-provider.ts'
 
+// ─── Deduplication guards ───────────────────────────────────────────────────
+
+const _initializedPaths = new Set<string>()
+const _openWorkspaceEmitted = new Set<string>()
+
+async function ensureServicesForPath(path: string): Promise<void> {
+  if (_initializedPaths.has(path)) {
+    console.log('[opide-workspace] services already initialized for', path, '— skipping')
+    return
+  }
+  _initializedPaths.add(path)
+  console.log('[opide-workspace] initializing SCM + search for', path)
+  try { await initScmProvider(path) } catch (e) {
+    console.warn('[opide-workspace] SCM init failed:', e)
+  }
+  try { await registerSearchProviders(path) } catch (e) {
+    console.warn('[opide-workspace] search init failed:', e)
+  }
+}
+
+async function emitOpenWorkspaceOnce(path: string): Promise<void> {
+  if (_openWorkspaceEmitted.has(path)) {
+    console.log('[opide-workspace] open-workspace already emitted for', path, '— skipping')
+    return
+  }
+  _openWorkspaceEmitted.add(path)
+  const { emit } = await import('@tauri-apps/api/event')
+  await emit('open-workspace', { path })
+  console.log('[opide-workspace] emitted open-workspace for:', path)
+}
+
 // ─── Workspace Path ──────────────────────────────────────────────────────────
 
 /**
@@ -57,9 +88,8 @@ export function createWorkspaceProvider() {
             if (editingService?.addFolders) {
               await editingService.addFolders([{ uri: URI.file(uri.path) }])
               window.location.hash = encodeURIComponent(uri.path)
-              // Trigger backend indexing
-              const { emit } = await import('@tauri-apps/api/event')
-              await emit('open-workspace', { path: uri.path })
+              // Trigger backend indexing (guarded)
+              await emitOpenWorkspaceOnce(uri.path)
               return true
             }
           } catch {
@@ -112,13 +142,11 @@ export async function pickAndOpenFolder(): Promise<boolean> {
         window.location.hash = encodeURIComponent(selected)
         console.log('[opide-workspace] Workspace replaced with:', selected)
 
-        // Initialize workspace services
-        try { await initScmProvider(selected) } catch {}
-        try { await registerSearchProviders(selected) } catch {}
+        // Initialize workspace services (guarded — only runs once per path)
+        await ensureServicesForPath(selected)
 
-        // Notify backend to index the new workspace
-        const { emit } = await import('@tauri-apps/api/event')
-        await emit('open-workspace', { path: selected })
+        // Notify backend to index the new workspace (guarded)
+        await emitOpenWorkspaceOnce(selected)
 
         return true
       }
@@ -145,6 +173,16 @@ export async function listenForWorkspaceOpen(): Promise<void> {
   await listen<{ path: string }>('open-workspace', async (event) => {
     const path = event.payload.path
     if (!path) return
+
+    // If this workspace is already open, do nothing — this event was likely
+    // emitted by emitOpenWorkspaceOnce() to trigger backend indexing, not to
+    // switch workspaces. Without this guard, the listener tries to remove and
+    // re-add the same folder, causing page flashing or a full reload loop.
+    const currentPath = getWorkspacePath()
+    if (currentPath === path) {
+      console.log('[opide-workspace] open-workspace received for already-open path:', path, '— ignoring')
+      return
+    }
 
     console.log('[opide-workspace] Agent opening workspace:', path)
 
@@ -180,13 +218,8 @@ export async function listenForWorkspaceOpen(): Promise<void> {
           console.log('[opide-workspace] Workspace replaced with:', path)
           window.location.hash = encodeURIComponent(path)
 
-          // Initialize workspace services for the new folder
-          try { await initScmProvider(path) } catch (e) {
-            console.warn('[opide-workspace] SCM init for new folder:', e)
-          }
-          try { await registerSearchProviders(path) } catch (e) {
-            console.warn('[opide-workspace] Search init for new folder:', e)
-          }
+          // Initialize workspace services (guarded — only runs once per path)
+          await ensureServicesForPath(path)
           opened = true
         } else {
           console.warn('[opide-workspace] addFolders returned but folder not in workspace — falling through')
@@ -240,25 +273,17 @@ export async function watchWorkspaceFolders(): Promise<void> {
         for (const folder of added) {
           const path = folder?.uri?.fsPath || folder?.uri?.path
           if (path) {
+            // Skip if this is the workspace that was already open at boot —
+            // initWorkspaceServices handles it without the event bus.
+            if (_openWorkspaceEmitted.has(path) || _initializedPaths.has(path)) {
+              console.log('[opide-workspace] Folder change for already-known path:', path, '— skipping')
+              continue
+            }
             console.log('[opide-workspace] Folder added (detected via onDidChangeWorkspaceFolders):', path)
             window.location.hash = encodeURIComponent(path)
-            // Only emit if index isn't already loaded for this workspace
-            try {
-              const { invoke } = await import('@tauri-apps/api/core')
-              const status = await invoke('get_index_status') as any
-              if (!status?.has_index) {
-                const { emit } = await import('@tauri-apps/api/event')
-                await emit('open-workspace', { path })
-              } else {
-                console.log('[opide-workspace] index already loaded — skipping duplicate emit')
-              }
-            } catch {
-              const { emit } = await import('@tauri-apps/api/event')
-              await emit('open-workspace', { path })
-            }
-            // Initialize services for the new folder
-            try { await initScmProvider(path) } catch {}
-            try { await registerSearchProviders(path) } catch {}
+            // Emit + init services (both guarded — only runs once per path)
+            await emitOpenWorkspaceOnce(path)
+            await ensureServicesForPath(path)
           }
         }
       })
@@ -272,6 +297,12 @@ export async function watchWorkspaceFolders(): Promise<void> {
 /**
  * Initialize workspace-dependent services (SCM, search) if a workspace is open.
  * Called after the workbench boots.
+ *
+ * IMPORTANT: This does NOT emit 'open-workspace' to avoid triggering
+ * listenForWorkspaceOpen() which would try to re-add the folder and
+ * potentially reload the page. Instead, it tells the Rust indexer
+ * directly via invoke(), and initializes SCM + search in the background
+ * without blocking the UI.
  */
 export async function initWorkspaceServices(): Promise<void> {
   const workspace = getWorkspacePath()
@@ -282,35 +313,28 @@ export async function initWorkspaceServices(): Promise<void> {
 
   console.log('[opide-workspace] initializing services for', workspace)
 
-  // Only emit open-workspace if the index isn't already loaded
-  // (the backend lib.rs listener may have already indexed on workspace open)
+  // Mark this path as emitted so if watchWorkspaceFolders fires later,
+  // it won't emit a duplicate open-workspace event.
+  _openWorkspaceEmitted.add(workspace)
+
+  // Tell the Rust indexer directly — no event bus, no listener feedback loop.
+  // The Rust side will index in a background Tokio task (non-blocking).
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    const status = await invoke('get_index_status') as any
-    if (!status?.has_index) {
-      const { emit } = await import('@tauri-apps/api/event')
-      await emit('open-workspace', { path: workspace })
-      console.log('[opide-workspace] emitted open-workspace for indexing:', workspace)
-    } else {
-      console.log('[opide-workspace] index already loaded — skipping duplicate open-workspace emit')
-    }
-  } catch (e) {
-    // If get_index_status fails, emit anyway as fallback
-    try {
-      const { emit } = await import('@tauri-apps/api/event')
-      await emit('open-workspace', { path: workspace })
-    } catch {}
+    invoke('trigger_reindex', { workspace }).catch(() => {
+      // trigger_reindex may not exist on older builds — fall back to event
+      import('@tauri-apps/api/event').then(({ emit }) => {
+        emit('open-workspace', { path: workspace })
+      }).catch(() => {})
+    })
+  } catch {
+    // Last resort: emit the event (guarded by _openWorkspaceEmitted won't double-fire)
+    await emitOpenWorkspaceOnce(workspace)
   }
 
-  try {
-    await initScmProvider(workspace)
-  } catch (e) {
-    console.warn('[opide-workspace] SCM init skipped:', e)
-  }
-
-  try {
-    await registerSearchProviders(workspace)
-  } catch (e) {
-    console.warn('[opide-workspace] search provider registration failed:', e)
-  }
+  // Initialize SCM + search in the background — don't block the UI.
+  // These are guarded so they only run once per path.
+  ensureServicesForPath(workspace).catch((e) => {
+    console.warn('[opide-workspace] background service init failed:', e)
+  })
 }

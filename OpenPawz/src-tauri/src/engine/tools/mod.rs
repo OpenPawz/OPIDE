@@ -38,7 +38,9 @@ pub mod canvas;
 pub mod canvas_dashboards;
 pub mod canvas_templates;
 pub mod coinbase;
+#[cfg(feature = "dex")]
 pub mod dex;
+#[cfg(feature = "channels")]
 pub mod discord;
 pub mod discourse;
 pub mod exec;
@@ -48,17 +50,21 @@ pub mod google;
 pub mod integrations;
 pub mod memory;
 pub mod microsoft;
+#[cfg(feature = "docker")]
 pub mod n8n;
 pub mod request_tools;
 pub mod service_api;
 pub mod skill_output;
 pub mod skill_storage;
 pub mod skills_tools;
+#[cfg(feature = "dex")]
 pub mod solana;
 pub mod soul;
 pub mod squads;
 pub mod tasks;
+#[cfg(feature = "channels")]
 pub mod telegram;
+#[cfg(feature = "browser")]
 pub mod web;
 pub mod worker_delegate;
 
@@ -129,6 +135,7 @@ impl ToolDefinition {
         tools.extend(filesystem::definitions());
         tools.extend(soul::definitions());
         tools.extend(memory::definitions());
+        #[cfg(feature = "browser")]
         tools.extend(web::definitions());
         tools.extend(tasks::definitions());
         tools.extend(agents::definitions());
@@ -141,6 +148,7 @@ impl ToolDefinition {
         tools.extend(agent_comms::definitions());
         tools.extend(squads::definitions());
         tools.extend(request_tools::definitions());
+        #[cfg(feature = "docker")]
         tools.extend(n8n::definitions());
         tools.push(plan_tool_definition());
         tools
@@ -171,6 +179,7 @@ impl ToolDefinition {
     }
 
     /// Return the telegram_send tool definition.
+    #[cfg(feature = "channels")]
     pub fn telegram_send() -> Self {
         telegram::definitions()
             .into_iter()
@@ -179,6 +188,7 @@ impl ToolDefinition {
     }
 
     /// Return the telegram_read tool definition.
+    #[cfg(feature = "channels")]
     pub fn telegram_read() -> Self {
         telegram::definitions()
             .into_iter()
@@ -191,14 +201,18 @@ impl ToolDefinition {
         let mut tools = Vec::new();
         for id in enabled_skill_ids {
             match id.as_str() {
+                #[cfg(feature = "channels")]
                 "telegram" => tools.extend(telegram::definitions()),
                 "rest_api" => tools.extend(integrations::definitions_for("rest_api")),
                 "webhook" => tools.extend(integrations::definitions_for("webhook")),
                 "image_gen" => tools.extend(integrations::definitions_for("image_gen")),
+                #[cfg(feature = "channels")]
                 "discord" => tools.extend(discord::definitions()),
                 "discourse" => tools.extend(discourse::definitions()),
                 "coinbase" => tools.extend(coinbase::definitions()),
+                #[cfg(feature = "dex")]
                 "solana_dex" => tools.extend(solana::definitions()),
+                #[cfg(feature = "dex")]
                 "dex" => tools.extend(dex::definitions()),
                 "google_workspace" => tools.extend(google::definitions()),
                 "microsoft_365" => tools.extend(microsoft::definitions()),
@@ -370,8 +384,10 @@ pub async fn execute_tool(
         .or(fetch::execute(name, &args, app_handle).await)
         .or(filesystem::execute(name, &args, agent_id).await)
         .or(soul::execute(name, &args, app_handle, agent_id).await)
-        .or(memory::execute(name, &args, app_handle, agent_id).await)
-        .or(web::execute(name, &args, app_handle).await)
+        .or(memory::execute(name, &args, app_handle, agent_id).await);
+    #[cfg(feature = "browser")]
+    let result = result.or(web::execute(name, &args, app_handle).await);
+    let result = result
         .or(tasks::execute(name, &args, app_handle, agent_id).await)
         .or(agents::execute(name, &args, app_handle, agent_id).await)
         .or(skills_tools::execute(name, &args, app_handle, agent_id).await)
@@ -382,14 +398,25 @@ pub async fn execute_tool(
         .or(canvas_templates::execute(name, &args, app_handle, agent_id).await)
         .or(agent_comms::execute(name, &args, app_handle, agent_id).await)
         .or(squads::execute(name, &args, app_handle, agent_id).await)
-        .or(request_tools::execute(name, &args, app_handle, agent_id).await)
-        .or(telegram::execute(name, &args, app_handle).await)
-        .or(integrations::execute(name, &args, app_handle).await)
-        .or(n8n::execute(name, &args, app_handle).await)
-        .or(coinbase::execute(name, &args, app_handle).await)
+        .or(request_tools::execute(name, &args, app_handle, agent_id).await);
+    #[cfg(feature = "channels")]
+    let result = result
+        .or(telegram::execute(name, &args, app_handle).await);
+    let result = result
+        .or(integrations::execute(name, &args, app_handle).await);
+    #[cfg(feature = "docker")]
+    let result = result
+        .or(n8n::execute(name, &args, app_handle).await);
+    let result = result
+        .or(coinbase::execute(name, &args, app_handle).await);
+    #[cfg(feature = "dex")]
+    let result = result
         .or(solana::execute(name, &args, app_handle).await)
-        .or(dex::execute(name, &args, app_handle).await)
-        .or(discord::execute(name, &args, app_handle).await)
+        .or(dex::execute(name, &args, app_handle).await);
+    #[cfg(feature = "channels")]
+    let result = result
+        .or(discord::execute(name, &args, app_handle).await);
+    let result = result
         .or(discourse::execute(name, &args, app_handle).await)
         .or(google::execute(name, &args, app_handle).await)
         .or(microsoft::execute(name, &args, app_handle).await)

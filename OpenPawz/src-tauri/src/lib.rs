@@ -70,6 +70,7 @@ fn startup_housekeeping(state: &commands::state::EngineState) {
     log::info!("[startup] DB housekeeping complete");
 }
 
+#[cfg(all(feature = "channels", feature = "docker", feature = "browser", feature = "dex"))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install the rustls crypto provider before any TLS usage.

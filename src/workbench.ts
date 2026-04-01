@@ -320,7 +320,6 @@ export async function initializeDeferredFeatures(): Promise<void> {
 
   // ─── Start OpenPawz Engine Event Bus (must be before any views load) ────
   try {
-    // @ts-ignore — Vite alias resolves this at build time
     const { pawEngine } = await import('@openpawz/engine')
     await pawEngine.startListening()
     console.log('[opide] OpenPawz engine event bus started')
@@ -374,6 +373,26 @@ export async function initializeDeferredFeatures(): Promise<void> {
     console.warn('[opide] Extension MCP setup failed:', e)
   }
 
+
+  // ─── Load installed extensions into the workbench ──────────────────────────
+  // Registers themes, grammars, icon packs, snippets, keybindings, etc.
+  // Runs on requestIdleCallback so it never blocks folder open or UI.
+  try {
+    const { loadAllInstalledExtensions } = await import('./opide/extension-loader.ts')
+    const startLoader = () => {
+      loadAllInstalledExtensions().catch((e) =>
+        console.warn('[opide] Extension loader failed:', e),
+      )
+    }
+    // Use idle callback if available, otherwise a long delay
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(startLoader, { timeout: 15000 })
+    } else {
+      setTimeout(startLoader, 10000)
+    }
+  } catch (e) {
+    console.warn('[opide] Extension loader setup failed:', e)
+  }
 
   // ─── Hide VS Code Extensions icon (we have our own Extensions panel) ─────────
   // Hide VS Code's built-in Extensions icon (aria includes keyboard shortcut ⇧⌘X)

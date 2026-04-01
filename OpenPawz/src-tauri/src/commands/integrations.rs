@@ -137,7 +137,7 @@ pub fn engine_integrations_disconnect(
 
     // Purge the skill vault for this service so stale/corrupted credentials
     // don't persist and break future reconnections.
-    let skill_id = crate::commands::n8n::service_to_skill_id(&service_id);
+    let skill_id = crate::commands::integration_map::service_to_skill_id(&service_id);
     if let Some(state) = app_handle.try_state::<EngineState>() {
         if let Err(e) = state.store.delete_all_skill_credentials(&skill_id) {
             warn!(
@@ -508,18 +508,27 @@ pub async fn engine_integration_preflight(
     });
 
     // ── Check 5: n8n engine availability (advisory) ────────────────
-    let n8n_ready = match crate::engine::n8n_engine::load_config(&app_handle) {
-        Ok(config) => config.enabled,
-        Err(_) => false,
-    };
+    #[cfg(feature = "docker")]
+    {
+        let n8n_ready = match crate::engine::n8n_engine::load_config(&app_handle) {
+            Ok(config) => config.enabled,
+            Err(_) => false,
+        };
+        checks.push(PreflightCheck {
+            name: "n8n_engine".into(),
+            passed: n8n_ready,
+            message: if n8n_ready {
+                "n8n integration engine enabled".into()
+            } else {
+                "n8n engine not enabled — Tier 2 OAuth services and MCP bridge unavailable (non-blocking)".into()
+            },
+        });
+    }
+    #[cfg(not(feature = "docker"))]
     checks.push(PreflightCheck {
         name: "n8n_engine".into(),
-        passed: n8n_ready,
-        message: if n8n_ready {
-            "n8n integration engine enabled".into()
-        } else {
-            "n8n engine not enabled — Tier 2 OAuth services and MCP bridge unavailable (non-blocking)".into()
-        },
+        passed: false,
+        message: "n8n engine not available (docker feature disabled)".into(),
     });
 
     let all_passed = checks.iter().all(|c| c.passed);

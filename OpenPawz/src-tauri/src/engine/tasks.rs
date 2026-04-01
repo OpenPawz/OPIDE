@@ -15,7 +15,11 @@ use crate::engine::engram;
 use crate::engine::providers::AnyProvider;
 use crate::engine::state::{normalize_model_name, resolve_provider_for_model, EngineState};
 use crate::engine::types::*;
-use crate::engine::{agent_loop, sessions, skills, sol_dex, telegram};
+use crate::engine::{agent_loop, sessions, skills};
+#[cfg(feature = "dex")]
+use crate::engine::sol_dex;
+#[cfg(feature = "channels")]
+use crate::engine::telegram;
 use log::{error, info, warn};
 use std::collections::HashMap;
 use tauri::{Emitter, Manager};
@@ -118,6 +122,7 @@ pub async fn execute_task(
     if !enabled_ids.is_empty() {
         all_tools.extend(ToolDefinition::skill_tools(&enabled_ids));
     }
+    #[cfg(feature = "channels")]
     if !enabled_ids.contains(&"telegram".into()) {
         if let Ok(tg_cfg) = telegram::load_telegram_config(app_handle) {
             if !tg_cfg.bot_token.is_empty() {
@@ -621,6 +626,7 @@ pub async fn execute_task(
 // ── Position Management ────────────────────────────────────────────────
 
 /// Check all open positions against current prices. Auto-sell on SL/TP.
+#[cfg(feature = "dex")]
 async fn check_positions(app_handle: &tauri::AppHandle) {
     let state = app_handle.state::<EngineState>();
 
@@ -799,6 +805,7 @@ async fn check_positions(app_handle: &tauri::AppHandle) {
 }
 
 /// Execute a sell of `amount` tokens of `mint` for SOL via the swap infrastructure.
+#[cfg(feature = "dex")]
 async fn execute_position_sell(
     _app_handle: &tauri::AppHandle,
     creds: &HashMap<String, String>,
@@ -833,6 +840,7 @@ async fn execute_position_sell(
 pub async fn run_cron_heartbeat(app_handle: &tauri::AppHandle) {
     let state = app_handle.state::<EngineState>();
 
+    #[cfg(feature = "dex")]
     check_positions(app_handle).await;
 
     let due_tasks = match state.store.get_due_cron_tasks() {

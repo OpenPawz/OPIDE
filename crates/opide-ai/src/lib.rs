@@ -1,8 +1,6 @@
 // ── OPIDE AI ────────────────────────────────────────────────────────────────
 //
-// The competitive advantage: AST indexer, WASM skill registry, tool executor,
-// diff editor review, codebase intelligence. This crate is PRIVATE — not
-// included in the open-source distribution.
+// OPIDE AI crate — AST indexing, code intelligence, and sandbox execution.
 //
 // Depends on:
 //   - opide-shell (for ide_mcp, git — shell operations)

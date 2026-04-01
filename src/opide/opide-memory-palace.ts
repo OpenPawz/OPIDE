@@ -8,13 +8,10 @@
 //   3. Dynamic import loadMemoryPalace() on activation
 //   4. Sidebar entry with activity bar icon
 
-// @ts-ignore — Vite alias (order matters: reset → tokens → view CSS)
+// Vite alias (order matters: reset → tokens → view CSS)
 import '@openpawz/styles/_reset.css'
-// @ts-ignore
 import '@openpawz/styles/_tokens.css'
-// @ts-ignore
 import '@openpawz/styles/_memory-palace.css'
-// @ts-ignore
 import '@openpawz/styles/_memory.css'
 
 import {
@@ -344,13 +341,11 @@ class MemoryPalacePane extends SimpleEditorPane {
   async renderInput?(): Promise<IDisposable> {
     try {
       // Set connected state (required — loadMemoryPalace exits immediately without it)
-      // @ts-ignore
       const { setConnected } = await import('@openpawz/state/connection')
       setConnected(true)
 
       // Load the Memory Palace view (binds to all DOM IDs in the scaffold)
       // pawEngine.startListening() is called at app boot in workbench.ts
-      // @ts-ignore
       const { loadMemoryPalace } = await import('@openpawz/views/memory-palace/index')
       await loadMemoryPalace()
     } catch (e) {
@@ -454,9 +449,8 @@ export function registerMemoryPalace(): void {
 
   // Also register in command palette
   import(
-    // @ts-ignore
     '@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions'
-  ).then((actionsModule: any) => {
+  ).then((actionsModule) => {
     const { Action2, registerAction2 } = actionsModule
     if (!registerAction2 || !Action2) return
 

@@ -9,7 +9,9 @@
 //   Tier 3 — RFC 7591 dynamic registration (engine_oauth_rfc7591_start)
 //   Tier 5 — Manual API keys (existing flow)
 
-use crate::commands::n8n::{get_n8n_endpoint, map_integration_to_skill};
+use crate::commands::integration_map::map_integration_to_skill;
+#[cfg(feature = "docker")]
+use crate::commands::n8n::get_n8n_endpoint;
 use crate::engine::key_vault;
 use crate::engine::oauth::{
     get_n8n_oauth_type, get_oauth_config, get_rfc7591_config, n8n_credential_url,
@@ -150,6 +152,7 @@ pub async fn engine_oauth_start(
     // n8n engine as a credential, then deploy an MCP workflow so the
     // agent discovers the service's tools through the MCP bridge.
     // Runs in background so it doesn't delay the OAuth response.
+    #[cfg(feature = "docker")]
     {
         let sid = service_id.clone();
         let tok = tokens.clone();
@@ -711,6 +714,7 @@ fn provision_oauth_to_skill_vault(
 
 /// Map an OAuth service ID to the n8n node type and display name
 /// for MCP workflow deployment.
+#[cfg(feature = "docker")]
 pub(crate) fn oauth_service_to_n8n_node(service_id: &str) -> Option<(&'static str, &'static str)> {
     match service_id {
         "gmail" | "google" | "google-workspace" => Some(("n8n-nodes-base.gmail", "Gmail")),
@@ -731,6 +735,7 @@ pub(crate) fn oauth_service_to_n8n_node(service_id: &str) -> Option<(&'static st
 ///
 /// Non-fatal: failures are logged but never block the OAuth flow.
 /// Runs as a background task so it doesn't slow down the OAuth response.
+#[cfg(feature = "docker")]
 async fn provision_oauth_to_n8n(
     service_id: &str,
     tokens: &OAuthTokens,
@@ -902,6 +907,7 @@ async fn provision_oauth_to_n8n(
 }
 
 /// Find an existing n8n credential by name.
+#[cfg(feature = "docker")]
 async fn find_n8n_credential(
     client: &reqwest::Client,
     base_url: &str,
@@ -1026,6 +1032,7 @@ pub async fn oauth_token_refresh_loop(app_handle: tauri::AppHandle) {
 
                     // Update n8n credential with refreshed tokens
                     // (no workflow deploy needed — already exists)
+                    #[cfg(feature = "docker")]
                     {
                         let sid = service_id.to_string();
                         let tok = new_tokens.clone();

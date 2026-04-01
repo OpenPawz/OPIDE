@@ -10,6 +10,7 @@ pub mod audit;
 pub mod automations;
 pub mod browser;
 pub mod canvas;
+#[cfg(feature = "channels")]
 pub mod channels;
 pub mod chat;
 pub mod config;
@@ -20,10 +21,12 @@ pub mod flows;
 pub mod forge;
 pub mod guardrails;
 pub mod health_monitor;
+pub mod integration_map;
 pub mod integrations;
 pub mod mail;
 pub mod mcp;
 pub mod memory;
+#[cfg(feature = "docker")]
 pub mod n8n;
 pub mod oauth;
 pub mod ollama;
@@ -40,4 +43,5 @@ pub mod tool_bridge;
 pub mod trade;
 pub mod tts;
 pub mod utility;
+#[cfg(feature = "channels")]
 pub mod webhook;

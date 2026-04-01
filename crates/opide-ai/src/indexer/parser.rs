@@ -4,6 +4,69 @@
 use super::types::*;
 use tree_sitter::{Parser, Node};
 use regex::Regex;
+use std::sync::LazyLock;
+
+// ─── Compiled Regexes (compiled once, reused across all parse calls) ────────
+
+// Move language regexes
+static RE_MOVE_MODULE: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*module\s+[A-Za-z0-9_:]+::([A-Za-z_][A-Za-z0-9_]*)\s*\{"
+).unwrap());
+static RE_MOVE_FUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*(public(?:\(friend\))?(?:\s+entry)?\s+fun|entry\s+fun|fun)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^{]+))?"
+).unwrap());
+static RE_MOVE_STRUCT: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*(?:public\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+has\s+[a-z, ]+)?\s*(?:\{|;)"
+).unwrap());
+static RE_MOVE_CONST: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*const\s+([A-Z_][A-Za-z0-9_]*)\s*:\s*([^=]+)="
+).unwrap());
+static RE_MOVE_USE: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*use\s+([A-Za-z0-9_:]+(?:::\{[^}]+\}|::[A-Za-z_][A-Za-z0-9_]*))\s*;"
+).unwrap());
+
+// COBOL language regexes
+static RE_COBOL_PROGRAM: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)PROGRAM-ID\.\s+([A-Z][A-Z0-9-]*)"
+).unwrap());
+static RE_COBOL_SECTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^[ \t]+([A-Z0-9][A-Z0-9-]+)\s+SECTION\."
+).unwrap());
+static RE_COBOL_PARA: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^[ \t]{4,11}([A-Z0-9][A-Z0-9-]{2,})\.\s*$"
+).unwrap());
+static RE_COBOL_01: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s+01\s+([A-Z][A-Z0-9-]+)"
+).unwrap());
+static RE_COBOL_PERFORM: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)PERFORM\s+([A-Z0-9][A-Z0-9-]+)"
+).unwrap());
+static RE_COBOL_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r#"(?m)CALL\s+['"]([A-Z][A-Z0-9-]*)['"]"#
+).unwrap());
+static RE_COBOL_COPY: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r#"(?m)COPY\s+['"]?([A-Z][A-Z0-9-]*)['"]?"#
+).unwrap());
+
+// Fortran language regexes
+static RE_FORTRAN_PROGRAM: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*PROGRAM\s+([A-Z][A-Z0-9_]*)"
+).unwrap());
+static RE_FORTRAN_MODULE: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*MODULE\s+([A-Z][A-Z0-9_]*)"
+).unwrap());
+static RE_FORTRAN_SUB: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*(?:RECURSIVE\s+)?SUBROUTINE\s+([A-Z][A-Z0-9_]*)\s*(?:\(([^)]*)\))?"
+).unwrap());
+static RE_FORTRAN_FUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*(?:(?:PURE|ELEMENTAL|RECURSIVE)\s+)*(?:[A-Z]+\s+)?FUNCTION\s+([A-Z][A-Z0-9_]*)\s*(?:\(([^)]*)\))?"
+).unwrap());
+static RE_FORTRAN_USE: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)^\s*USE\s+(?:::)?\s*([A-Z][A-Z0-9_]*)"
+).unwrap());
+static RE_FORTRAN_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(
+    r"(?m)CALL\s+([A-Z][A-Z0-9_]*)\s*(?:\(|$)"
+).unwrap());
 
 /// Convert a byte offset to a 1-based line number.
 fn byte_to_line(source: &str, byte: usize) -> usize {
@@ -1658,30 +1721,11 @@ fn extract_param_names(params_node: &Node, source: &str) -> Vec<String> {
 fn extract_move(source: &str, index: &mut FileIndex) {
     let lines: Vec<&str> = source.lines().collect();
 
-    // module 0xaddr::name {  |  module my_package::my_module {
-    let re_module = Regex::new(
-        r"(?m)^\s*module\s+[A-Za-z0-9_:]+::([A-Za-z_][A-Za-z0-9_]*)\s*\{"
-    ).unwrap();
-
-    // fun variants: public fun / public entry fun / entry fun / public(friend) fun / fun
-    let re_fun = Regex::new(
-        r"(?m)^\s*(public(?:\(friend\))?(?:\s+entry)?\s+fun|entry\s+fun|fun)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^{]+))?"
-    ).unwrap();
-
-    // struct Name has key, store, drop, copy {
-    let re_struct = Regex::new(
-        r"(?m)^\s*(?:public\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+has\s+[a-z, ]+)?\s*(?:\{|;)"
-    ).unwrap();
-
-    // const NAME: Type = value;
-    let re_const = Regex::new(
-        r"(?m)^\s*const\s+([A-Z_][A-Za-z0-9_]*)\s*:\s*([^=]+)="
-    ).unwrap();
-
-    // use address::module::Name;  |  use address::module::{A, B};
-    let re_use = Regex::new(
-        r"(?m)^\s*use\s+([A-Za-z0-9_:]+(?:::\{[^}]+\}|::[A-Za-z_][A-Za-z0-9_]*))\s*;"
-    ).unwrap();
+    let re_module = &*RE_MOVE_MODULE;
+    let re_fun = &*RE_MOVE_FUN;
+    let re_struct = &*RE_MOVE_STRUCT;
+    let re_const = &*RE_MOVE_CONST;
+    let re_use = &*RE_MOVE_USE;
 
     // ── Modules ───────────────────────────────────────────────────────────────
     for cap in re_module.captures_iter(source) {
@@ -1840,9 +1884,7 @@ fn extract_cobol(source: &str, index: &mut FileIndex) {
 
     // ── PROGRAM-ID ────────────────────────────────────────────────────────────
     // PROGRAM-ID. PROG-NAME.   or   PROGRAM-ID. PROG-NAME
-    let re_program = Regex::new(
-        r"(?m)PROGRAM-ID\.\s+([A-Z][A-Z0-9-]*)"
-    ).unwrap();
+    let re_program = &*RE_COBOL_PROGRAM;
     for cap in re_program.captures_iter(&upper) {
         let name = cap[1].to_string();
         let line = byte_to_line(&upper, cap.get(0).unwrap().start());
@@ -1859,9 +1901,7 @@ fn extract_cobol(source: &str, index: &mut FileIndex) {
 
     // ── PROCEDURE DIVISION sections ───────────────────────────────────────────
     // SECTION-NAME SECTION.
-    let re_section = Regex::new(
-        r"(?m)^[ \t]+([A-Z0-9][A-Z0-9-]+)\s+SECTION\."
-    ).unwrap();
+    let re_section = &*RE_COBOL_SECTION;
     let section_starts: Vec<(String, usize)> = re_section
         .captures_iter(&upper)
         .map(|cap| {
@@ -1896,9 +1936,7 @@ fn extract_cobol(source: &str, index: &mut FileIndex) {
     // Pattern: line starts with optional whitespace (≥ 6 chars indent for Area A),
     // then an identifier, then a period, with nothing else on the line (or just spaces).
     // We skip section headers (already captured above) and division headers.
-    let re_para = Regex::new(
-        r"(?m)^[ \t]{4,11}([A-Z0-9][A-Z0-9-]{2,})\.\s*$"
-    ).unwrap();
+    let re_para = &*RE_COBOL_PARA;
 
     let skip_names: std::collections::HashSet<&str> = [
         "IDENTIFICATION", "DATA", "ENVIRONMENT", "PROCEDURE", "CONFIGURATION",
@@ -1936,9 +1974,7 @@ fn extract_cobol(source: &str, index: &mut FileIndex) {
 
     // ── 01-level data items (top-level records) ───────────────────────────────
     // 01 RECORD-NAME.   or   01 WS-COUNTER PIC 9(4).
-    let re_01 = Regex::new(
-        r"(?m)^\s+01\s+([A-Z][A-Z0-9-]+)"
-    ).unwrap();
+    let re_01 = &*RE_COBOL_01;
     for cap in re_01.captures_iter(&upper) {
         let name = cap[1].to_string();
         if name == "FILLER" { continue; }
@@ -1958,9 +1994,7 @@ fn extract_cobol(source: &str, index: &mut FileIndex) {
     // PERFORM PARA-NAME
     // PERFORM PARA-NAME UNTIL / THRU / VARYING
     // PERFORM PARA-NAME THRU END-PARA
-    let re_perform = Regex::new(
-        r"(?m)PERFORM\s+([A-Z0-9][A-Z0-9-]+)"
-    ).unwrap();
+    let re_perform = &*RE_COBOL_PERFORM;
     for cap in re_perform.captures_iter(&upper) {
         let callee = cap[1].to_string();
         // Skip PERFORM VARYING / PERFORM UNTIL inline (no target name)
@@ -1986,9 +2020,7 @@ fn extract_cobol(source: &str, index: &mut FileIndex) {
     // ── CALL statements → CallSite (external program calls) ──────────────────
     // CALL 'PROG-NAME' USING ...
     // CALL PROG-VAR USING ...
-    let re_call = Regex::new(
-        r#"(?m)CALL\s+['"]([A-Z][A-Z0-9-]*)['"]"#
-    ).unwrap();
+    let re_call = &*RE_COBOL_CALL;
     for cap in re_call.captures_iter(&upper) {
         let callee = cap[1].to_string();
         let line = byte_to_line(&upper, cap.get(0).unwrap().start());
@@ -2008,9 +2040,7 @@ fn extract_cobol(source: &str, index: &mut FileIndex) {
 
     // ── COPY statements → ImportInfo (copybook includes) ─────────────────────
     // COPY COPYBOOK-NAME.   or   COPY 'COPYBOOK.CPY'.
-    let re_copy = Regex::new(
-        r#"(?m)COPY\s+['"]?([A-Z][A-Z0-9-]*)['"]?"#
-    ).unwrap();
+    let re_copy = &*RE_COBOL_COPY;
     for cap in re_copy.captures_iter(&upper) {
         let name = cap[1].to_string();
         let line = byte_to_line(&upper, cap.get(0).unwrap().start());
@@ -2041,7 +2071,7 @@ fn extract_fortran(source: &str, index: &mut FileIndex) {
     let lines: Vec<&str> = source.lines().collect();
 
     // ── Programs ──────────────────────────────────────────────────────────────
-    let re_program = Regex::new(r"(?m)^\s*PROGRAM\s+([A-Z][A-Z0-9_]*)").unwrap();
+    let re_program = &*RE_FORTRAN_PROGRAM;
     for cap in re_program.captures_iter(&upper) {
         let name = cap[1].to_string();
         let line = byte_to_line(&upper, cap.get(0).unwrap().start());
@@ -2057,7 +2087,7 @@ fn extract_fortran(source: &str, index: &mut FileIndex) {
     }
 
     // ── Modules ───────────────────────────────────────────────────────────────
-    let re_module = Regex::new(r"(?m)^\s*MODULE\s+([A-Z][A-Z0-9_]*)").unwrap();
+    let re_module = &*RE_FORTRAN_MODULE;
     for cap in re_module.captures_iter(&upper) {
         let name = cap[1].to_string();
         if name == "PROCEDURE" { continue; } // MODULE PROCEDURE is different
@@ -2075,9 +2105,7 @@ fn extract_fortran(source: &str, index: &mut FileIndex) {
     }
 
     // ── Subroutines ───────────────────────────────────────────────────────────
-    let re_sub = Regex::new(
-        r"(?m)^\s*(?:RECURSIVE\s+)?SUBROUTINE\s+([A-Z][A-Z0-9_]*)\s*(?:\(([^)]*)\))?"
-    ).unwrap();
+    let re_sub = &*RE_FORTRAN_SUB;
     for cap in re_sub.captures_iter(&upper) {
         let name = cap[1].to_string();
         let params_raw = cap.get(2).map_or("", |m| m.as_str());
@@ -2100,9 +2128,7 @@ fn extract_fortran(source: &str, index: &mut FileIndex) {
     }
 
     // ── Functions ─────────────────────────────────────────────────────────────
-    let re_fun = Regex::new(
-        r"(?m)^\s*(?:(?:PURE|ELEMENTAL|RECURSIVE)\s+)*(?:[A-Z]+\s+)?FUNCTION\s+([A-Z][A-Z0-9_]*)\s*(?:\(([^)]*)\))?"
-    ).unwrap();
+    let re_fun = &*RE_FORTRAN_FUN;
     for cap in re_fun.captures_iter(&upper) {
         let name = cap[1].to_string();
         if matches!(name.as_str(), "IF" | "WHILE" | "DO" | "SELECT") { continue; }
@@ -2126,7 +2152,7 @@ fn extract_fortran(source: &str, index: &mut FileIndex) {
     }
 
     // ── USE imports ───────────────────────────────────────────────────────────
-    let re_use = Regex::new(r"(?m)^\s*USE\s+(?:::)?\s*([A-Z][A-Z0-9_]*)").unwrap();
+    let re_use = &*RE_FORTRAN_USE;
     for cap in re_use.captures_iter(&upper) {
         let name = cap[1].to_string();
         let line = byte_to_line(&upper, cap.get(0).unwrap().start());
@@ -2140,7 +2166,7 @@ fn extract_fortran(source: &str, index: &mut FileIndex) {
     }
 
     // ── CALL statements ───────────────────────────────────────────────────────
-    let re_call = Regex::new(r"(?m)CALL\s+([A-Z][A-Z0-9_]*)\s*(?:\(|$)").unwrap();
+    let re_call = &*RE_FORTRAN_CALL;
     for cap in re_call.captures_iter(&upper) {
         let callee = cap[1].to_string();
         if matches!(callee.as_str(), "SYSTEM" | "EXIT") { continue; }

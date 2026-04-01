@@ -3,6 +3,7 @@
 
 use crate::atoms::error::EngineResult;
 use crate::atoms::types::*;
+#[cfg(feature = "docker")]
 use crate::engine::sandbox;
 use crate::engine::state::EngineState;
 use crate::engine::util::safe_truncate;
@@ -173,28 +174,31 @@ async fn execute_exec(
     }
 
     // Check sandbox config — if enabled, route through Docker container
-    let sandbox_config = {
-        let state = app_handle.state::<EngineState>();
-        sandbox::load_sandbox_config(&state.store)
-    };
+    #[cfg(feature = "docker")]
+    {
+        let sandbox_config = {
+            let state = app_handle.state::<EngineState>();
+            sandbox::load_sandbox_config(&state.store)
+        };
 
-    if sandbox_config.enabled {
-        info!(
-            "[engine] exec: routing through sandbox (image={})",
-            sandbox_config.image
-        );
-        match sandbox::run_in_sandbox(command, &sandbox_config).await {
-            Ok(result) => return Ok(sandbox::format_sandbox_result(&result)),
-            Err(e) => {
-                warn!(
-                    "[engine] Sandbox execution failed — refusing to fall back to host: {}",
-                    e
-                );
-                return Err(format!(
-                    "Sandbox execution failed (host fallback is disabled for security): {}",
-                    e
-                )
-                .into());
+        if sandbox_config.enabled {
+            info!(
+                "[engine] exec: routing through sandbox (image={})",
+                sandbox_config.image
+            );
+            match sandbox::run_in_sandbox(command, &sandbox_config).await {
+                Ok(result) => return Ok(sandbox::format_sandbox_result(&result)),
+                Err(e) => {
+                    warn!(
+                        "[engine] Sandbox execution failed — refusing to fall back to host: {}",
+                        e
+                    );
+                    return Err(format!(
+                        "Sandbox execution failed (host fallback is disabled for security): {}",
+                        e
+                    )
+                    .into());
+                }
             }
         }
     }

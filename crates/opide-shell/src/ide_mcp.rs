@@ -93,6 +93,31 @@ pub async fn ide_write_file(path: String, content: String) -> Result<(), String>
 }
 
 #[tauri::command]
+pub async fn ide_delete_file(path: String, recursive: Option<bool>) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("Not found: {path}"));
+    }
+
+    if p.is_dir() && recursive.unwrap_or(false) {
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .map_err(|e| format!("Remove dir failed: {e}"))?;
+    } else if p.is_dir() {
+        tokio::fs::remove_dir(&path)
+            .await
+            .map_err(|e| format!("Remove dir failed: {e}"))?;
+    } else {
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| format!("Remove file failed: {e}"))?;
+    }
+
+    log::info!("[opide-mcp] deleted {path}");
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn ide_list_dir(path: String) -> Result<DirectoryListing, String> {
     let mut entries = Vec::new();
     let mut dir = tokio::fs::read_dir(&path)
