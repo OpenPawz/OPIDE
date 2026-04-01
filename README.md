@@ -1,19 +1,21 @@
 <p align="center">
-  <img src="public/brand-vertical.png" alt="OPIDE" width="280" />
+  <img src="OPIDE_Branding/1.png" alt="OPIDE" width="320" />
 </p>
 
-<h3 align="center">The AI-Native IDE</h3>
+<h3 align="center">The world's first AI-native IDE built entirely in Rust.</h3>
 
 <p align="center">
-  A desktop IDE with a built-in AI coding agent, AST-level code intelligence, and a sandboxed execution engine.<br />
-  Bring your own API key. Use any model. Ship faster.
+  Not a fork. Not a wrapper. Not a clone.<br />
+  A ground-up desktop IDE with a biological memory system, multi-agent orchestration,<br />
+  AST-level code intelligence, and a sandboxed execution engine — all in Rust.
 </p>
 
 <p align="center">
-  <a href="#features">Features</a> &bull;
+  <a href="#what-is-opide">What is OPIDE?</a> &bull;
+  <a href="#engram---the-memory-system">Engram</a> &bull;
+  <a href="#openpawz---the-engine">OpenPawz Engine</a> &bull;
+  <a href="#ast-indexing">AST Indexing</a> &bull;
   <a href="#getting-started">Getting Started</a> &bull;
-  <a href="#supported-providers">Providers</a> &bull;
-  <a href="#architecture">Architecture</a> &bull;
   <a href="#contributing">Contributing</a>
 </p>
 
@@ -28,37 +30,201 @@
 
 ## What is OPIDE?
 
-OPIDE is a native desktop IDE built on Rust + Tauri with a full Monaco editor and an AI agent that doesn't just suggest code — it writes, edits, tests, and ships it.
+OPIDE is a **new class of IDE**. It looks like VS Code — that's where the similarity ends.
 
-Unlike cloud-based AI editors, OPIDE runs entirely on your machine. You bring your own API keys, choose your model, and the agent works with real tools: filesystem access, terminal, git, and deep code understanding through AST analysis.
+Under the surface it's a Rust-native desktop application powered by **OpenPawz**, an AI agent runtime with a biologically-inspired memory system called **Engram**, multi-agent orchestration, 10-layer security, and AST-level code intelligence built on tree-sitter.
 
-<p align="center">
-  <img src="OPIDE_Branding/1.png" alt="OPIDE Screenshot" width="800" />
-</p>
+The agent doesn't just autocomplete your code. It remembers your codebase across sessions, understands call graphs and type hierarchies, runs sandboxed operations, delegates to specialised sub-agents, and encrypts sensitive data at rest with AES-256-GCM — automatically.
 
-## Features
+**Everything is Rust.** The engine, the memory, the security, the sandbox enforcement, the agent loop, the tool execution. The frontend is TypeScript on Monaco for the editor surface. Everything underneath is compiled, type-safe, and fast.
 
-### AI Agent with Real Tools
-The built-in agent doesn't just write code in a chat window. It has direct access to:
-- **File read/write/edit** — creates and modifies files directly
-- **Terminal execution** — runs builds, tests, linters, any shell command
-- **Git operations** — stage, commit, diff, log, branch management
-- **Web browsing** — fetch documentation, search the web, read URLs
-- **Sandboxed execution** — batch multi-step operations in a single JavaScript sandbox call
+### Why this exists
 
-### AST-Level Code Intelligence
-OPIDE indexes your codebase with tree-sitter and builds a full call graph:
-- **`ast_callers`** — find every caller of a function across the entire codebase
-- **`ast_callees`** — trace what a function calls
-- **`ast_impact`** — predict what breaks if you change something
-- **`ast_definition`** — jump to definition instantly
-- **`ast_type_info`** — understand type hierarchies
-- **Semantic search** — find code by meaning, not just keywords
+Every "AI IDE" today is one of two things: a VS Code fork with a chat panel bolted on, or a cloud editor that sends your code to a server. Both rely on the LLM's context window as "memory" — when the conversation ends, everything is forgotten.
 
-The agent uses these tools natively — it understands your codebase structure without reading every file.
+OPIDE is different:
+- **It remembers.** Engram gives the agent persistent memory with consolidation, decay, and retrieval — modelled on how biological memory works.
+- **It understands structure.** Tree-sitter AST indexing means the agent knows your call graph, type hierarchy, and impact radius without reading every file.
+- **It's secure by default.** PII detection, field-level encryption, sandbox enforcement, keychain integration, audit trails — not optional plugins, built into the core.
+- **It's a platform.** OpenPawz is a standalone agent runtime. OPIDE is one host app. The same engine powers multi-agent workflows, MCP servers, and channel integrations.
 
-### Execution Sandbox
-The `execute_code` sandbox lets the agent batch operations:
+---
+
+## Engram — The Memory System
+
+The core innovation. A biologically-inspired three-tier memory architecture with 23 Rust modules.
+
+### Three Tiers
+
+| Tier | Name | What it stores | Lifetime |
+|------|------|---------------|----------|
+| **0** | Sensory Buffer | Raw input from current turn — messages, tool results, recalled memories | Single turn (ring buffer, 20 items) |
+| **1** | Working Memory | Active context — priority-evicted slots with token budgets (4,096 tokens default) | Current session |
+| **2** | Long-Term Memory Graph | Persistent knowledge across sessions — episodic, knowledge, procedural | Permanent (with decay) |
+
+### Long-Term Memory Graph
+
+Three interconnected stores with typed graph edges:
+
+- **Episodic** — "what happened." Conversations, events, results. Each memory has an importance score, strength (decays via Ebbinghaus curve), scope, and optional vector embedding.
+- **Knowledge** — "what is true." Subject-predicate-object triples. `("Project", "uses", "Rust + TypeScript")`. Auto-reconsolidated when facts update.
+- **Procedural** — "how to do things." Step-by-step procedures with trigger conditions and success/failure tracking.
+
+### Advanced Retrieval Pipeline
+
+Not just keyword search. A four-stage pipeline:
+
+1. **Gating** — classifies intent (Skip / Retrieve / Deep / Refuse / Defer). Prevents 40% of unnecessary memory lookups. Based on Self-RAG and CRAG research.
+2. **Hybrid Search** — BM25 full-text + vector semantic search across all three stores simultaneously.
+3. **Reranking** — Reciprocal Rank Fusion (RRF, k=60), Maximal Marginal Relevance (MMR), cross-type deduplication.
+4. **Quality Gating** — NDCG scoring, CRAG 3-tier classification (Correct / Ambiguous / Incorrect). Every search returns quality metrics.
+
+### Consolidation & Decay
+
+Runs automatically every 5 minutes:
+- **Pattern clustering** — extracts semantic patterns from episodic memories
+- **Contradiction detection** — finds and resolves conflicting knowledge
+- **FadeMem dual-layer decay** — LML (beta=0.8) / SML (beta=1.2) Ebbinghaus forgetting curves
+- **Garbage collection** — with transactional savepoint rollback to prevent quality degradation
+- **Memory fusion** — merges memories with cosine similarity >= 0.75, creates tombstones for superseded entries
+
+### Dream Replay
+
+Hippocampal-inspired background process. When the application is idle, Engram re-embeds memories, discovers new connections, and strengthens important recall pathways.
+
+### Cognitive Modules
+
+- **Emotional Memory** — affective scoring (valence, arousal, dominance) with flashbulb encoding for high-importance events
+- **Meta-Cognition** — knowledge confidence mapping and self-reflection
+- **Intent Classifier** — 6-intent query routing
+- **Entity Tracker** — canonical name resolution across memories
+- **Abstraction Tree** — 4-level hierarchical semantic compression for context window packing
+- **Memory Bus** — multi-agent memory sync with pub/sub and scoped read capabilities
+
+---
+
+## OpenPawz — The Engine
+
+OPIDE's runtime is **OpenPawz** — a standalone multi-agent AI engine written entirely in Rust.
+
+### Agent Loop
+
+The core execution cycle:
+1. **Assemble context** — budget-aware prompt assembly (system prompt capped at 45% of context, history at 35% minimum, reply tokens reserved)
+2. **Send to model** — stream through the provider abstraction
+3. **Execute tools** — dispatch tool calls through the sandbox
+4. **Repeat** — until final response or max rounds
+
+Built-in safety:
+- **Tool circuit breaker** — tracks consecutive failures per tool, injects nudges after 3, blocks after 5
+- **Repetition detector** — hashes tool call signatures, detects and breaks loops
+- **Yield signaling** — graceful interruption when user sends a new message mid-turn
+- **Token budget enforcement** — context window never exceeded, budget-aware at every stage
+
+### Multi-Agent Orchestration
+
+Boss/worker pattern with specialised sub-agents:
+
+```
+Boss Agent (orchestrator)
+├── Coder Agent      — writes and edits code
+├── Researcher Agent — searches docs, reads URLs
+├── Security Agent   — reviews for vulnerabilities
+└── General Agent    — fallback for uncategorised tasks
+```
+
+The boss decomposes goals into subtasks, delegates to workers, monitors progress, requests revisions, and synthesises results. Each agent can have its own model, system prompt, and capability set. Workers cannot spawn other agents — no infinite recursion.
+
+### 10 AI Providers
+
+| Provider | Implementation |
+|----------|---------------|
+| Anthropic | Native Messages API |
+| Google | Native Gemini API |
+| OpenAI | Native API |
+| DeepSeek | OpenAI-compatible |
+| Moonshot (Kimi) | OpenAI-compatible |
+| xAI (Grok) | OpenAI-compatible |
+| Mistral | OpenAI-compatible |
+| OpenRouter | OpenAI-compatible |
+| Ollama | Local models, OpenAI-compatible |
+| Custom | Any OpenAI-compatible endpoint |
+
+Every provider implements the `AiProvider` trait — streaming, tool use, thinking/reasoning tokens, model capability detection. Model routing resolves per-agent overrides, falling back through a 5-level hierarchy.
+
+### MCP Server Support
+
+Full Model Context Protocol integration:
+- **Stdio transport** — spawns MCP servers as child processes
+- **SSE transport** — HTTP long-polling for remote servers
+- Tool discovery, invocation, and result validation
+- Multi-server lifecycle management with health monitoring
+
+---
+
+## AST Indexing
+
+Tree-sitter powered code intelligence. Not grep. Not regex. Actual parsed ASTs.
+
+### Supported Languages
+
+Full tree-sitter parsing: **TypeScript, JavaScript, TSX, JSX, Rust, Python, Go, C, C++, Java, Ruby, CSS, JSON**
+Typed AST parsing: **Solidity** (via solang-parser)
+Regex extraction: **Move, COBOL, Fortran**
+
+### What Gets Indexed
+
+Every file produces a `FileIndex`:
+- **Symbols** — functions, classes, types, traits, interfaces
+- **Imports** — local and external dependencies
+- **Exports** — public API surface
+- **Call sites** — who calls whom, with position data
+- **Type references** — type hierarchies and usage
+- **Scopes** — lexical scope information
+
+These roll up into a `ProjectIndex` with a full dependency graph, framework detection, entry point identification, and config file tracking.
+
+### Agent Tools
+
+The agent queries the index directly:
+
+| Tool | What it does |
+|------|-------------|
+| `ast_callers` | Find every caller of a function across the entire codebase |
+| `ast_callees` | Trace what a function calls |
+| `ast_impact` | Predict what breaks if you change something |
+| `ast_definition` | Jump to definition |
+| `ast_type_info` | Understand type hierarchies |
+| `search_semantic` | Find code by meaning (embedding-based) |
+| `search_text` | Find code by keyword |
+
+The agent understands your codebase structure without reading every file. It knows call graphs, impact radius, and type relationships before it writes a single line.
+
+---
+
+## 10-Layer Security
+
+Security is not a feature — it's the architecture.
+
+| Layer | What it does |
+|-------|-------------|
+| **1. Rust type system** | No null pointers, no data races, no use-after-free. Compile-time guarantees. |
+| **2. Memory encryption** | PII detected via 17 regex patterns + LLM classification. Three tiers: Cleartext, Sensitive (AES-256-GCM + searchable summary), Confidential (fully encrypted, vector-only search). |
+| **3. Sandbox enforcement** | All file operations forced through QuickJS sandbox with HostApi trait. No raw filesystem access from agent. |
+| **4. Tool circuit breaker** | Blocks tools after 5 consecutive failures. Prevents infinite loops and resource exhaustion. |
+| **5. MCP isolation** | External MCP servers run in separate processes. Tool results validated before injection. |
+| **6. Keychain integration** | API keys stored in OS keychain (macOS Keychain, Linux secret-service). Single unlock, encrypted at rest. |
+| **7. Token budget enforcement** | Context window never exceeded. Prevents context overflow attacks. |
+| **8. GDPR compliance** | Automatic PII tier escalation, key rotation with re-encryption, memory purge capabilities. |
+| **9. Audit trail** | Every operation logged — agent actions, tool calls, memory access, security decisions. Queryable history. |
+| **10. SQLite encryption** | Database encrypted at rest. Anti-forensic measures: file size masking, metadata zeroing. |
+
+---
+
+## The Sandbox
+
+The agent executes code in a **QuickJS** (rquickjs) sandbox with a controlled `HostApi`:
+
 ```js
 function run(ctx) {
   var src = ctx.file_read("src/app.ts");
@@ -68,36 +234,65 @@ function run(ctx) {
   return { success: result.exit_code === 0 };
 }
 ```
-One round trip instead of ten. All file changes go through the diff editor for review.
 
-### Full Monaco Editor
-Built on the same editor as VS Code, with:
+The `ctx` object exposes: `file_read`, `file_write`, `dir_list`, `exec`, `git_status`, `git_diff`, `git_log`, `git_branches`, `search`, `get_diagnostics`, `get_selection`, `get_open_files`.
+
+No raw filesystem access. No network access. No child process spawning outside the HostApi. The host controls exactly what the agent can do.
+
+---
+
+## OVST Extensions
+
+OPIDE does **not** use VS Code's extension API. It runs its own extension system:
+
+- **Node.js sidecar process** — extensions get full Node.js capabilities (fs, child_process, net)
+- **JSON-RPC communication** — Content-Length framed messages over stdio
+- **Auto-restart on crash** — health monitoring with crash counter to prevent infinite loops
+- **No sandbox restrictions** — extensions are trusted code with full system access
+
+This is simpler, faster, and more powerful than VS Code's sandboxed extension host.
+
+---
+
+## Editor
+
+The editor surface is Monaco — the same editor core as VS Code. It provides:
 - Syntax highlighting, IntelliSense, code folding
+- LSP diagnostics with inline error markers
+- Ghost completions (inline suggestions with Tab-to-accept)
+- Inline edit (Cmd+K) with selection-aware code transformation
 - Integrated file explorer, search, terminal
-- O VST extension support
-- Multi-window support
 - Git integration with diff viewer
 
-### BYO API Key — Any Provider
-Configure any AI provider from the settings panel:
+The editor is the interface. Everything else — the agent, the memory, the security, the indexing — is Rust underneath.
 
-| Provider | Models |
-|----------|--------|
-| Anthropic | Claude Opus, Sonnet, Haiku |
-| OpenAI | GPT-4o, o3, o4-mini |
-| Google | Gemini 2.5 Pro, Flash |
-| DeepSeek | DeepSeek Chat, Reasoner |
-| Moonshot | Kimi K2 |
-| xAI | Grok 3 |
-| Mistral | Large, Small, Codestral |
-| OpenRouter | Any model via routing |
-| Ollama | Any local model |
-| Custom | Any OpenAI-compatible endpoint |
+---
 
-Model routing lets you use a powerful model for orchestration and a cheap model for simple tasks.
+## Architecture
 
-### MCP Server Support
-Connect external tools via the [Model Context Protocol](https://modelcontextprotocol.io). MCP servers appear as tools the agent can call — extend OPIDE with any capability.
+```
+OPIDE
+├── src/                    # TypeScript — Monaco editor surface, chat UI
+├── src-tauri/              # Tauri shell — window management, plugin stack
+├── crates/
+│   ├── opide-ai/           # AST indexer, tool executor, sandbox bridge
+│   ├── opide-bridge/       # Hook traits: ToolAssembler, ProviderFactory
+│   └── opide-shell/        # Terminal, git, LSP, DAP, file watcher, extensions
+├── opide-sandbox/          # QuickJS execution sandbox (rquickjs)
+└── OpenPawz/               # The engine
+    └── src-tauri/src/engine/
+        ├── agent_loop/     # Core agent execution cycle
+        ├── engram/         # Memory system (23 modules)
+        ├── orchestrator/   # Multi-agent boss/worker
+        ├── providers/      # 10 AI provider implementations
+        ├── mcp/            # Model Context Protocol integration
+        ├── routing/        # Channel + model routing
+        └── ...
+```
+
+OPIDE is a host app. OpenPawz is the platform. The bridge layer (`opide-bridge`) connects them through Rust traits — `ToolAssembler`, `ProviderFactory`, `ExternalToolExecutor` — so the engine never depends on the IDE.
+
+---
 
 ## Getting Started
 
@@ -119,34 +314,14 @@ First build compiles the Rust backend (~2-3 min). Subsequent launches are fast.
 
 ### Configure a Provider
 
-On first launch, the provider setup panel appears. Pick a provider, paste your API key, select a model, and you're ready to go. You can add more providers and configure model routing in **Settings** (Cmd+,).
+On first launch, the provider setup panel appears. Pick a provider, paste your API key, select a model, and you're ready. Add more providers and configure model routing in **Settings** (Cmd+,).
 
-## Architecture
-
-```
-OPIDE
-├── src/                    # TypeScript frontend (Monaco, chat, UI)
-│   └── opide/
-│       ├── chat/           # Agent chat panel, streaming, system prompts
-│       ├── editor/         # Monaco editor integration
-│       └── ...
-├── src-tauri/              # Tauri entry point, window management
-├── crates/
-│   ├── opide-ai/           # AI engine: tool execution, model routing
-│   ├── opide-bridge/       # Tool filtering, procedural memory
-│   └── opide-shell/        # Git operations, terminal management
-├── opide-sandbox/          # JS execution sandbox (rquickjs)
-├── OpenPawz/               # Core engine (state, providers, agents)
-└── extension-adapters/     # O VST extension system
-```
-
-**Powered by [OpenPawz](https://github.com/OpenPawz)** — the engine handles provider management, agent state, conversation history, key vault, and the model routing layer.
+---
 
 ## Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-**Quick start:**
 1. Fork the repo
 2. Create a feature branch (`git checkout -b feat/my-feature`)
 3. Make your changes
@@ -155,11 +330,13 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 6. Submit a PR
 
 ### Areas We'd Love Help With
-- **Language support** — tree-sitter grammars for more languages
-- **O VST extensions** — build extensions that integrate with the agent
-- **MCP servers** — build and share MCP tool servers
-- **UI/UX** — themes, layouts, accessibility
-- **Documentation** — guides, tutorials, examples
+- **Tree-sitter grammars** — add parsing for more languages
+- **OVST extensions** — build extensions that integrate with the agent
+- **MCP servers** — build and share tool servers
+- **Engram research** — memory consolidation, retrieval strategies, decay models
+- **Security** — audit, pen testing, encryption improvements
+
+---
 
 ## License
 
@@ -170,5 +347,6 @@ You are free to use, modify, and distribute OPIDE. If you run a modified version
 ---
 
 <p align="center">
+  <img src="OPIDE_Branding/5.png" alt="OpenPawz" width="48" /><br />
   Built by <a href="https://github.com/OpenPawz">OpenPawz</a>
 </p>
