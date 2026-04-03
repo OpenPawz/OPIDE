@@ -241,11 +241,11 @@ No raw filesystem access. No network access. No child process spawning outside t
 
 ---
 
-## OVST Extensions
+## Open VSX Extensions
 
-OPIDE does **not** use VS Code's extension API. It runs **OVST** (OPIDE Virtual Sidecar Transport) — a proprietary extension runtime built from the ground up in Rust.
+OPIDE does **not** use VS Code's proprietary extension marketplace. It uses **Open VSX** — the open-source extension registry at [open-vsx.org](https://open-vsx.org), which provides thousands of compatible extensions without any Microsoft lock-in.
 
-OVST is the first working extension system for a Rust-native IDE. The runtime source is not included in this repository. The public API and stub fallbacks are provided so the IDE compiles and runs without extension support — full OVST is available in OPIDE V2.
+The extension runtime source is not included in this repository. Public API stubs are provided so the IDE compiles and runs without extension support — full Open VSX integration is available in OPIDE V2.
 
 ---
 
@@ -326,7 +326,7 @@ We welcome contributions — open an issue or submit a PR.
 
 ### Areas We'd Love Help With
 - **Tree-sitter grammars** — add parsing for more languages
-- **OVST extensions** — build extensions that integrate with the agent
+- **Open VSX extensions** — build extensions that integrate with the agent
 - **MCP servers** — build and share tool servers
 - **Engram research** — memory consolidation, retrieval strategies, decay models
 - **Security** — audit, pen testing, encryption improvements
