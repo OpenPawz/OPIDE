@@ -281,7 +281,7 @@ function handleSidecarMessage(raw: string): void {
   }
 }
 
-function routeNotification(method: string, params: any, id?: number): void {
+async function routeNotification(method: string, params: any, id?: number): Promise<void> {
   switch (method) {
     // ── Extension lifecycle ──────────────────────────────────────
     case 'extensionHost/ready': {

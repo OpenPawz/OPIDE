@@ -13,6 +13,7 @@ import {
   renderMessages,
   updateStreamingBubble,
   showStreamingBubble,
+  commitStreamingBubble,
   showToolIndicator,
   hideToolIndicator,
   updateStatus,
@@ -72,6 +73,13 @@ export async function ensureListening(): Promise<void> {
     switch (payload.kind) {
       case 'delta': {
         const ev = payload as Extract<EngineEvent, { kind: 'delta' }>
+        // Clear thinking timer the moment content starts flowing
+        if (S.thinkingTimerInterval !== null) {
+          clearInterval(S.thinkingTimerInterval)
+          S.thinkingTimerInterval = null
+          S.thinkingStartTs = null
+          updateStatus('')
+        }
         // Auto-create streaming bubble if missing — happens after a redirect when
         // the old run's Complete fires first and finalizeStreaming clears the bubble
         if (!S.streamingBubble) {
@@ -84,7 +92,14 @@ export async function ensureListening(): Promise<void> {
         break
       }
       case 'thinking_delta': {
-        updateStatus('Thinking…')
+        if (S.thinkingStartTs === null) {
+          S.thinkingStartTs = Date.now()
+          S.thinkingTimerInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - (S.thinkingStartTs ?? Date.now())) / 1000)
+            updateStatus(`Thinking… ${elapsed}s`)
+          }, 1000)
+        }
+        updateStatus(`Thinking… ${Math.floor((Date.now() - S.thinkingStartTs) / 1000)}s`)
         break
       }
       case 'tool_request': {
@@ -305,8 +320,14 @@ function handleSurfaced(ev: Extract<EngineEvent, { kind: 'surfaced' }>): void {
 // ─── Finalize Streaming ──────────────────────────────────────────────────────
 
 function finalizeStreaming(ev: Extract<EngineEvent, { kind: 'complete' }>): void {
-  S.msgList?.querySelector('#opide-streaming')?.remove()
-  S.streamingBubble = null
+  // Clear thinking timer (fires when model skips straight to complete with no deltas)
+  if (S.thinkingTimerInterval !== null) {
+    clearInterval(S.thinkingTimerInterval)
+    S.thinkingTimerInterval = null
+    S.thinkingStartTs = null
+  }
+  // Finalize the streaming bubble in-place — full markdown render, no remove+append flash
+  commitStreamingBubble(ev.text)
   S.streamAccum = ''
   // Mark this run as completed before clearing — so any delayed events arriving
   // after S.runId is null are still correctly identified and dropped.

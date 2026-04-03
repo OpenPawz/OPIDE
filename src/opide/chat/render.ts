@@ -404,17 +404,73 @@ export function showStreamingBubble(): void {
   S.msgList.scrollTop = S.msgList.scrollHeight
 }
 
+/** Returns true when the scroll position is close enough to the bottom that
+ *  auto-scrolling is appropriate (i.e. user hasn't manually scrolled up). */
+function isNearBottom(): boolean {
+  if (!S.msgList) return true
+  const { scrollTop, scrollHeight, clientHeight } = S.msgList
+  return scrollHeight - scrollTop - clientHeight < 100
+}
+
+/** Lightweight streaming render: avoids full marked.parse on every frame.
+ *  Handles code fences, inline code, bold and newlines.  Full markdown is
+ *  applied by commitStreamingBubble() once the stream is complete. */
+function renderStreamingText(text: string): string {
+  // Split on fenced code blocks so we handle their content separately
+  const segments = text.split(/(```[\w]*\n?[\s\S]*?```)/g)
+  return segments.map((seg, i) => {
+    if (i % 2 === 1) {
+      // Code-block segment — preserve as <pre>
+      const m = seg.match(/^```(\w*)\n?([\s\S]*)```$/)
+      if (m) {
+        const lang = m[1]
+        const code = m[2].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        return `<pre class="opide-code-block"${lang ? ` data-lang="${lang}"` : ''}><code>${code}</code></pre>`
+      }
+    }
+    // Regular text segment
+    return seg
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n/g, '<br>')
+  }).join('')
+}
+
 export function updateStreamingBubble(text: string): void {
   if (!S.streamingBubble) return
   S.pendingStreamText = text
-
-  if (S.streamingUpdateTimer) return
-  S.streamingUpdateTimer = setTimeout(() => {
-    S.streamingUpdateTimer = null
+  // Schedule exactly one DOM update per animation frame — no artificial delay
+  if (S.streamingRafId !== null) return
+  S.streamingRafId = requestAnimationFrame(() => {
+    S.streamingRafId = null
     if (!S.streamingBubble) return
-    S.streamingBubble.innerHTML = renderMd(S.pendingStreamText) + '<span class="opide-stream-cursor"></span>'
-    S.msgList?.scrollTo({ top: S.msgList.scrollHeight })
-  }, 80)
+    S.streamingBubble.innerHTML =
+      renderStreamingText(S.pendingStreamText) + '<span class="opide-stream-cursor"></span>'
+    if (isNearBottom()) S.msgList?.scrollTo({ top: S.msgList.scrollHeight })
+  })
+}
+
+/** Finalise the streaming bubble in-place with full markdown, then bump the
+ *  internal render counter so renderMessages() treats it as already rendered.
+ *  This avoids the remove-then-append flash that was visible on stream end. */
+export function commitStreamingBubble(text: string): void {
+  // Cancel any pending frame first
+  if (S.streamingRafId !== null) {
+    cancelAnimationFrame(S.streamingRafId)
+    S.streamingRafId = null
+  }
+  if (!S.streamingBubble) return
+  // Full markdown render now that the stream is complete
+  S.streamingBubble.innerHTML = renderMd(text)
+  // Promote the wrapper from a transient streaming element to a permanent one
+  const wrap = S.streamingBubble.closest('#opide-streaming')
+  if (wrap) wrap.removeAttribute('id')
+  S.streamingBubble = null
+  // Tell renderMessages() this slot is already in the DOM
+  _renderedCount++
 }
 
 // ─── Tool / Status Indicators ────────────────────────────────────────────────

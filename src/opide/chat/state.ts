@@ -81,9 +81,13 @@ interface ChatState {
   surfaceBtn: HTMLButtonElement | null
   resumeBtn: HTMLButtonElement | null
 
-  // ── Streaming debounce ──────────────────────────────────────────────
-  streamingUpdateTimer: ReturnType<typeof setTimeout> | null
+  // ── Streaming frame scheduling ──────────────────────────────────────
+  streamingRafId: number | null
   pendingStreamText: string
+
+  // ── Thinking elapsed timer ───────────────────────────────────────────
+  thinkingStartTs: number | null
+  thinkingTimerInterval: ReturnType<typeof setInterval> | null
 
   // ── Sandbox progress log ────────────────────────────────────────────
   progressLog: HTMLDivElement | null
@@ -145,8 +149,10 @@ export const S: ChatState = {
   surfaceBtn: null,
   resumeBtn: null,
 
-  streamingUpdateTimer: null,
+  streamingRafId: null,
   pendingStreamText: '',
+  thinkingStartTs: null,
+  thinkingTimerInterval: null,
 
   progressLog: null,
   progressUnlisten: null,
