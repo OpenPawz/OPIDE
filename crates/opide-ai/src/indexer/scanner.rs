@@ -192,14 +192,36 @@ pub fn extract_package_deps(root: &Path) -> Vec<String> {
 }
 
 /// Find entry point files.
+/// B183: extended the candidate list with modern-framework entry points
+/// (Astro, SvelteKit, Next.js app/, Remix, Nuxt 3, SolidStart) and added
+/// JSX/JS variants so React projects without TS still resolve.
 pub fn find_entry_points(root: &Path) -> Vec<String> {
     let candidates = [
-        "src/main.tsx", "src/main.ts", "src/index.tsx", "src/index.ts",
+        // React / Vite / generic JS/TS
+        "src/main.tsx", "src/main.ts", "src/main.jsx", "src/main.js",
+        "src/index.tsx", "src/index.ts", "src/index.jsx", "src/index.js",
+        // Astro
+        "src/pages/index.astro", "astro.config.mjs", "astro.config.ts",
+        // SvelteKit
+        "src/routes/+page.svelte", "src/app.html",
+        // Next.js (app router + pages router)
+        "app/page.tsx", "app/page.jsx", "pages/index.tsx", "pages/index.jsx", "pages/_app.tsx",
+        // Remix / SolidStart
+        "app/root.tsx", "src/entry-server.tsx",
+        // Nuxt
+        "app.vue", "nuxt.config.ts",
+        // Rust
         "src/main.rs", "src/lib.rs",
-        "src/app.py", "main.py", "app.py",
-        "index.html", "index.js", "index.ts",
+        // Python
+        "src/app.py", "main.py", "app.py", "src/__init__.py",
+        // Web
+        "index.html", "public/index.html", "index.js", "index.ts",
+        // Go
         "main.go", "cmd/main.go",
+        // Java
         "Main.java", "src/main/java/Main.java",
+        // Ruby
+        "config.ru", "app.rb",
     ];
 
     candidates

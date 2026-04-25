@@ -43,17 +43,39 @@ pub fn index_workspace(root: &Path) -> ProjectIndex {
     );
 
     // Parse each file
+    let mut read_failures = 0usize;
+    let mut empty_parse = 0usize;
     for sf in &source_files {
         let content = match std::fs::read_to_string(&sf.path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                // B178: log instead of silently dropping the file. Surfaces
+                // permission and encoding failures that would otherwise be
+                // invisible until somebody noticed missing search results.
+                log::warn!("[indexer] Read failed for {}: {}", sf.path.display(), e);
+                read_failures += 1;
+                continue;
+            }
         };
 
         let mut file_index = parser::parse_file(&content, sf.language);
+        if file_index.symbols.is_empty() && !content.trim().is_empty() {
+            empty_parse += 1;
+            log::debug!("[indexer] Empty parse result for {}", sf.path.display());
+        }
         file_index.path = sf.relative_path.clone();
         file_index.size = sf.size;
 
         project.files.push(file_index);
+    }
+    if read_failures > 0 {
+        log::warn!("[indexer] {} files unreadable", read_failures);
+    }
+    if empty_parse > 0 {
+        log::info!(
+            "[indexer] {} files produced empty parse results",
+            empty_parse
+        );
     }
 
     // Build dependency graph from imports
@@ -95,14 +117,33 @@ pub async fn run_full_index(
 ) {
     use tauri::Emitter;
 
-    // Guard: never index an empty or non-existent path
+    // Guard: never index an empty or non-existent path.
+    // B179: emit a final progress event even on the skip paths so the
+    // activity feed can clear its "indexing" state instead of showing the
+    // spinner forever.
     if workspace.trim().is_empty() {
         log::warn!("[indexer] Skipping index — workspace path is empty");
+        let _ = app_handle.emit(
+            "indexer-progress",
+            serde_json::json!({
+                "phase": "skipped",
+                "reason": "no workspace",
+                "percent": 100,
+            }),
+        );
         return;
     }
     let root = Path::new(workspace);
     if !root.exists() {
         log::warn!("[indexer] Skipping index — path does not exist: {}", workspace);
+        let _ = app_handle.emit(
+            "indexer-progress",
+            serde_json::json!({
+                "phase": "skipped",
+                "reason": "path not found",
+                "percent": 100,
+            }),
+        );
         return;
     }
 
@@ -187,13 +228,27 @@ pub async fn run_full_index(
     };
 
     // Update index with embedded chunks and persist
+    let mut save_error: Option<String> = None;
     if let Ok(mut idx) = state.index.lock() {
         if let Some(ref mut code_index) = *idx {
             code_index.update_chunks(chunks);
             if let Err(e) = code_index.save_to_disk() {
                 log::warn!("[indexer] Failed to save index: {}", e);
+                save_error = Some(e.to_string());
             }
         }
+    }
+    // B180: surface save failures to the frontend so the user knows the
+    // in-memory index is correct but won't survive a restart.
+    if let Some(err) = save_error {
+        let _ = app_handle.emit(
+            "indexer-progress",
+            serde_json::json!({
+                "phase": "cache_save_failed",
+                "error": err,
+                "percent": 100,
+            }),
+        );
     }
 
     let _ = app_handle.emit("indexer-progress", serde_json::json!({
