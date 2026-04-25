@@ -61,6 +61,77 @@ const SENSITIVE_PATHS: &[&str] = &[
     "src-tauri/src/engine",
 ];
 
+/// B133: structured detection of credential-shaped values in user-written
+/// content. Each branch matches a known prefix or strict shape — never a
+/// loose substring — so README mentions of AWS or .env.example templates
+/// don't trigger the writer block.
+fn looks_like_credential_value(content: &str) -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        let raw: &[(&str, &'static str)] = &[
+            // GitHub PAT / OAuth / Apps / fine-grained
+            (r"\bgh[poursa]_[A-Za-z0-9]{36,}\b", "GitHub token"),
+            (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "GitHub fine-grained PAT"),
+            // OpenAI / Anthropic style keys
+            (r"\bsk-[A-Za-z0-9_-]{30,}\b", "OpenAI/Anthropic API key"),
+            // AWS access key id
+            (r"\bAKIA[0-9A-Z]{16}\b", "AWS access key ID"),
+            // Slack tokens
+            (r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", "Slack token"),
+            // Private key blocks (whole header, not just prefix)
+            (
+                r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+                "private key block",
+            ),
+            // JWT (3 segments)
+            (
+                r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b",
+                "JWT token",
+            ),
+        ];
+        raw.iter()
+            .map(|(p, label)| (regex::Regex::new(p).expect("invalid cred regex"), *label))
+            .collect()
+    });
+
+    for (re, label) in patterns {
+        if re.is_match(content) {
+            return Some(label);
+        }
+    }
+
+    // KEY=VALUE patterns where VALUE has high entropy. Skip example
+    // templates so .env.example / .env.sample don't false-positive.
+    if !content.contains(".env.example") && !content.contains(".env.sample") {
+        let kv_re: &OnceLock<regex::Regex> = {
+            static KV: OnceLock<regex::Regex> = OnceLock::new();
+            &KV
+        };
+        let re = kv_re.get_or_init(|| {
+            regex::Regex::new(
+                r"(?m)^\s*[A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD)\s*=\s*([A-Za-z0-9+/=_-]{20,})",
+            )
+            .expect("invalid kv regex")
+        });
+        for cap in re.captures_iter(content) {
+            let value = &cap[1];
+            let placeholder = value.starts_with("your_")
+                || value.starts_with("YOUR_")
+                || value.starts_with("placeholder")
+                || value.starts_with("PLACEHOLDER")
+                || value.contains("EXAMPLE")
+                || value.contains("REPLACE_ME")
+                || value.contains("CHANGEME");
+            if !placeholder {
+                return Some("KEY=VALUE credential");
+            }
+        }
+    }
+
+    None
+}
+
 /// Resolve a raw path (absolute or relative to agent workspace) into a
 /// canonicalized `PathBuf`.  Returns `Err` if the path escapes the agent
 /// workspace via `..` traversal or targets a sensitive location.
@@ -104,20 +175,49 @@ fn resolve_and_validate(
         resolved.clone()
     };
 
-    // Block `..` in the raw path to prevent traversal even when canonicalize isn't decisive
-    if raw_path.contains("..") {
-        let ws = super::agent_workspace(agent_id);
-        if let Ok(canon_ws) = ws.canonicalize() {
-            if !canonical.starts_with(&canon_ws) {
-                warn!(
-                    "[engine] {} blocked path traversal: {} (agent={})",
-                    operation, raw_path, agent_id
-                );
-                return Err(format!(
-                    "{}: path '{}' escapes the agent workspace. Use paths within your workspace or absolute paths to allowed locations.",
-                    operation, raw_path
-                ).into());
-            }
+    // B132: enforce workspace confinement on every call, not only when the
+    // raw path contains `..`. The previous gate let absolute paths walk
+    // straight to system locations as long as the literal raw string didn't
+    // contain dot-dot. Now an absolute path that resolves outside the
+    // agent's workspace must match an explicit allowlist.
+    let ws_root = super::agent_workspace(agent_id);
+    let canon_ws = ws_root.canonicalize().unwrap_or(ws_root.clone());
+    let in_workspace = canonical.starts_with(&canon_ws);
+    if !in_workspace {
+        // Allowlisted prefixes outside the workspace — temp dirs and the
+        // agent's own data root. Adjust here if policy needs to widen.
+        const ALLOWED_OUTSIDE_WORKSPACE: &[&str] = &[
+            "/tmp/",
+            "/private/tmp/",
+            "/var/folders/",
+            "/var/tmp/",
+            "/private/var/tmp/",
+        ];
+        let path_str_l = canonical.to_string_lossy().to_lowercase();
+        let allowed_temp = ALLOWED_OUTSIDE_WORKSPACE
+            .iter()
+            .any(|p| path_str_l.starts_with(p));
+        // Also allow read-only access to the user's home directory for
+        // operations that genuinely need it (config files, project search
+        // outside the workspace). The sensitive-path blocklist below still
+        // gates dangerous targets like ~/.ssh and ~/.aws.
+        let in_home = dirs::home_dir()
+            .and_then(|h| h.canonicalize().ok())
+            .map(|h| canonical.starts_with(&h))
+            .unwrap_or(false);
+        if !allowed_temp && !in_home {
+            warn!(
+                "[engine] {} blocked: {} resolved to {} (outside workspace, not allowlisted) (agent={})",
+                operation,
+                raw_path,
+                canonical.display(),
+                agent_id
+            );
+            return Err(format!(
+                "{}: path '{}' is outside the agent's workspace and not in the access allowlist.",
+                operation, raw_path
+            )
+            .into());
         }
     }
 
@@ -129,6 +229,17 @@ fn resolve_and_validate(
     #[cfg(not(target_os = "macos"))]
     let path_str = canonical.to_string_lossy().to_string();
     for sensitive in SENSITIVE_PATHS {
+        // B138: the `src-tauri/src/engine` entry blocked legitimate engine
+        // forks from editing their own source. Skip it when the
+        // `engine-fork-mode` feature is enabled at compile time so a fork
+        // can opt out without removing the rest of the blocklist.
+        #[cfg(feature = "engine-fork-mode")]
+        {
+            if *sensitive == "src-tauri/src/engine" {
+                continue;
+            }
+        }
+
         if sensitive.starts_with('/') {
             // Absolute sensitive path
             if path_str.starts_with(sensitive) {
@@ -336,39 +447,19 @@ async fn execute_write_file(args: &serde_json::Value, agent_id: &str) -> EngineR
         agent_id
     );
 
-    let content_lower = content.to_lowercase();
-    let has_private_key = content.contains("-----BEGIN") && content.contains("PRIVATE KEY");
-    let has_api_secret =
-        content_lower.contains("api_key_secret") || content_lower.contains("cdp_api_key");
-    let has_raw_b64_key = content.len() > 40
-        && content.contains("==")
-        && (content_lower.contains("secret") || content_lower.contains("private"));
-    // §Security: Expanded credential pattern detection
-    let has_known_token_prefix = content.contains("ghp_")    // GitHub PAT
-        || content.contains("gho_")    // GitHub OAuth
-        || content.contains("github_pat_")  // GitHub fine-grained PAT
-        || content.starts_with("sk-")   // OpenAI API key
-        || content.contains("\"sk-")   // OpenAI key in JSON
-        || content.contains("xoxb-")   // Slack bot token
-        || content.contains("xoxp-")   // Slack user token
-        || content.contains("AKIA"); // AWS access key ID prefix
-    let has_env_secrets = content_lower.contains("aws_secret_access_key")
-        || content_lower.contains("openai_api_key")
-        || content_lower.contains("discord_bot_token")
-        || content_lower.contains("github_token")
-        || content_lower.contains("database_url")
-        || (content_lower.contains("password") && content_lower.contains("="));
-    if has_private_key
-        || has_api_secret
-        || has_raw_b64_key
-        || has_known_token_prefix
-        || has_env_secrets
-    {
-        return Err(
-            "Cannot write files containing API secrets or private keys. \
-             Credentials are managed securely by the engine — use built-in skill tools directly."
-                .into(),
-        );
+    // B133: structured credential detection. The previous bag-of-substrings
+    // (`AKIA` anywhere, `secret` anywhere with `==`) tripped on legitimate
+    // documentation (README mentioning AWS variables, code comments
+    // describing tokens, .env.example templates, base64-encoded binaries
+    // that happen to end with `==`). High-FP credential blocks made
+    // write_file unusable for ordinary .md / .ts source.
+    if let Some(kind) = looks_like_credential_value(content) {
+        return Err(format!(
+            "Cannot write file: detected what looks like a {}. \
+             Credentials should be managed by the engine's skill vault, not written to disk.",
+            kind
+        )
+        .into());
     }
 
     if let Some(parent) = resolved.parent() {

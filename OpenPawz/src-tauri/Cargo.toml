@@ -126,6 +126,11 @@ channels = ["dep:matrix-sdk", "dep:aes", "dep:cbc", "dep:k256", "dep:tiny-keccak
 dex = ["dep:bs58", "dep:k256", "dep:tiny-keccak"]
 browser = ["dep:headless_chrome", "dep:scraper"]
 docker = ["dep:bollard"]
+# B138: engine forks can opt out of the `src-tauri/src/engine` block in
+# the filesystem tool's sensitive-path list. Default builds keep the
+# block on so the engine itself can't be self-edited from inside an
+# agent run.
+engine-fork-mode = []
 
 # ── Benchmarks ──────────────────────────────────────────────
 [dev-dependencies]

@@ -154,6 +154,23 @@ async fn execute_exec(
                     agent_id,
                     safe_truncate(command, 100)
                 );
+                // B129: emit a Tauri audit event in addition to blocking, so the
+                // UI can show a "blocked" badge and the user can audit which
+                // commands the agent attempted. The block itself is best-effort
+                // (regex blocklists are bypassable by encoding/indirection) —
+                // the real security boundary is the tool-approval modal +
+                // sandboxed execute_code. The event makes the speed-bump
+                // observable instead of silent.
+                use tauri::Emitter;
+                let _ = app_handle.emit(
+                    "exec-audit",
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "pattern": label,
+                        "command_preview": safe_truncate(command, 200),
+                        "action": "blocked",
+                    }),
+                );
                 return Err(format!(
                     "exec: command blocked by security policy — matches dangerous pattern '{}'. \
                      Credential access and reverse shells are not permitted.",
