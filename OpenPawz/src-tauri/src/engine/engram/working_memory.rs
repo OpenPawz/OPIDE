@@ -78,13 +78,13 @@ impl WorkingMemory {
         }
 
         self.current_tokens += slot.token_cost;
-        self.slots.push(slot);
-        // Re-sort by priority descending
-        self.slots.sort_by(|a, b| {
-            b.priority
-                .partial_cmp(&a.priority)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // B92: binary-search insertion preserving sorted-desc order. Same
+        // asymptotic cost as the full sort but avoids re-sorting the entire
+        // vector on every insert.
+        let pos = self
+            .slots
+            .partition_point(|s| s.priority > slot.priority);
+        self.slots.insert(pos, slot);
 
         evicted
     }
@@ -243,6 +243,14 @@ impl WorkingMemory {
             };
             slot.priority *= source_factor;
         }
+        // B91: priorities mutated — the descending-sort invariant is now
+        // broken. Re-sort so subsequent operations (eviction, format_for_context)
+        // see the correct order.
+        self.slots.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         cognitive_event::emit(
             &self.agent_id,
             cognitive_event::CognitiveEventKind::DecayApplied {
@@ -360,6 +368,16 @@ impl WorkingMemory {
                 "[working_memory] Agent '{}': evicted {} stale task slots (ToolResult+Recall) on redirect",
                 self.agent_id,
                 removed
+            );
+            // B96: emit a cognitive event so downstream listeners (UI feed,
+            // telemetry) see redirect-driven eviction. decay_factor=0.0 signals
+            // "bulk eviction, not gradual decay".
+            cognitive_event::emit(
+                &self.agent_id,
+                cognitive_event::CognitiveEventKind::DecayApplied {
+                    slots_count: self.slots.len(),
+                    decay_factor: 0.0,
+                },
             );
         }
         removed
