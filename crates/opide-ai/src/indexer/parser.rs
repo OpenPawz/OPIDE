@@ -86,6 +86,7 @@ pub fn parse_file(content: &str, language: Language) -> FileIndex {
         type_refs: Vec::new(),
         scopes: Vec::new(),
         line_count: content.lines().count(),
+        skip_embedding: false,
     };
 
     // Solidity uses solang-parser (typed AST), not tree-sitter

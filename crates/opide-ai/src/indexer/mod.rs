@@ -65,6 +65,9 @@ pub fn index_workspace(root: &Path) -> ProjectIndex {
         }
         file_index.path = sf.relative_path.clone();
         file_index.size = sf.size;
+        // B182: propagate the scanner's skip_embedding so chunker stamps
+        // every chunk for this file accordingly.
+        file_index.skip_embedding = sf.skip_embedding;
 
         project.files.push(file_index);
     }
@@ -192,6 +195,40 @@ pub async fn run_full_index(
     // Phase I2: Chunk
     let mut chunks = chunker::chunk_project(&project, root);
     log::info!("[indexer] {} chunks from {} files", chunks.len(), project.file_count());
+
+    // B177: warm the embedding cache from a prior run if we have one.
+    // Reattaching by content hash means unchanged chunks skip the
+    // embedder entirely on the next call (`embed_chunks` short-circuits
+    // when `embedding.is_some()`). When the workspace shifts (file edits,
+    // renames), only the changed chunks pay for new embeddings.
+    if let Some(prior) = index::CodeIndex::load_from_disk(workspace) {
+        let mut cache_by_hash: std::collections::HashMap<u64, Vec<f32>> =
+            std::collections::HashMap::new();
+        for chunk in prior.chunks() {
+            if let Some(emb) = &chunk.embedding {
+                if chunk.content_hash != 0 {
+                    cache_by_hash.entry(chunk.content_hash).or_insert_with(|| emb.clone());
+                }
+            }
+        }
+        if !cache_by_hash.is_empty() {
+            let mut reused = 0usize;
+            for chunk in chunks.iter_mut() {
+                if chunk.embedding.is_none() && chunk.content_hash != 0 {
+                    if let Some(emb) = cache_by_hash.get(&chunk.content_hash) {
+                        chunk.embedding = Some(emb.clone());
+                        reused += 1;
+                    }
+                }
+            }
+            if reused > 0 {
+                log::info!(
+                    "[indexer] B177 cache: reused {} embeddings from prior index",
+                    reused
+                );
+            }
+        }
+    }
 
     // Phase I3: Build index IMMEDIATELY (AST, call graph, type hierarchy)
     // This makes ide_ast_* tools available right away without waiting for embeddings.
