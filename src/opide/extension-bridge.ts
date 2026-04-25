@@ -22,6 +22,18 @@ function debugLog(msg: string): void {
   console.log(`[ext-bridge] ${msg}`)
 }
 
+// ─── Centralised extensions-dir resolution (B36) ────────────────────────────
+
+let _extensionsDirCache: string | null = null
+async function getExtensionsDirAsync(): Promise<string> {
+  if (_extensionsDirCache) return _extensionsDirCache
+  const { homeDir } = await import('@tauri-apps/api/path')
+  const home = (await homeDir()).replace(/[\\/]+$/, '')
+  if (!home) throw new Error('Could not determine home directory for extensions')
+  _extensionsDirCache = `${home}/.opide/extensions`
+  return _extensionsDirCache
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface ExtHostMessageEvent {
@@ -80,9 +92,7 @@ export async function startExtensionHost(
     return
   }
 
-  const extPath =
-    extensionsPath ||
-    `${(globalThis as any).process?.env?.HOME || '/tmp'}/.opide/extensions`
+  const extPath = extensionsPath || await getExtensionsDirAsync()
 
   debugLog(`startExtensionHost called: ws=${workspacePath} ext=${extPath}`)
 
@@ -101,9 +111,19 @@ export async function startExtensionHost(
       cb(status, detail)
     }
 
-    // Auto-restart on crash (with backoff)
+    // Auto-restart on crash. CRITICAL (B37): clean up the *current* listeners
+    // and pending requests before scheduling the restart — otherwise each
+    // crash leaves its listeners attached and we get N+1 message handlers
+    // after N crashes.
     if (status === 'crashed') {
       console.warn('[ext-bridge] Extension host crashed — will restart in 3s')
+      if (_unlistenMessage) { _unlistenMessage(); _unlistenMessage = null }
+      if (_unlistenStatus)  { _unlistenStatus();  _unlistenStatus  = null }
+      for (const [id, p] of _pendingRequests) {
+        clearTimeout(p.timer)
+        p.reject(new Error('Extension host crashed'))
+        _pendingRequests.delete(id)
+      }
       _running = false
       setTimeout(() => {
         startExtensionHost(workspacePath, extensionsPath).catch((e) =>
@@ -127,11 +147,8 @@ export async function startExtensionHost(
 
 /** Stop the extension host sidecar. */
 export async function stopExtensionHost(): Promise<void> {
-  if (!_running) return
-
-  await invoke('ext_host_stop').catch(() => {})
-  _running = false
-
+  // Always clean up listeners + reject pending — even when !_running, because
+  // a previous crash may have left listeners attached (B38).
   if (_unlistenMessage) {
     _unlistenMessage()
     _unlistenMessage = null
@@ -140,12 +157,20 @@ export async function stopExtensionHost(): Promise<void> {
     _unlistenStatus()
     _unlistenStatus = null
   }
-
+  for (const [id, p] of _pendingRequests) {
+    clearTimeout(p.timer)
+    p.reject(new Error('Extension host stopped'))
+    _pendingRequests.delete(id)
+  }
   _extensions = []
   _activatedIds = []
   _extensionCommands.clear()
-  _pendingRequests.clear()
 
+  // Only call the IPC if we believe the host is still alive.
+  if (_running) {
+    await invoke('ext_host_stop').catch(() => {})
+    _running = false
+  }
   console.log('[ext-bridge] Extension host stopped')
 }
 
@@ -545,12 +570,11 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'fs/delete': {
       const { uri: delUri, recursive: delRecursive } = params || {}
       if (delUri) {
-        const { invoke } = await import('@tauri-apps/api/core')
         invoke('ide_delete_file', { path: delUri, recursive: delRecursive ?? false })
           .then(() => { if (id) sendResponse(id, null) })
           .catch((e: unknown) => { if (id) sendResponse(id, { error: String(e) }) })
-      } else {
-        if (id) sendResponse(id, null)
+      } else if (id) {
+        sendResponse(id, null)
       }
       break
     }
@@ -1548,7 +1572,7 @@ export async function initExtensionInstallSync(): Promise<void> {
  */
 async function _syncExtensionToSidecar(extensionId: string, sourcePath: string): Promise<void> {
   try {
-    const targetDir = getExtensionsDir()
+    const targetDir = await getExtensionsDirAsync()
     // Use Tauri to copy the extension directory
     await invoke('ide_run_command', {
       command: 'cp',
@@ -1574,7 +1598,7 @@ async function _syncExtensionToSidecar(extensionId: string, sourcePath: string):
  */
 async function removeExtensionFromSidecar(extensionId: string): Promise<void> {
   try {
-    const targetDir = getExtensionsDir()
+    const targetDir = await getExtensionsDirAsync()
     await invoke('ide_run_command', {
       command: 'rm',
       args: ['-rf', `${targetDir}/${extensionId}`],
@@ -1588,10 +1612,8 @@ async function removeExtensionFromSidecar(extensionId: string): Promise<void> {
   }
 }
 
-/** Get the extensions directory path. */
-function getExtensionsDir(): string {
-  return `${(globalThis as any).process?.env?.HOME || '/tmp'}/.opide/extensions`
-}
+// (was: sync getExtensionsDir() that read process.env.HOME — undefined in
+// the WKWebView, fell back to /tmp. Replaced by getExtensionsDirAsync above.)
 
 /**
  * Install a .vsix file into OPIDE. Extracts to ~/.opide/extensions/ and

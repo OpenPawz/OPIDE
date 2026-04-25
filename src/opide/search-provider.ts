@@ -60,7 +60,11 @@ export async function registerSearchProviders(workspacePath: string): Promise<vo
           const uri = vscode.Uri.file(`${workspacePath}/${match.path}`)
           const lineNumber = Math.max(0, match.line_number - 1)
 
-          const matchIndex = match.line_text.toLowerCase().indexOf(query.pattern.toLowerCase())
+          // Case-sensitive search must locate the actual case-matched occurrence —
+          // lowercasing both sides finds the wrong column for case-sensitive queries.
+          const matchIndex = query.isCaseSensitive
+            ? match.line_text.indexOf(query.pattern)
+            : match.line_text.toLowerCase().indexOf(query.pattern.toLowerCase())
           const startChar = matchIndex >= 0 ? matchIndex : 0
           const endChar = startChar + query.pattern.length
 

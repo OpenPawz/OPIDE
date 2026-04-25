@@ -21,10 +21,13 @@ const { execSync, spawn } = require('child_process');
 
 const args = process.argv.slice(2);
 const extDir = args[0];
-const apiKey = getArg('--api-key') || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || '';
-const apiUrl = getArg('--api-url') || process.env.OPIDE_API_URL || 'https://api.openai.com/v1/chat/completions';
-const model = getArg('--model') || process.env.OPIDE_MODEL || 'gpt-4o-mini';
-const workspacePath = getArg('--workspace') || process.env.OPIDE_WORKSPACE || process.cwd();
+// B65: prefer env vars (passed by extension-mcp.ts) over argv so the API key
+// doesn't appear in the host's process table. argv is kept as a fallback for
+// legacy callers and manual CLI use.
+const apiKey = process.env.OPIDE_API_KEY || getArg('--api-key') || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || '';
+const apiUrl = process.env.OPIDE_API_URL || getArg('--api-url') || 'https://api.openai.com/v1/chat/completions';
+const model = process.env.OPIDE_MODEL || getArg('--model') || 'gpt-4o-mini';
+const workspacePath = process.env.OPIDE_WORKSPACE || getArg('--workspace') || process.cwd();
 
 function getArg(name) {
   const idx = args.indexOf(name);

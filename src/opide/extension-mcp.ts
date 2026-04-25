@@ -422,8 +422,11 @@ async function registerAdapterForExtension(extensionId: string, extDir: string):
       const generatorPath = await resolveAdapterPath('extension-adapters/generate-adapter.cjs')
       const wsPath = await getWorkspacePath()
 
-      // Get user's API config for cloud AI fallback
-      let apiArgs = ''
+      // Get user's API config for cloud AI fallback. Pass via env vars (B65)
+      // instead of argv so the API key doesn't appear in the host's process
+      // table. The adapter generator must read OPIDE_API_KEY/OPIDE_API_URL/
+      // OPIDE_MODEL from process.env.
+      const env: Record<string, string> = {}
       try {
         const config = await invoke('engine_get_config') as any
         await log(`Config: ${JSON.stringify({ providers: (config?.providers || []).map((p: any) => ({ id: p.id, has_key: !!p.api_key, base_url: p.base_url })), default_model: config?.default_model }).slice(0, 500)}`)
@@ -431,23 +434,24 @@ async function registerAdapterForExtension(extensionId: string, extDir: string):
         const defaultProvider = config?.default_provider || ''
         const defaultModel = config?.default_model || ''
 
-        // Find the matching provider: prefer default_provider, then any with a key
         let provider = providers.find((p: any) => p.id === defaultProvider && p.api_key)
         if (!provider) provider = providers.find((p: any) => p.api_key && p.id !== 'ollama')
 
         if (provider) {
-          const url = provider.base_url || 'https://api.openai.com/v1/chat/completions'
-          const mdl = defaultModel || 'gpt-4o-mini'
-          apiArgs = ` --api-key "${provider.api_key}" --api-url "${url}" --model "${mdl}"`
-          await log(`Using provider ${provider.id} for adapter generation (model: ${mdl}, url: ${url})`)
+          env.OPIDE_API_KEY = provider.api_key
+          env.OPIDE_API_URL = provider.base_url || 'https://api.openai.com/v1/chat/completions'
+          env.OPIDE_MODEL = defaultModel || 'gpt-4o-mini'
+          await log(`Using provider ${provider.id} for adapter generation (model: ${env.OPIDE_MODEL}, url: ${env.OPIDE_API_URL})`)
+        } else {
+          await log('No provider with API key found — Ollama only')
         }
-        if (!apiArgs) await log('No provider with API key found — Ollama only')
       } catch (e) {
         await log(`Config read failed: ${e}`)
       }
 
       const genResult = await invoke('ide_run_command', {
-        command: `node "${generatorPath}" "${extDir}" --workspace "${wsPath || '/tmp'}"${apiArgs}`,
+        command: `node "${generatorPath}" "${extDir}" --workspace "${wsPath || '/tmp'}"`,
+        env,
         cwd: '/',
       }) as any
 

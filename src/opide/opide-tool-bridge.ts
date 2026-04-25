@@ -576,14 +576,10 @@ async function runCommandInTerminal(command: string, _cwd?: string): Promise<any
 
 // ─── Terminal Output ────────────────────────────────────────────────────────
 
+// B39/B40: the previous implementation destructured a non-exported identifier
+// from ide-context, so it always returned the placeholder. The setter side
+// was also never called. Returning a stable "not implemented" message keeps
+// the tool definition from breaking until V2 wires this up properly.
 async function getTerminalOutput(): Promise<any> {
-  try {
-    // Import from ide-context which tracks recent terminal output
-    const { _recentTerminalOutput } = await import('./ide-context.ts') as any
-    return {
-      output: _recentTerminalOutput || '(no recent terminal output)',
-    }
-  } catch {
-    return { output: '(terminal output not available)' }
-  }
+  return { output: '(recent-terminal-output capture not implemented in this build)' }
 }

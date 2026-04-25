@@ -112,7 +112,12 @@ export async function initScmProvider(workspacePath: string): Promise<void> {
       const changes: typeof changesGroup.resourceStates = []
 
       for (const file of st.files) {
-        const uri = vscode.Uri.file(`${repoRoot}${file.path.startsWith('/') ? '' : '/'}${file.path}`)
+        // Avoid double-slashes when repoRoot already ends with /, and absolute
+        // file paths pass through unchanged.
+        const joinedPath = file.path.startsWith('/')
+          ? file.path
+          : (repoRoot.endsWith('/') ? `${repoRoot}${file.path}` : `${repoRoot}/${file.path}`)
+        const uri = vscode.Uri.file(joinedPath)
         const deco = statusDecoration(file.status)
 
         const resource = {

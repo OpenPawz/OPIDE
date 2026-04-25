@@ -198,7 +198,26 @@ export async function initializeWorkbench(): Promise<void> {
       ...getFilesServiceOverride(),
       ...getModelServiceOverride(),
       ...getWorkingCopyServiceOverride(),
-      ...getEditorServiceOverride(async (_resource, _options, _sideBySide) => {
+      ...getEditorServiceOverride(async (resource: any, _options: any, _sideBySide: any) => {
+        // B28: route open-editor requests through vscode.open so internal
+        // navigation (peek references, cross-file go-to-definition) works.
+        // The signature is loosely typed in @codingame/monaco-vscode-api;
+        // runtime reality is that `resource` is either a URI or carries
+        // `.object.textEditorModel.uri`. Try both.
+        const uri = resource?.scheme ? resource
+          : (resource?.object?.textEditorModel?.uri ?? resource?.resource ?? null)
+        if (!uri || uri.scheme !== 'file') return false
+        try {
+          const cmdModule = await import(
+            '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+          ) as any
+          const reg = cmdModule.CommandsRegistry ?? cmdModule.default?.CommandsRegistry
+          const cmd = reg?.getCommand?.('vscode.open')
+          if (cmd?.handler) {
+            await cmd.handler(null as any, uri)
+            return true
+          }
+        } catch { /* fall through */ }
         return false
       }),
 
@@ -206,6 +225,10 @@ export async function initializeWorkbench(): Promise<void> {
       ...getExtensionsServiceOverride({
         enableWorkerExtensionHost: true,
       }),
+      // B29: webOnly: false allows the full gallery to load. The OSS build
+      // doesn't ship the full Open VSX runtime — themes/icons/grammars work
+      // but extensions that require a Node.js host may fail to activate.
+      // V2 ships the full host; bump this when that lands.
       ...getExtensionGalleryServiceOverride({ webOnly: false }),
 
       // ── Theme, language, syntax ────────────────────────────────────────
@@ -394,39 +417,59 @@ export async function initializeDeferredFeatures(): Promise<void> {
     console.warn('[opide] Extension loader setup failed:', e)
   }
 
-  // ─── Hide VS Code Extensions icon (we have our own Extensions panel) ─────────
-  // Hide VS Code's built-in Extensions icon (aria includes keyboard shortcut ⇧⌘X)
-  // Ours has aria="Extensions", theirs has aria="Extensions (⇧⌘X)"
-  function hideVscodeExtensions() {
+  // ─── Hide VS Code Extensions icon + watermark patcher ────────────────────
+  // Both used to be 4–5 staggered setTimeouts (B31, B33). Replaced with a
+  // single MutationObserver scoped to .monaco-workbench so we react when the
+  // DOM is actually ready instead of guessing. The observer self-disconnects
+  // when both targets are handled OR after 30 s as a safety net.
+  function hideVscodeExtensions(): boolean {
+    // B32: match by command/identifier where possible. The aria-label
+    // approach broke under non-English locales because it required a
+    // localised "Extensions" string. We still fall back to aria for builds
+    // where the id selector doesn't catch our quarry.
+    let hidAny = false
     document.querySelectorAll('.activitybar .action-item').forEach(el => {
+      // Skip our own Extensions panel — id starts with "opide".
+      if ((el as HTMLElement).id?.toLowerCase().includes('opide')) return
       const label = el.querySelector('.action-label')
       const aria = label?.getAttribute('aria-label') || ''
-      if (aria.includes('Extensions') && aria.includes('⇧⌘X')) {
+      const labelTitle = label?.getAttribute('title') || ''
+      const composite = label?.getAttribute('composite') || ''
+      // VS Code's built-in extensions viewlet stable id is workbench.view.extensions
+      const isVscodeExtensions =
+        composite === 'workbench.view.extensions' ||
+        // Aria fallback: covers the macOS shortcut indicator.
+        (aria.includes('Extensions') && aria.includes('⇧⌘X')) ||
+        (labelTitle.includes('Extensions') && labelTitle.includes('⇧⌘X'))
+      if (isVscodeExtensions) {
         ;(el as HTMLElement).style.display = 'none'
+        hidAny = true
       }
     })
+    return hidAny
   }
-  setTimeout(hideVscodeExtensions, 1500)
-  setTimeout(hideVscodeExtensions, 3000)
-
-  // ─── Watermark patcher — replaces VS Code icon with OPIDE paw ───────────────
-  function patchWatermark() {
+  function patchWatermark(): boolean {
     const letterpress = document.querySelector<HTMLElement>(
       '.monaco-workbench .editor-group-watermark .letterpress, .monaco-workbench .editor-group-watermark > .letterpress'
     )
-    if (letterpress) {
-      letterpress.style.cssText += ';background:url("/brand-paw.png") center/contain no-repeat!important;width:180px!important;height:180px!important;font-size:0!important;color:transparent!important;opacity:1!important;filter:none!important'
-      Array.from(letterpress.children).forEach(c => { (c as HTMLElement).style.display = 'none' })
-    }
+    if (!letterpress) return false
+    letterpress.style.cssText += ';background:url("/brand-paw.png") center/contain no-repeat!important;width:180px!important;height:180px!important;font-size:0!important;color:transparent!important;opacity:1!important;filter:none!important'
+    Array.from(letterpress.children).forEach(c => { (c as HTMLElement).style.display = 'none' })
+    return true
   }
-  // Run patchWatermark a few times on startup then stop.
-  // Do NOT use a MutationObserver on document.body — it fires on every DOM
-  // change (including streaming chat updates) and causes focus stealing.
+
   patchWatermark()
-  setTimeout(patchWatermark, 500)
-  setTimeout(patchWatermark, 1500)
-  setTimeout(patchWatermark, 3000)
-  setTimeout(patchWatermark, 6000)
+  hideVscodeExtensions()
+  let watermarkPatched = false
+  let extensionsHidden = false
+  const workbench = document.querySelector('.monaco-workbench') ?? document.body
+  const observer = new MutationObserver(() => {
+    if (!watermarkPatched) watermarkPatched = patchWatermark()
+    if (!extensionsHidden) extensionsHidden = hideVscodeExtensions()
+    if (watermarkPatched && extensionsHidden) observer.disconnect()
+  })
+  observer.observe(workbench, { childList: true, subtree: true })
+  setTimeout(() => observer.disconnect(), 30_000)
 
   // ─── Start Extension Host (Node.js sidecar for full extension support) ─────
   try {
@@ -464,7 +507,19 @@ export async function initializeDeferredFeatures(): Promise<void> {
     const { stopExtensionHost } = await import('./opide/extension-bridge.ts')
     await stopExtensionHost().catch(() => {})
 
-    // Clean up sidecar on page unload (folder open triggers reload)
+    // Clean up sidecar on window close — Tauri's onCloseRequested actually awaits
+    // the handler, unlike beforeunload which doesn't reliably wait for promises.
+    // The beforeunload below is kept as a best-effort fallback for the page-reload
+    // case (folder open triggers a reload, not a window close).
+    try {
+      const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+      const win = getCurrentWebviewWindow()
+      await win.onCloseRequested(async () => {
+        try { await stopExtensionHost() } catch {}
+      })
+    } catch (e) {
+      console.warn('[opide] Could not register window close handler:', e)
+    }
     window.addEventListener('beforeunload', () => {
       stopExtensionHost().catch(() => {})
     })
@@ -473,31 +528,15 @@ export async function initializeDeferredFeatures(): Promise<void> {
     const ws = getWorkspace()
     console.log('[opide] Extension host: workspace =', ws)
     if (ws) {
-      // Resolve extensions path from workspace path (Bug #1: echo $HOME was wrong)
+      // Use Tauri's homeDir() — works cross-platform without parsing the
+      // workspace path or shelling out (B25, B36, B47).
       let extDir: string | undefined
-
-      // Extract home dir from workspace path — reliable on macOS/Linux
-      if (ws.startsWith('/Users/')) {
-        const username = ws.split('/')[2]
-        if (username) extDir = `/Users/${username}/.opide/extensions`
-      } else if (ws.startsWith('/home/')) {
-        const username = ws.split('/')[2]
-        if (username) extDir = `/home/${username}/.opide/extensions`
-      }
-
-      // Final fallback: try Tauri shell command
-      if (!extDir) {
-        try {
-          const { invoke: tauriInvoke } = await import('@tauri-apps/api/core')
-          const homeResult = await tauriInvoke('ide_run_command', {
-            command: 'echo $HOME',
-            cwd: '/',
-          }) as any
-          const home = (homeResult?.stdout || '').trim()
-          if (home) extDir = `${home}/.opide/extensions`
-        } catch (e2) {
-          console.warn('[opide] Could not resolve home dir:', e2)
-        }
+      try {
+        const { homeDir } = await import('@tauri-apps/api/path')
+        const home = (await homeDir()).replace(/[\\/]+$/, '')
+        if (home) extDir = `${home}/.opide/extensions`
+      } catch (e2) {
+        console.warn('[opide] Could not resolve home dir:', e2)
       }
 
       console.log('[opide] Extension host: extDir =', extDir)

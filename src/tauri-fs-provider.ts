@@ -48,14 +48,26 @@ function uriToPath(resource: URI): string {
 }
 
 function mapError(err: unknown): Error {
+  // Prefer structured fields if Tauri ships them; fall back to substring match
+  // for older Tauri versions / non-English locales (B57).
+  const e = err as { kind?: string; code?: string; message?: string } | null
+  if (e?.kind === 'NotFound' || e?.code === 'ENOENT') {
+    return createFileSystemProviderError(String(err), FileSystemProviderErrorCode.FileNotFound)
+  }
+  if (e?.kind === 'PermissionDenied' || e?.code === 'EACCES') {
+    return createFileSystemProviderError(String(err), FileSystemProviderErrorCode.NoPermissions)
+  }
+  if (e?.kind === 'AlreadyExists' || e?.code === 'EEXIST') {
+    return createFileSystemProviderError(String(err), FileSystemProviderErrorCode.FileExists)
+  }
   const msg = String(err)
-  if (msg.includes('No such file') || msg.includes('not found') || msg.includes('os error 2')) {
+  if (/no such file|not found|os error 2\b/i.test(msg)) {
     return createFileSystemProviderError(msg, FileSystemProviderErrorCode.FileNotFound)
   }
-  if (msg.includes('Permission denied') || msg.includes('os error 13')) {
+  if (/permission denied|os error 13\b/i.test(msg)) {
     return createFileSystemProviderError(msg, FileSystemProviderErrorCode.NoPermissions)
   }
-  if (msg.includes('Already exists') || msg.includes('os error 17')) {
+  if (/already exists|os error 17\b/i.test(msg)) {
     return createFileSystemProviderError(msg, FileSystemProviderErrorCode.FileExists)
   }
   return createFileSystemProviderError(msg, FileSystemProviderErrorCode.Unknown)
@@ -209,8 +221,9 @@ export class TauriFileSystemProvider extends Disposable
       })
 
       unlisten = await listen<{ kind: string; path: string }>('fs-change', ({ payload }) => {
-        // Only fire events for paths under the watched resource
-        if (!payload.path.startsWith(path)) return
+        // Match exact path or strict child — naive startsWith would match
+        // /home/user2 against a watch on /home/user (B55).
+        if (payload.path !== path && !payload.path.startsWith(path + '/')) return
 
         const changeType =
           payload.kind === 'created' ? FileChangeType.ADDED

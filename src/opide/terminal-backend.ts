@@ -94,8 +94,11 @@ class TauriTerminalProcess extends SimpleTerminalProcess {
   }
 
   clearBuffer(): void {
-    // Send clear-screen escape sequence
-    this.input('\x1b[2J\x1b[H')
+    // Intentionally a no-op (B41).
+    // The previous implementation wrote ANSI escape codes to the PTY's stdin —
+    // which the running shell saw as user input. For TUI programs (vim/htop)
+    // this corrupted state. Monaco's terminal layer routes "Clear" via xterm
+    // separately; we don't need to touch the PTY here.
   }
 
   sendSignal(_signal: string): void {
@@ -105,8 +108,11 @@ class TauriTerminalProcess extends SimpleTerminalProcess {
   // ── Internal ─────────────────────────────────────────────────────────────
 
   private fireExit(code: number): void {
-    // SimpleTerminalProcess exposes onProcessExit — fire it
-    // The base class wires this through the constructor events
+    // B42: SimpleTerminalProcess's exit signal isn't directly exposed via a
+    // public emitter we can fire — the message-only path here just renders
+    // text in xterm. End-to-end exit reporting requires the Rust-side
+    // terminal.rs to emit real exit codes (B111, queued for the opide-shell
+    // pass). For now this is best-effort.
     this.dataEmitter.fire(`\r\n[Process exited with code ${code}]\r\n`)
   }
 

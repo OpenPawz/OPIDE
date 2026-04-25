@@ -44,8 +44,18 @@ let sandboxSubtoolUnlistenEnd: (() => void) | null = null
 // Round and run tracking
 let currentRound: number | null = null
 let currentRunId: string | null = null
-// Run IDs that have fully completed — drop any delayed events carrying these
+// Run IDs that have fully completed — drop any delayed events carrying these.
+// Capped at 64 entries (B66) so a long session doesn't grow the set without bound.
 const completedRunIds = new Set<string>()
+const MAX_COMPLETED_RUN_IDS = 64
+function trackCompletedRun(runId: string): void {
+  if (!runId || completedRunIds.has(runId)) return
+  completedRunIds.add(runId)
+  if (completedRunIds.size > MAX_COMPLETED_RUN_IDS) {
+    const first = completedRunIds.values().next().value
+    if (first) completedRunIds.delete(first)
+  }
+}
 
 // ─── Tool Name Translation ──────────────────────────────────────────────────
 
@@ -445,9 +455,18 @@ async function startListening(): Promise<void> {
           summary: parts.join(' '),
         })
 
-        // Mark this run as completed so any delayed events arriving after this
-        // are correctly identified as stale and dropped at the top of the listener.
-        if (currentRunId) completedRunIds.add(currentRunId)
+        // B66: clear any still-running tool timers from this run before we
+        // mark the run completed. Without this, a tool that never received
+        // its tool_result (run aborted, panel mid-restart) keeps firing its
+        // 1-second update interval forever.
+        for (const [, info] of activeTools) {
+          if (info.timer) {
+            clearInterval(info.timer)
+            info.timer = null
+          }
+        }
+        activeTools.clear()
+        if (currentRunId) trackCompletedRun(currentRunId)
         break
       }
       case 'tool_auto_approved': {
@@ -940,6 +959,14 @@ export function registerActivityFeed(): void {
             if (info.timer) clearInterval(info.timer)
           }
           activeSubTools.clear()
+          // B67: dispose all four module-level engine-event listeners. Without
+          // this, hot-reload or workbench layout changes that re-mount the
+          // panel stack additional listeners on top of the existing ones.
+          if (unlistenFn) { unlistenFn(); unlistenFn = null }
+          if (sandboxProgressUnlisten) { sandboxProgressUnlisten(); sandboxProgressUnlisten = null }
+          if (sandboxSubtoolUnlistenStart) { sandboxSubtoolUnlistenStart(); sandboxSubtoolUnlistenStart = null }
+          if (sandboxSubtoolUnlistenEnd) { sandboxSubtoolUnlistenEnd(); sandboxSubtoolUnlistenEnd = null }
+          if (indexerUnlisten) { indexerUnlisten(); indexerUnlisten = null }
           listEl = null
           statusBarEl = null
         }

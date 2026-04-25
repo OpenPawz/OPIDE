@@ -191,9 +191,14 @@ class OpideAISettingsPane {
 
     const engineInfo = document.createElement('table')
     const eTbody = document.createElement('tbody')
+    // B71: read context_window_tokens from the engine config when present;
+    // fall back to a clearly-labeled estimate when the field is missing.
+    const ctxLabel = typeof config.context_window_tokens === 'number'
+      ? `${config.context_window_tokens.toLocaleString()} tokens`
+      : '32,000 tokens (default)'
     const fields = [
       ['Default Model', config.default_model || '—'],
-      ['Context Window', `${(config.context_window_tokens ?? 32000).toLocaleString()} tokens`],
+      ['Context Window', ctxLabel],
       ['Max Tool Rounds', String(config.max_tool_rounds ?? 25)],
     ]
     for (const [label, value] of fields) {

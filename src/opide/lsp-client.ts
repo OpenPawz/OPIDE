@@ -43,18 +43,22 @@ interface LspServerState {
 
 const servers = new Map<string, LspServerState>()
 let unlisten: UnlistenFn | null = null
+// In-flight ensureListening promise so concurrent callers don't register
+// duplicate listeners (B23).
+let _listenPromise: Promise<UnlistenFn> | null = null
 
 // ─── Event Listener ──────────────────────────────────────────────────────────
 
 async function ensureListening(): Promise<void> {
   if (unlisten) return
-
-  unlisten = await listen<LspMessageEvent>('lsp-message', ({ payload }) => {
-    const server = Array.from(servers.values()).find(
-      (s) => s.serverId === payload.server_id,
-    )
+  if (_listenPromise) {
+    await _listenPromise
+    return
+  }
+  _listenPromise = listen<LspMessageEvent>('lsp-message', ({ payload }) => {
+    // O(1) lookup keyed by server_id (was Array.from().find()).
+    const server = servers.get(payload.server_id)
     if (!server) return
-
     try {
       const msg = JSON.parse(payload.message)
       handleLspMessage(server, msg)
@@ -62,6 +66,7 @@ async function ensureListening(): Promise<void> {
       console.warn('[opide-lsp] failed to parse message:', e)
     }
   })
+  unlisten = await _listenPromise
 }
 
 // ─── Message Handler ─────────────────────────────────────────────────────────
@@ -169,9 +174,24 @@ async function sendRequest(server: LspServerState, method: string, params: any):
     params,
   })
 
+  // Wraps the pending entry in a 30s timeout + cleanup-on-failure path so
+  // transport errors and hung servers don't leak entries (B22).
   return new Promise((resolve, reject) => {
-    server.pendingRequests.set(id, { resolve, reject })
-    invoke('lsp_send', { serverId: server.serverId, message }).catch(reject)
+    const timer = setTimeout(() => {
+      if (server.pendingRequests.delete(id)) {
+        reject(new Error(`LSP request timeout: ${method} (id=${id})`))
+      }
+    }, 30_000)
+
+    server.pendingRequests.set(id, {
+      resolve: (v: any) => { clearTimeout(timer); resolve(v) },
+      reject: (e: any) => { clearTimeout(timer); reject(e) },
+    })
+
+    invoke('lsp_send', { serverId: server.serverId, message }).catch((err) => {
+      clearTimeout(timer)
+      if (server.pendingRequests.delete(id)) reject(err)
+    })
   })
 }
 

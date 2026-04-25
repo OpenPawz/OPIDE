@@ -48,7 +48,9 @@ async function loadAgents(): Promise<void> {
 
 export async function loadSessions(): Promise<void> {
   try {
-    S.sessions = await invoke<Session[]>('engine_sessions_list')
+    const all = await invoke<Session[]>('engine_sessions_list')
+    // Hide the persistent ghost-completion session from the selector (B49).
+    S.sessions = all.filter(s => s.id !== '__opide_completions__')
     updateSessionSelect()
   } catch (e) {
     console.warn('[opide-chat] failed to load sessions:', e)
@@ -451,7 +453,7 @@ export function registerOpideChat(): void {
             S.selectedAgent = S.agents.find(a => a.agent_id === val) || null
             return
           }
-          const builtin = BUILTIN_AGENTS.find((a: any) => a.agent_id === val)
+          const builtin = (BUILTIN_AGENTS as any[]).find((a: any) => a.agent_id === val)
           if (builtin) {
             S.selectedAgent = {
               agent_id: builtin.agent_id,
