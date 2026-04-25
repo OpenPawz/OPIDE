@@ -193,7 +193,16 @@ pub async fn run_consolidation(
     let post_ndcg = measure_sample_ndcg(store);
     let ndcg_delta = post_ndcg - baseline_ndcg;
 
-    if ndcg_delta < -NDCG_ROLLBACK_THRESHOLD && baseline_ndcg > 0.0 {
+    // B159: when baseline_ndcg is 0 (cold-start, no prior consolidations to
+    // measure against), the previous gate skipped the rollback check entirely
+    // and would happily ship a consolidation with negative NDCG. Now we also
+    // refuse a non-positive post-NDCG on cold start.
+    let should_rollback = if baseline_ndcg > 0.0 {
+        ndcg_delta < -NDCG_ROLLBACK_THRESHOLD
+    } else {
+        post_ndcg < 0.0
+    };
+    if should_rollback {
         warn!(
             "[engram:consolidation] NDCG dropped {:.3} ({:.3} → {:.3}) — ROLLING BACK",
             ndcg_delta, baseline_ndcg, post_ndcg,

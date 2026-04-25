@@ -164,7 +164,28 @@ async fn phase_reembed_stale(
 
     let mut re_embedded = 0;
     for mem in &candidates {
-        match client.embed(&mem.content.full).await {
+        // B157: choose the right text for the embedder.
+        //  - Cleartext: full content (best signal).
+        //  - Sensitive: cleartext summary if available — embedding ciphertext
+        //    silently produces a useless vector that drags down recall.
+        //  - Confidential: skip; vector-only content has no meaningful
+        //    re-embedding source.
+        let text_for_embedding: &str = if super::encryption::is_encrypted(&mem.content.full) {
+            match mem.content.summary.as_deref() {
+                Some(summary) if !summary.is_empty() => summary,
+                _ => {
+                    log::debug!(
+                        "[engram::dream] Skipping re-embed of '{}' — encrypted, no summary",
+                        mem.id
+                    );
+                    continue;
+                }
+            }
+        } else {
+            mem.content.full.as_str()
+        };
+
+        match client.embed(text_for_embedding).await {
             Ok(embedding) => {
                 store.engram_update_episodic_embedding(&mem.id, &embedding, client.model_name())?;
                 re_embedded += 1;

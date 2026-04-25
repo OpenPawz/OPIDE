@@ -321,9 +321,36 @@ pub fn gate_decision(query: &str) -> GateDecision {
 
     // ── Phase 1: Skip gate (social tokens & computation) ────────────────
 
-    // Exact match against social/ACK token set
-    if SKIP_TOKENS.contains(q) {
+    // B162: strip punctuation and whitespace before SKIP_TOKENS lookup so
+    // "thx,", "ok!", "hi 🙏" all match. Without this, only the exact
+    // tokens below pass through, and any social input with trailing
+    // punctuation got routed to retrieval unnecessarily.
+    let normalized_skip: String = q
+        .chars()
+        .filter(|c| c.is_alphabetic() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if SKIP_TOKENS.contains(q) || SKIP_TOKENS.contains(normalized_skip.as_str()) {
         return GateDecision::Skip;
+    }
+
+    // B163: reflexive phrases like "tell me about yourself" / "introduce yourself"
+    // bypass the META_NOUN check (no identity noun, just a pronoun). Match these
+    // before the META_NOUN block so they always Skip.
+    const REFLEXIVE_QUERIES: &[&str] = &[
+        "tell me about yourself",
+        "introduce yourself",
+        "who are you",
+        "what are you",
+        "what can you do",
+        "what are your capabilities",
+    ];
+    for phrase in REFLEXIVE_QUERIES {
+        if q.contains(phrase) {
+            return GateDecision::Skip;
+        }
     }
 
     // Very short non-questions (1–2 words not in skip set and no '?')
@@ -358,8 +385,17 @@ pub fn gate_decision(query: &str) -> GateDecision {
     }
 
     // Explicit topic-switch signals — user is deliberately changing context.
+    // B165: substring match on short signals like "anyway" (or even "ok") fired
+    // way too eagerly — any sentence containing those words got nuked. Now:
+    //   - signals < 8 chars must be a leading prefix of the query;
+    //   - longer phrases ("new topic", "lets move on") still match anywhere.
     for signal in TOPIC_SWITCH_SIGNALS.iter() {
-        if q.contains(signal) {
+        let matches = if signal.len() < 8 {
+            q.starts_with(signal)
+        } else {
+            q.contains(signal)
+        };
+        if matches {
             return GateDecision::Skip;
         }
     }
