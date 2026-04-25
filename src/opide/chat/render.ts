@@ -36,14 +36,37 @@ export function linkifyPaths(html: string): string {
   )
 }
 
-export function openPathInEditor(path: string): void {
-  import('@codingame/monaco-vscode-api/vscode/vs/base/common/uri').then(({ URI }) =>
-    import('@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands').then(({ CommandsRegistry }) => {
-      const cmd = CommandsRegistry.getCommand('vscode.open')
-      if (cmd?.handler) cmd.handler(null as any, URI.file(path))
-      else navigator.clipboard.writeText(path).catch(() => {})
-    })
-  ).catch(() => navigator.clipboard.writeText(path).catch(() => {}))
+// Memoized loaders for the open-file path. The dynamic-import promises are
+// cached so repeated clicks don't re-run the module-resolution machinery.
+let _uriModule: any = null
+let _commandsModule: any = null
+
+async function loadOpenFileDeps(): Promise<{ URI: any; CommandsRegistry: any } | null> {
+  try {
+    if (!_uriModule) {
+      _uriModule = await import('@codingame/monaco-vscode-api/vscode/vs/base/common/uri')
+    }
+    if (!_commandsModule) {
+      _commandsModule = await import('@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands')
+    }
+    return { URI: _uriModule.URI, CommandsRegistry: _commandsModule.CommandsRegistry }
+  } catch {
+    return null
+  }
+}
+
+export async function openPathInEditor(path: string): Promise<void> {
+  const deps = await loadOpenFileDeps()
+  if (!deps) {
+    navigator.clipboard.writeText(path).catch(() => {})
+    return
+  }
+  const cmd = deps.CommandsRegistry.getCommand('vscode.open')
+  if (cmd?.handler) {
+    cmd.handler(null as any, deps.URI.file(path))
+  } else {
+    navigator.clipboard.writeText(path).catch(() => {})
+  }
 }
 
 // ─── Diff Computation ────────────────────────────────────────────────────────
@@ -61,7 +84,7 @@ export function computeDiff(before: string, after: string): DiffLine[] {
   let i = 0, j = 0
   while (i < m || j < n) {
     if (i < m && j < n && A[i] === B[j]) { result.push({ op: ' ', line: A[i] }); i++; j++ }
-    else if (j < n && (i >= m || dp[i][j+1] >= (dp[i+1]?.[j] ?? 0))) { result.push({ op: '+', line: B[j] }); j++ }
+    else if (j < n && (i >= m || dp[i][j+1] >= dp[i+1][j])) { result.push({ op: '+', line: B[j] }); j++ }
     else { result.push({ op: '-', line: A[i] }); i++ }
   }
   return result
@@ -359,10 +382,10 @@ export function renderMessages(): void {
     return
   }
 
-  // If message count decreased (e.g., new session), do a full rebuild
+  // If message count decreased (e.g., new session), do a full rebuild that
+  // routes through the empty-state branch above when applicable.
   if (S.messages.length < _renderedCount) {
-    S.msgList.innerHTML = ''
-    _renderedCount = 0
+    return renderMessagesFull()
   }
 
   // Remove empty state placeholder if present
@@ -524,8 +547,10 @@ export function updateAgentSelect(): void {
   if (!S.agentSelect) return
   S.agentSelect.innerHTML = '<option value="">Default agent</option>'
 
-  // ── Built-in agents (always present, no DB required) ─────────────────────
+  // ── Built-in agents (V2 build only; empty in OSS) ───────────────────────
+  // Skip the dynamic import + iteration when there are no builtins to render.
   import('../chat/send.ts').then(({ BUILTIN_AGENTS }) => {
+    if (BUILTIN_AGENTS.length === 0) return
     for (const agent of BUILTIN_AGENTS) {
       const opt = document.createElement('option')
       opt.value = agent.agent_id

@@ -168,6 +168,10 @@ export function renderProviderSetup(): void {
           c.style.cssText = 'background:var(--vscode-input-background,#1e1e1e);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:10px;padding:2px 8px;font-size:10px;cursor:pointer'
           c.addEventListener('click', () => {
             modelInp.value = m
+            // Ensure the picked model survives Save — without this it would be
+            // set as default but absent from `enabled_models`, hidden from the
+            // model-selector dropdown after save.
+            enabledSet.add(m)
             chips.querySelectorAll('button').forEach(b => { (b as HTMLElement).style.background = 'var(--vscode-input-background,#1e1e1e)'; (b as HTMLElement).style.color = 'var(--vscode-input-foreground,#ccc)' })
             c.style.background = '#E8B931'
             c.style.color = '#000'

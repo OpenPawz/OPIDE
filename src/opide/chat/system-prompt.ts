@@ -22,10 +22,6 @@ function dynamicSection(_name: string, compute: () => string): string {
   return compute()
 }
 
-export function clearPromptCache(): void {
-  sectionCache.clear()
-}
-
 // ─── Static Sections (cacheable across turns) ───────────────────────────────
 
 function introSection(): string {

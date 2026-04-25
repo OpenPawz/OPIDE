@@ -38,7 +38,11 @@ export interface DiffLine { op: ' ' | '+' | '-'; line: string }
 
 export interface ChatMsg {
   role: 'user' | 'assistant' | 'tool' | 'context' | 'system'
+  /** Full text. Used by the expand panel for tool messages, and as-is for everything else. */
   content: string
+  /** Optional short single-line summary for the collapsed tool-card row.
+   *  When absent, callers fall back to a derived snippet of `content`. */
+  preview?: string
   ts: Date
   toolName?: string
   toolSuccess?: boolean

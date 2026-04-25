@@ -92,6 +92,9 @@ interface ChatState {
   // ── Sandbox progress log ────────────────────────────────────────────
   progressLog: HTMLDivElement | null
   progressUnlisten: (() => void) | null
+
+  // ── Misc unlistens (panel-scoped) ────────────────────────────────────
+  providerUpdatedUnlisten: (() => void) | null
 }
 
 /** The single shared state object. Import as `S` everywhere. */
@@ -156,4 +159,6 @@ export const S: ChatState = {
 
   progressLog: null,
   progressUnlisten: null,
+
+  providerUpdatedUnlisten: null,
 }

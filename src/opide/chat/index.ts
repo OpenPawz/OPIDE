@@ -443,8 +443,14 @@ export function registerOpideChat(): void {
           S.selectedAgent = null
           return
         }
-        // Check built-in agents first (no DB lookup needed)
+        // V2 build populates BUILTIN_AGENTS; OSS keeps it empty so we go
+        // straight to the DB-agent lookup. The dynamic-import path below is
+        // only meaningful when builtins exist.
         import('./send.ts').then(({ BUILTIN_AGENTS }) => {
+          if (BUILTIN_AGENTS.length === 0) {
+            S.selectedAgent = S.agents.find(a => a.agent_id === val) || null
+            return
+          }
           const builtin = BUILTIN_AGENTS.find((a: any) => a.agent_id === val)
           if (builtin) {
             S.selectedAgent = {
@@ -861,13 +867,17 @@ export function registerOpideChat(): void {
       loadAgents().catch(() => {})
       loadSessions().catch(() => {})
       loadModels().then(() => updateModelSelect()).catch(() => {})
-      listen('provider-updated', () => updateModelSelect()).catch(() => {})
+      // Capture the unlisten so renderBody-on-remount doesn't stack listeners.
+      listen('provider-updated', () => updateModelSelect()).then((unlisten) => {
+        S.providerUpdatedUnlisten = unlisten
+      }).catch(() => {})
 
       return {
         dispose() {
           S.msgList = null; S.textarea = null; S.sendBtn = null; S.stopBtn = null
           S.toolRow = null; S.streamingBubble = null; S.headerStatus = null; S.progressLog = null
           if (S.progressUnlisten) { S.progressUnlisten(); S.progressUnlisten = null }
+          if (S.providerUpdatedUnlisten) { S.providerUpdatedUnlisten(); S.providerUpdatedUnlisten = null }
           S.agentSelect = null; S.modelSelect = null; S.sessionSelect = null
           S.tokenDisplay = null; S.attachmentBar = null; S.contextBar = null
           S.whisperRow = null; S.whisperInput = null

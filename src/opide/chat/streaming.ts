@@ -56,6 +56,22 @@ function needsApprovalFor(_tier: string, toolName: string): boolean {
   return true
 }
 
+// ─── Completed-run-id tracking (capped) ─────────────────────────────────────
+
+const MAX_COMPLETED_RUN_IDS = 64
+
+/** Add a runId to the completed set, evicting the oldest if we exceed the cap. */
+export function markRunCompleted(runId: string): void {
+  if (!runId) return
+  if (S.completedRunIds.has(runId)) return
+  S.completedRunIds.add(runId)
+  if (S.completedRunIds.size > MAX_COMPLETED_RUN_IDS) {
+    // Set preserves insertion order — first is oldest.
+    const first = S.completedRunIds.values().next().value
+    if (first) S.completedRunIds.delete(first)
+  }
+}
+
 // ─── SSE Listener ────────────────────────────────────────────────────────────
 
 export async function ensureListening(): Promise<void> {
@@ -104,7 +120,9 @@ export async function ensureListening(): Promise<void> {
       }
       case 'tool_request': {
         const ev = payload as Extract<EngineEvent, { kind: 'tool_request' }>
-        showToolRequest(ev)
+        // showToolRequest is async (it awaits the pre-write file snapshot for B16)
+        // but the event handler itself is sync — fire-and-forget with error log.
+        showToolRequest(ev).catch((e) => console.warn('[opide-chat] showToolRequest failed:', e))
         break
       }
       case 'tool_result': {
@@ -140,7 +158,7 @@ export async function ensureListening(): Promise<void> {
 
 // ─── Tool Request ────────────────────────────────────────────────────────────
 
-function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }>): void {
+async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }>): Promise<void> {
   const tier = ev.tool_tier || 'unknown'
   const needsApproval = needsApprovalFor(tier, ev.tool_call.name)
 
@@ -155,17 +173,22 @@ function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }>): vo
     renderMessages()
   }
 
+  // Snapshot the file BEFORE the tool runs so the diff is accurate.
+  // Awaited synchronously so the tool_result handler always sees `preContent`
+  // populated (or knows the read genuinely failed). Without the await, fast
+  // tools could complete before the read resolved → diff path saw `undefined`
+  // and fell back to "all lines added" (B16).
   if (WRITE_TOOLS.has(ev.tool_call.name)) {
     try {
       const args = JSON.parse(ev.tool_call.arguments || '{}')
       const path = args.path || args.file_path || args.filename
       if (path) {
-        import('@tauri-apps/plugin-fs').then(({ readTextFile }) =>
-          readTextFile(path).then(content => {
-            const pending = S.pendingToolCalls.get(ev.tool_call.id)
-            if (pending) pending.preContent = content
-          }).catch(() => {})
-        )
+        const { readTextFile } = await import('@tauri-apps/plugin-fs')
+        try {
+          const content = await readTextFile(path)
+          const pending = S.pendingToolCalls.get(ev.tool_call.id)
+          if (pending) pending.preContent = content
+        } catch { /* file may not exist yet — leave preContent undefined */ }
       }
     } catch { /* args not JSON */ }
   }
@@ -225,9 +248,17 @@ function handleToolResult(ev: Extract<EngineEvent, { kind: 'tool_result' }>): vo
   const pending = S.pendingToolCalls.get(ev.tool_call_id)
   S.pendingToolCalls.delete(ev.tool_call_id)
 
+  // Preserve the full output on `content` (used by the expand panel) and
+  // derive a short single-line `preview` for the collapsed card row.
+  const fullOutput = ev.output ?? ''
+  const PREVIEW_MAX = 80
+  const flat = fullOutput.replace(/\s+/g, ' ').trim()
+  const preview = flat.length > PREVIEW_MAX ? flat.slice(0, PREVIEW_MAX) + '…' : flat
+
   const msg: ChatMsg = {
     role: 'tool',
-    content: ev.output.slice(0, 500) + (ev.output.length > 500 ? '…' : ''),
+    content: fullOutput,
+    preview,
     ts: new Date(),
     toolSuccess: ev.success,
     toolDuration: ev.duration_ms,
@@ -305,7 +336,7 @@ function handleSurfaced(ev: Extract<EngineEvent, { kind: 'surfaced' }>): void {
   S.streamAccum = ''
   S.surfacedRound = ev.round
   S.surfacedSummary = ev.summary
-  if (S.runId) S.completedRunIds.add(S.runId)
+  if (S.runId) markRunCompleted(S.runId)
   S.runId = null
   hideToolIndicator()
   updateStatus('Surfaced — discuss then resume')
@@ -331,7 +362,7 @@ function finalizeStreaming(ev: Extract<EngineEvent, { kind: 'complete' }>): void
   S.streamAccum = ''
   // Mark this run as completed before clearing — so any delayed events arriving
   // after S.runId is null are still correctly identified and dropped.
-  if (S.runId) S.completedRunIds.add(S.runId)
+  if (S.runId) markRunCompleted(S.runId)
   S.runId = null
   S.completedRounds++
   hideToolIndicator()
