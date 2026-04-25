@@ -45,6 +45,18 @@ impl SessionStore {
         self.get_messages(session_id, 50)
     }
 
+    /// Total message count for a session — used to detect truncation in
+    /// `load_conversation` (B187).
+    pub fn count_messages(&self, session_id: &str) -> EngineResult<i64> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
     pub fn get_messages(&self, session_id: &str, limit: i64) -> EngineResult<Vec<StoredMessage>> {
         let conn = self.conn.lock();
 
@@ -87,16 +99,30 @@ impl SessionStore {
         max_context_tokens: Option<usize>,
         agent_id: Option<&str>,
     ) -> EngineResult<Vec<Message>> {
-        // Load recent messages only — lean sessions rely on memory_search for
-        // historical context rather than carrying the full conversation.
-        let stored = self.get_messages(session_id, 50)?;
+        // B187: load 200 recent messages instead of 50 (mid-loop truncation
+        // already trims back to context_window when needed) and tell the
+        // model when older history was dropped, so it can reach for
+        // memory_search instead of assuming it has the full transcript.
+        const DEFAULT_LOAD_LIMIT: i64 = 200;
+        let total_count = self.count_messages(session_id)?;
+        let stored = self.get_messages(session_id, DEFAULT_LOAD_LIMIT)?;
+        let was_truncated = (stored.len() as i64) < total_count;
         let mut messages = Vec::new();
 
         // Add system prompt if provided
         if let Some(prompt) = system_prompt {
+            let mut prompt_text = prompt.to_string();
+            if was_truncated {
+                prompt_text.push_str(&format!(
+                    "\n\n[Note: only the most recent {} of {} messages from this session are loaded. \
+                     Use memory_search if you need older context.]",
+                    stored.len(),
+                    total_count
+                ));
+            }
             messages.push(Message {
                 role: Role::System,
-                content: MessageContent::Text(prompt.to_string()),
+                content: MessageContent::Text(prompt_text),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -113,10 +139,22 @@ impl SessionStore {
                 _ => Role::User,
             };
 
-            let tool_calls: Option<Vec<ToolCall>> = sm
-                .tool_calls_json
-                .as_ref()
-                .and_then(|json| serde_json::from_str(json).ok());
+            // B186: log when tool_calls JSON fails to parse instead of
+            // silently dropping the field. Without this, a corrupted
+            // assistant message looks fine on load and only manifests as
+            // mysterious tool_call_id-without-parent warnings later.
+            let tool_calls: Option<Vec<ToolCall>> = sm.tool_calls_json.as_ref().and_then(|json| {
+                match serde_json::from_str::<Vec<ToolCall>>(json) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::warn!(
+                            "[engine] load_conversation: dropping tool_calls for message {} — JSON parse failed: {}",
+                            sm.id, e
+                        );
+                        None
+                    }
+                }
+            });
 
             messages.push(Message {
                 role,
