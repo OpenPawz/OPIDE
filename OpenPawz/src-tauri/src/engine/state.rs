@@ -261,23 +261,92 @@ pub type SessionWorkspaces = Arc<Mutex<HashMap<String, String>>>;
 
 /// Map retired / renamed / shorthand model IDs to their current API names.
 /// This lets old task configs, agent overrides, and user-entered short names keep working.
+///
+/// B175: aliases live in a `LazyLock<HashMap>` so additions don't require a
+/// recompile path; user can override or extend by dropping a TOML at
+/// `<data_dir>/model_aliases.toml` (same structure: `key = "value"` pairs).
 pub fn normalize_model_name(model: &str) -> &str {
-    match model {
-        // ── Google shorthand aliases ────────────────────────────────────
-        "gemini-3.1" | "gemini-3.1-pro" => "gemini-3.1-pro-preview",
-        "gemini-3" | "gemini-3-pro" => "gemini-3-pro-preview",
-        "gemini-3-flash" => "gemini-3-flash-preview",
-        // ── Anthropic retired 3.5 model IDs — remap to cheapest available
-        // Haiku 3.5 ($0.80/$4) retired → Haiku 3 ($0.25/$1.25) is cheapest
-        "claude-3-5-haiku-20241022" => "claude-3-haiku-20240307",
-        // Sonnet 3.5 retired → Sonnet 4.6 (same price tier $3/$15)
-        "claude-3-5-sonnet-20241022" => "claude-sonnet-4-6",
-        "claude-3-5-sonnet-20240620" => "claude-sonnet-4-6",
-        // OpenRouter prefixed variants
-        "anthropic/claude-3-5-haiku-20241022" => "anthropic/claude-3-haiku-20240307",
-        "anthropic/claude-3-5-sonnet-20241022" => "anthropic/claude-sonnet-4-6",
-        _ => model,
+    let aliases = model_aliases();
+    aliases
+        .get(model)
+        .map(|s| s.as_str())
+        .unwrap_or(model)
+}
+
+/// B174: when normalize_model_name actually rewrites the name, log it
+/// once per (from, to) pair and emit a Tauri event so the UI can surface
+/// "claude-3-5-… is retired — using claude-3-haiku-… instead".
+pub fn normalize_model_name_with_notice(
+    model: &str,
+    app_handle: Option<&tauri::AppHandle>,
+) -> String {
+    let normalized = normalize_model_name(model).to_string();
+    if normalized != model {
+        use std::sync::Mutex as StdMutex;
+        static REPORTED: std::sync::LazyLock<StdMutex<std::collections::HashSet<(String, String)>>> =
+            std::sync::LazyLock::new(|| StdMutex::new(std::collections::HashSet::new()));
+        let pair = (model.to_string(), normalized.clone());
+        let mut reported = REPORTED.lock().unwrap();
+        if reported.insert(pair.clone()) {
+            log::info!(
+                "[engine] Model '{}' normalized to '{}' (one-time notice)",
+                model,
+                normalized
+            );
+            if let Some(app) = app_handle {
+                use tauri::Emitter;
+                let _ = app.emit(
+                    "model-normalized",
+                    serde_json::json!({ "from": model, "to": normalized }),
+                );
+            }
+        }
     }
+    normalized
+}
+
+/// Returns the merged alias map: baked-in defaults + any TOML overrides.
+fn model_aliases() -> &'static std::collections::HashMap<String, String> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut m: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        // Baked-in defaults — same set as before, expressed as data so
+        // operators can override individual entries via the TOML file.
+        for (k, v) in [
+            ("gemini-3.1", "gemini-3.1-pro-preview"),
+            ("gemini-3.1-pro", "gemini-3.1-pro-preview"),
+            ("gemini-3", "gemini-3-pro-preview"),
+            ("gemini-3-pro", "gemini-3-pro-preview"),
+            ("gemini-3-flash", "gemini-3-flash-preview"),
+            ("claude-3-5-haiku-20241022", "claude-3-haiku-20240307"),
+            ("claude-3-5-sonnet-20241022", "claude-sonnet-4-6"),
+            ("claude-3-5-sonnet-20240620", "claude-sonnet-4-6"),
+            (
+                "anthropic/claude-3-5-haiku-20241022",
+                "anthropic/claude-3-haiku-20240307",
+            ),
+            (
+                "anthropic/claude-3-5-sonnet-20241022",
+                "anthropic/claude-sonnet-4-6",
+            ),
+        ] {
+            m.insert(k.to_string(), v.to_string());
+        }
+        if let Some(extra) = load_aliases_from_config() {
+            for (k, v) in extra {
+                m.insert(k, v);
+            }
+        }
+        m
+    })
+}
+
+fn load_aliases_from_config() -> Option<std::collections::HashMap<String, String>> {
+    let path = crate::engine::paths::paw_data_dir().join("model_aliases.toml");
+    let content = std::fs::read_to_string(path).ok()?;
+    toml::from_str::<std::collections::HashMap<String, String>>(&content).ok()
 }
 
 /// Resolve the correct provider for a given model name.

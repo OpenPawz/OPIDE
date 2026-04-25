@@ -9,26 +9,65 @@ use tauri::Manager;
 
 /// §Security: SSRF protection — block access to internal/private network addresses
 /// and cloud metadata endpoints. Applied unconditionally before any network policy.
+///
+/// B166: parse the URL and route IP literals through `is_private_ip` (so
+/// IPv6-mapped IPv4 like `::ffff:127.0.0.1` and shorthand are handled by
+/// the canonical-form check) plus an explicit cloud-metadata hostname
+/// suffix list. Substring fallback retained for malformed URLs the parser
+/// can't pull a host out of.
 fn is_ssrf_target(url: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url) {
+        if let Some(host) = parsed.host_str() {
+            // IP literal? Use canonical-form check.
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                return is_private_ip(&ip);
+            }
+            // Hostname — match cloud-metadata names by host suffix.
+            let host_l = host.to_lowercase();
+            const META_HOSTS: &[&str] = &[
+                "localhost",
+                "metadata.google.internal",
+                "metadata.gce",
+                "metadata.azure.com",
+                "metadata",
+            ];
+            for h in META_HOSTS {
+                if host_l == *h || host_l.ends_with(&format!(".{}", h)) {
+                    return true;
+                }
+            }
+            // Reject hostnames that look like non-canonical IP encodings
+            // the URL parser left as-is (`0x7f000001`, decimal `2130706433`,
+            // shorthand `127.1`). Pure-digit-and-dot host strings whose
+            // IpAddr parse failed indicate one of these forms.
+            let looks_ipy = !host_l.is_empty()
+                && host_l
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == 'x');
+            if looks_ipy {
+                return true;
+            }
+        }
+    }
+
+    // Substring fallback for URLs that didn't parse cleanly.
     let url_lower = url.to_lowercase();
-    // Loopback and special addresses
     const BLOCKED_PREFIXES: &[&str] = &[
         "://localhost",
         "://127.",
         "://0.0.0.0",
         "://[::1]",
         "://[::]",
-        "://0x7f",  // Hex-encoded 127.x
-        "://0177.", // Octal-encoded 127.x
+        "://0x7f",
+        "://0177.",
     ];
-    // Private RFC-1918, link-local, and cloud metadata ranges
     const BLOCKED_RANGES: &[&str] = &[
         "://10.",
         "://192.168.",
-        "://169.254.",        // Link-local + AWS metadata
-        "://metadata.google", // GCP metadata
+        "://169.254.",
+        "://metadata.google",
         "://metadata.gce",
-        "://100.100.100.200", // Alibaba Cloud metadata
+        "://100.100.100.200",
     ];
     for prefix in BLOCKED_PREFIXES {
         if url_lower.contains(prefix) {
@@ -40,7 +79,6 @@ fn is_ssrf_target(url: &str) -> bool {
             return true;
         }
     }
-    // Check 172.16.0.0/12 (172.16–172.31)
     if let Some(idx) = url_lower.find("://172.") {
         let after = &url_lower[idx + 7..];
         if let Some(dot) = after.find('.') {

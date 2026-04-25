@@ -111,8 +111,26 @@ pub async fn request_edit_review(
 
     log::info!("[frontend-bridge] Edit review requested for {} ({})", path, request_id);
 
-    // Await response with 120-second timeout (user needs time to review)
-    match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+    // B171: bump default timeout from 120s to 600s (10 min) since review
+    // genuinely takes time when the diff is large. Emit a warning event
+    // at 90% so the UI can show "60s left" before the request expires.
+    const REVIEW_TIMEOUT_SECS: u64 = 600;
+    const REVIEW_WARN_AT_SECS: u64 = 540;
+
+    let app_warn = app.clone();
+    let request_id_warn = request_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(REVIEW_WARN_AT_SECS)).await;
+        let _ = app_warn.emit(
+            "ide-edit-review-warning",
+            serde_json::json!({
+                "request_id": request_id_warn,
+                "remaining_secs": REVIEW_TIMEOUT_SECS - REVIEW_WARN_AT_SECS,
+            }),
+        );
+    });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(REVIEW_TIMEOUT_SECS), rx).await {
         Ok(Ok(accepted)) => {
             log::info!("[frontend-bridge] Edit review {}: {}", if accepted { "accepted" } else { "rejected" }, path);
             Ok(accepted)
@@ -120,7 +138,10 @@ pub async fn request_edit_review(
         Ok(Err(_)) => Err("Edit review channel closed".to_string()),
         Err(_) => {
             cleanup_review(&request_id);
-            Err("Edit review timed out (120s) — edit was not applied".to_string())
+            Err(format!(
+                "Edit review timed out ({}s) — edit was not applied",
+                REVIEW_TIMEOUT_SECS
+            ))
         }
     }
 }
