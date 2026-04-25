@@ -1568,32 +1568,6 @@ export async function initExtensionInstallSync(): Promise<void> {
 }
 
 /**
- * Copy an installed extension to ~/.opide/extensions/ and notify the sidecar.
- */
-async function _syncExtensionToSidecar(extensionId: string, sourcePath: string): Promise<void> {
-  try {
-    const targetDir = await getExtensionsDirAsync()
-    // Use Tauri to copy the extension directory
-    await invoke('ide_run_command', {
-      command: 'cp',
-      args: ['-R', sourcePath, `${targetDir}/${extensionId}`],
-      cwd: '/',
-    }).catch(() => {
-      // Fallback: use shell
-      console.warn(`[ext-bridge] Failed to copy extension ${extensionId}, trying shell`)
-    })
-
-    // Notify sidecar to activate the new extension
-    if (_running) {
-      sendNotification('extension/activate', { extensionId })
-      console.log(`[ext-bridge] Synced ${extensionId} to sidecar`)
-    }
-  } catch (e) {
-    console.warn(`[ext-bridge] Failed to sync extension ${extensionId}:`, e)
-  }
-}
-
-/**
  * Remove an extension from ~/.opide/extensions/ and notify the sidecar.
  */
 async function removeExtensionFromSidecar(extensionId: string): Promise<void> {

@@ -592,6 +592,25 @@ pub async fn run_agent_turn(
                         },
                     );
                 }
+                // B173: separate runaway-spend alarm at 2x budget. Fires
+                // every round once the threshold is crossed, since the
+                // standard 50/75/90 thresholds are one-shot per session
+                // and silent past 90%.
+                if let Some(ratio) = tracker.check_runaway(daily_budget_usd) {
+                    let msg = format!(
+                        "Runaway spend: {:.1}x daily budget (${:.2} of ${:.2}) — review or stop the agent",
+                        ratio, est_usd, daily_budget_usd
+                    );
+                    warn!("[engine] {}", msg);
+                    fire(
+                        app_handle,
+                        EngineEvent::Error {
+                            session_id: session_id.to_string(),
+                            run_id: run_id.to_string(),
+                            message: msg,
+                        },
+                    );
+                }
             }
         }
 

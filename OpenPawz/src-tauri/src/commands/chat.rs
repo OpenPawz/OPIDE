@@ -11,7 +11,7 @@
 use log::{error, info, warn};
 use tauri::{Emitter, Manager, State};
 
-use crate::commands::state::{normalize_model_name, resolve_provider_for_model, EngineState};
+use crate::commands::state::{resolve_provider_for_model, EngineState};
 use crate::engine::agent_loop;
 use crate::engine::chat as chat_org;
 use crate::engine::engram;
@@ -106,7 +106,8 @@ pub async fn engine_chat_send(
                         .clone()
                         .unwrap_or_else(|| "gpt-4o".to_string())
                 } else {
-                    normalize_model_name(&raw).to_string()
+                    // B174: notify on alias rewrites so the UI can surface the swap.
+                    crate::engine::state::normalize_model_name_with_notice(&raw, Some(&app_handle))
                 };
                 let p = resolve_provider_for_model(&m, &cfg.providers)
                     .or_else(|| {
@@ -181,7 +182,8 @@ pub async fn engine_chat_send(
             );
         }
 
-        let model = normalize_model_name(&model).to_string();
+        // B174: same alias-rewrite notice on the second resolution path.
+        let model = crate::engine::state::normalize_model_name_with_notice(&model, Some(&app_handle));
 
         let provider = if let Some(pid) = &request.provider_id {
             cfg.providers.iter().find(|p| p.id == *pid).cloned()

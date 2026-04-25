@@ -453,7 +453,7 @@ export function registerOpideChat(): void {
             S.selectedAgent = S.agents.find(a => a.agent_id === val) || null
             return
           }
-          const builtin = (BUILTIN_AGENTS as any[]).find((a: any) => a.agent_id === val)
+          const builtin = (BUILTIN_AGENTS as unknown as any[]).find((a: any) => a.agent_id === val)
           if (builtin) {
             S.selectedAgent = {
               agent_id: builtin.agent_id,

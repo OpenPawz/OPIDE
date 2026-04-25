@@ -551,7 +551,7 @@ export function updateAgentSelect(): void {
   // Skip the dynamic import + iteration when there are no builtins to render.
   import('../chat/send.ts').then(({ BUILTIN_AGENTS }) => {
     if (BUILTIN_AGENTS.length === 0) return
-    for (const agent of BUILTIN_AGENTS as any[]) {
+    for (const agent of BUILTIN_AGENTS as unknown as any[]) {
       const opt = document.createElement('option')
       opt.value = agent.agent_id
       opt.textContent = agent.name

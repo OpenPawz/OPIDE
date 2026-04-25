@@ -1599,10 +1599,19 @@ mod tests {
 
     #[test]
     fn test_pii_detection_email() {
-        let detection = detect_pii("Contact me at user@example.com");
+        // B90 added docs-domain filtering: example.com / test.com / etc.
+        // are intentionally NOT treated as PII. Real domains still trip.
+        let detection = detect_pii("Contact me at alice@acme.io");
         assert!(detection.has_pii);
         assert!(detection.detected_types.contains(&PiiType::Email));
         assert_eq!(detection.recommended_tier, MemorySecurityTier::Sensitive);
+    }
+
+    #[test]
+    fn test_pii_email_example_domain_filtered() {
+        // Documentation example — must NOT trigger PII tier escalation.
+        let detection = detect_pii("Contact me at user@example.com");
+        assert!(!detection.has_pii);
     }
 
     #[test]
