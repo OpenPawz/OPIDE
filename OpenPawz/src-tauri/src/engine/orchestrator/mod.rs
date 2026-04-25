@@ -308,6 +308,7 @@ You are the **Boss Agent** orchestrating project "{}".
         tool_call_id: None,
         name: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        tool_success: None,
     };
     state.store.add_message(&user_msg)?;
 
@@ -353,6 +354,7 @@ You are the **Boss Agent** orchestrating project "{}".
                 tool_call_id: None,
                 name: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
+                tool_success: None,
             };
             state.store.add_message(&stored).ok();
 

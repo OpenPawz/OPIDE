@@ -257,6 +257,7 @@ pub async fn compact_session(
         tool_call_id: None,
         name: Some("session_compaction".to_string()),
         created_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        tool_success: None,
     };
     store.add_message(&summary_msg)?;
 

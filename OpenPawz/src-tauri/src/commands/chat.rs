@@ -248,6 +248,7 @@ pub async fn engine_chat_send(
         tool_call_id: None,
         name: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        tool_success: None,
     };
     state.store.add_message(&user_msg)?;
 
@@ -880,6 +881,18 @@ pub async fn engine_chat_send(
                                     continue;
                                 }
                             }
+                            // B190: best-effort populate tool_success from the
+                            // serialized content. The agent loop emits tool
+                            // results as `Error: ...` on failure (see
+                            // tools/mod.rs::dispatch's `output: format!("Error: {}", err)`
+                            // path) so we can recover that signal cheaply
+                            // without threading ToolResult through Message.
+                            let tool_success = if msg.role == Role::Tool {
+                                let text = msg.content.as_text();
+                                Some(!text.starts_with("Error:") && !text.starts_with("ERROR"))
+                            } else {
+                                None
+                            };
                             let stored = StoredMessage {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 session_id: session_id_clone.clone(),
@@ -896,6 +909,7 @@ pub async fn engine_chat_send(
                                 tool_call_id: msg.tool_call_id.clone(),
                                 name: msg.name.clone(),
                                 created_at: chrono::Utc::now().to_rfc3339(),
+                                tool_success,
                             };
                             if let Err(e) = engine_state.store.add_message(&stored) {
                                 error!("[engine] Failed to store message: {}", e);
