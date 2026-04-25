@@ -103,6 +103,13 @@ impl McpRegistry {
 
         // §Security: scan MCP results for prompt injection before returning to agent.
         // Both Ok and Err paths are scanned — rogue servers can embed payloads in errors too.
+        //
+        // B154: always sanitize on any injection match. Previously only
+        // Medium+ severities were sanitized, leaving Low-severity prompt
+        // hijacks (e.g. embedded `Ignore previous instructions...` lines
+        // that don't trip the high-confidence patterns) to flow through
+        // unmodified. The cost of sanitization is small; the cost of a
+        // missed injection is large.
         Some(match result {
             Ok(text) => {
                 let scan = scan_for_injection(&text);
@@ -112,11 +119,7 @@ impl McpRegistry {
                         "[mcp] Injection detected in result from server '{}' tool '{}' (severity={:?})",
                         server_id, tool_name, sev
                     );
-                    if sev >= InjectionSeverity::Medium {
-                        Ok(sanitize_recalled_memory(&text))
-                    } else {
-                        Ok(text)
-                    }
+                    Ok(sanitize_recalled_memory(&text))
                 } else {
                     Ok(text)
                 }
@@ -129,11 +132,7 @@ impl McpRegistry {
                         "[mcp] Injection detected in error from server '{}' tool '{}' (severity={:?})",
                         server_id, tool_name, sev
                     );
-                    if sev >= InjectionSeverity::Medium {
-                        Err(sanitize_recalled_memory(&err))
-                    } else {
-                        Err(err)
-                    }
+                    Err(sanitize_recalled_memory(&err))
                 } else {
                     Err(err)
                 }
@@ -451,30 +450,43 @@ fn pascal_to_snake(name: &str) -> String {
 /// find the matching server and original tool name.
 /// We need this because server IDs themselves may contain underscores.
 /// Also handles sanitized names where hyphens/dots were replaced with underscores.
+///
+/// B152: when multiple server-id prefixes match the stripped name (e.g.
+/// `mcp_db_read` could split as `db / read` or `d / b_read` if both
+/// servers exist), verify the candidate tool is actually exposed by the
+/// server. Without that check, the longest-prefix heuristic could route
+/// to the wrong server when the second-longest match happened to have a
+/// real tool by that name.
 fn find_server_and_tool<'a>(
     stripped: &'a str,
     clients: &'a HashMap<String, McpClient>,
 ) -> Option<(&'a str, &'a str)> {
-    // Try matching against known server IDs (longest match first for safety)
     let mut ids: Vec<&String> = clients.keys().collect();
     ids.sort_by_key(|b| std::cmp::Reverse(b.len())); // longest first
 
+    let mut fallback: Option<(&str, &str)> = None;
+
     for id in ids {
-        // Try exact match first
-        if let Some(rest) = stripped.strip_prefix(id.as_str()) {
-            if let Some(tool_name) = rest.strip_prefix('_') {
-                return Some((id.as_str(), tool_name));
-            }
-        }
-        // Try sanitized match (hyphens/dots → underscores)
-        let sanitized_id = id.replace(['-', '.'], "_");
-        if let Some(rest) = stripped.strip_prefix(sanitized_id.as_str()) {
-            if let Some(tool_name) = rest.strip_prefix('_') {
-                return Some((id.as_str(), tool_name));
+        for candidate in [id.clone(), id.replace(['-', '.'], "_")] {
+            if let Some(rest) = stripped.strip_prefix(candidate.as_str()) {
+                if let Some(tool_name) = rest.strip_prefix('_') {
+                    if let Some(client) = clients.get(id.as_str()) {
+                        if client.tools.iter().any(|t| t.name == tool_name) {
+                            return Some((id.as_str(), tool_name));
+                        }
+                    }
+                    // Remember the longest-prefix match even if the tool
+                    // isn't found, so a freshly-connected server whose
+                    // tool list hasn't refreshed yet still routes plausibly.
+                    if fallback.is_none() {
+                        let split = stripped.split_at(candidate.len());
+                        fallback = Some((id.as_str(), &split.1[1..]));
+                    }
+                }
             }
         }
     }
-    None
+    fallback
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

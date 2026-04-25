@@ -108,14 +108,23 @@ pub(super) fn inject_host_api(ctx: &rquickjs::Ctx<'_>, host: Arc<dyn HostApi>) -
     // Ctx in closures (which causes QuickJS GC assertion failures).
 
     // ── ctx.exec(command, cwd?) → { stdout, stderr, exit_code } ─────
+    // B153: return a JSON envelope instead of `\x1F`-delimited tuple. The
+    // separator could legitimately appear inside shell output (binary
+    // dumps, terminal control sequences, base64 streams), and would
+    // mis-split into wrong stdout/stderr fields. JSON.parse on the JS
+    // side is well under a microsecond for these payloads.
     {
         let h = host.clone();
         let func = Function::new(
             ctx.clone(),
             move |command: String, cwd: Opt<String>| -> rquickjs::Result<String> {
                 let r = h.exec(&command, cwd.0.as_deref()).map_err(host_err)?;
-                // Return "stdout\x1Fstderr\x1Fexit_code" — JS wrapper splits on \x1F
-                Ok(format!("{}\x1F{}\x1F{}", r.stdout, r.stderr, r.exit_code))
+                let payload = serde_json::json!({
+                    "stdout": r.stdout,
+                    "stderr": r.stderr,
+                    "exit_code": r.exit_code,
+                });
+                Ok(payload.to_string())
             },
         )
         .map_err(|e| format!("exec bind: {e}"))?;
@@ -339,9 +348,11 @@ pub(super) fn inject_host_api(ctx: &rquickjs::Ctx<'_>, host: Arc<dyn HostApi>) -
         var _s = function(v) { return (v == null || v === undefined) ? "" : String(v); };
 
         ctx.exec = function(command, cwd) {
+            // B153: JSON envelope — stdout may legitimately contain the
+            // \x1F unit-separator that the old protocol used as a delimiter.
             var raw = (cwd != null) ? ctx.__exec_typed(command, cwd) : ctx.__exec_typed(command);
-            var r = raw.split(String.fromCharCode(31));
-            return { stdout: r[0], stderr: r[1], exit_code: parseInt(r[2]) };
+            try { return JSON.parse(raw); }
+            catch (e) { return { stdout: raw || "", stderr: "", exit_code: -1 }; }
         };
         ctx.git_status = function(repo) {
             var raw = (repo != null) ? ctx.__git_status_typed(repo) : ctx.__git_status_typed();

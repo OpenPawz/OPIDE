@@ -460,7 +460,12 @@ impl SseTransport {
 
             tokio::spawn(async move {
                 use futures::StreamExt;
-                let mut buffer = String::new();
+                // B143: defer UTF-8 decoding to line boundaries via the shared
+                // LineBuffer. The previous `String::from_utf8_lossy` on raw
+                // chunks corrupted any multi-byte char split across the
+                // boundary into U+FFFD (same family as B97 for Anthropic SSE).
+                let mut line_buf = crate::engine::http::LineBuffer::new();
+                let mut event_lines: Vec<String> = Vec::new();
                 let mut current_event = String::new();
                 let mut current_data = Vec::<String>::new();
 
@@ -469,23 +474,26 @@ impl SseTransport {
                         chunk = byte_stream.next() => {
                             match chunk {
                                 Some(Ok(bytes)) => {
-                                    buffer.push_str(&String::from_utf8_lossy(&bytes));
-                                    // Process complete SSE events (delimited by blank lines)
-                                    while let Some(pos) = buffer.find("\n\n") {
-                                        let event_block = buffer[..pos].to_string();
-                                        buffer = buffer[pos + 2..].to_string();
-
-                                        // Parse SSE event
-                                        current_event.clear();
-                                        current_data.clear();
-
-                                        for line in event_block.lines() {
-                                            if let Some(val) = line.strip_prefix("event:") {
-                                                current_event = val.trim().to_string();
-                                            } else if let Some(val) = line.strip_prefix("data:") {
-                                                current_data.push(val.trim().to_string());
+                                    line_buf.extend(&bytes);
+                                    for line in line_buf.drain_lines() {
+                                        if line.is_empty() {
+                                            // Blank line — end of SSE event. Flush.
+                                            current_event.clear();
+                                            current_data.clear();
+                                            for el in event_lines.drain(..) {
+                                                if let Some(val) = el.strip_prefix("event:") {
+                                                    current_event = val.trim().to_string();
+                                                } else if let Some(val) = el.strip_prefix("data:") {
+                                                    current_data.push(val.trim().to_string());
+                                                }
+                                                // Ignore id:, retry:, comments (:)
                                             }
-                                            // Ignore id:, retry:, comments (:)
+                                            // Mark a sentinel for the synchronous block below to
+                                            // continue processing once we've collected event+data.
+                                            // Fall through to the dispatch logic below.
+                                        } else {
+                                            event_lines.push(line);
+                                            continue;
                                         }
 
                                         let data = current_data.join("\n");

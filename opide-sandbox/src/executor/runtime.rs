@@ -234,12 +234,36 @@ fn execute_internal(
                     };
                 }
             }
-            // JS wrapper that stores + calls Rust
+            // B147: rate-limit the FFI hop. The previous wrapper called
+            // `ctx.__log_rust` on every log line, which is fine for occasional
+            // ctx.log() calls but expensive when JS code emits hundreds of
+            // logs in a tight loop. Stream every 10th line OR after 100ms
+            // since the last stream — bulk extract still picks up everything
+            // at the end of run() so no logs are lost.
             let _ = ctx.eval::<(), &str>(r#"
+                ctx.__log_pending = [];
+                ctx.__log_last_stream = 0;
                 ctx.log = function(msg) {
                     var s = String(msg);
                     __logs.push(s);
-                    ctx.__log_rust(s);
+                    ctx.__log_pending.push(s);
+                    var now = Date.now();
+                    var should_flush =
+                        ctx.__log_pending.length >= 10 ||
+                        (now - ctx.__log_last_stream) >= 100;
+                    if (should_flush) {
+                        ctx.__log_last_stream = now;
+                        for (var i = 0; i < ctx.__log_pending.length; i++) {
+                            ctx.__log_rust(ctx.__log_pending[i]);
+                        }
+                        ctx.__log_pending = [];
+                    }
+                };
+                ctx.__flush_logs = function() {
+                    for (var i = 0; i < ctx.__log_pending.length; i++) {
+                        ctx.__log_rust(ctx.__log_pending[i]);
+                    }
+                    ctx.__log_pending = [];
                 };
             "#);
         } else {
@@ -262,18 +286,29 @@ fn execute_internal(
             }
         }
 
-        // Wrap the user code: define the function, then call run(ctx)
+        // B148: wrap user code in a strict-mode IIFE that takes `ctx` as a
+        // parameter. This means a top-level `var ctx = ...` in user code only
+        // shadows within the IIFE scope, not the host-injected ctx, and
+        // strict mode catches more errors at parse time. After run()
+        // returns, flush any pending batched logs (B147).
         let wrapped = format!(
             r#"
-            {code}
+            (function(__ctx__) {{
+                'use strict';
+                var ctx = __ctx__;
+                {code}
 
-            (function() {{
+                var __result__;
                 if (typeof run === 'function') {{
-                    return run(ctx);
+                    __result__ = run(ctx);
                 }} else {{
-                    return {{ error: "No run(ctx) function defined" }};
+                    __result__ = {{ error: "No run(ctx) function defined" }};
                 }}
-            }})()
+                if (typeof ctx.__flush_logs === 'function') {{
+                    ctx.__flush_logs();
+                }}
+                return __result__;
+            }})(ctx)
             "#,
             code = code
         );
