@@ -139,7 +139,7 @@ pub async fn engine_mcp_status(
     state: State<'_, EngineState>,
 ) -> Result<Vec<McpServerStatus>, String> {
     let reg = state.mcp_registry.lock().await;
-    Ok(reg.status_list())
+    Ok(reg.status_list().await)
 }
 
 // ── Refresh tool list for a server ─────────────────────────────────────

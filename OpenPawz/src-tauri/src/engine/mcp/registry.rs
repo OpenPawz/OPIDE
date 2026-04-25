@@ -142,17 +142,22 @@ impl McpRegistry {
     }
 
     /// Status of all configured servers.
-    pub fn status_list(&self) -> Vec<McpServerStatus> {
-        self.clients
-            .values()
-            .map(|c| McpServerStatus {
+    /// B150: actually probe each transport instead of returning `true`. The
+    /// previous behavior reported dead servers as connected because the
+    /// client was still in the map even after the child process exited.
+    pub async fn status_list(&self) -> Vec<McpServerStatus> {
+        let mut out = Vec::with_capacity(self.clients.len());
+        for c in self.clients.values() {
+            let connected = c.is_alive().await;
+            out.push(McpServerStatus {
                 id: c.config.id.clone(),
                 name: c.config.name.clone(),
-                connected: true, // if it's in the map, it's considered connected
+                connected,
                 error: None,
                 tool_count: c.tools.len(),
-            })
-            .collect()
+            });
+        }
+        out
     }
 
     /// Get the list of connected server IDs.
@@ -230,6 +235,9 @@ impl McpRegistry {
                     }
                     Err(e) => {
                         info!("[mcp] MCP token auth failed: {}", e);
+                        // B156: ensure no half-initialised client lingers in
+                        // the registry before the next strategy retries.
+                        self.disconnect(N8N_MCP_SERVER_ID).await;
                     }
                 }
             }
@@ -268,6 +276,8 @@ impl McpRegistry {
                 }
                 Err(e) => {
                     info!("[mcp] API key auth at /mcp-server/http failed: {}", e);
+                    // B156: same cleanup as strategy 1 before falling back to SSE.
+                    self.disconnect(N8N_MCP_SERVER_ID).await;
                 }
             }
         }
@@ -363,12 +373,26 @@ fn mcp_tool_to_paw_def(server_id: &str, tool: &McpToolDef) -> ToolDefinition {
     // - Replace hyphens and dots with underscores (some APIs reject them)
     // - Strip any char that isn't alphanumeric or underscore
     // - Truncate to 64 chars (OpenAI/Azure limit)
-    let sanitized_name: String = clean_name
+    let raw_sanitized: String = clean_name
         .replace(['-', '.'], "_")
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .take(64)
         .collect();
+
+    // B151: when truncation kicks in, append a stable hash suffix so two
+    // long tool names that share a 64-char prefix don't collide into the
+    // same OpenAI tool name. Total length stays ≤64 (56 + 1 + 6 = 63).
+    let sanitized_name = if raw_sanitized.len() > 64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        raw_sanitized.hash(&mut hasher);
+        let hash_hex = format!("{:x}", hasher.finish());
+        let head: String = raw_sanitized.chars().take(56).collect();
+        format!("{}_{}", head, &hash_hex[..6])
+    } else {
+        raw_sanitized
+    };
 
     ToolDefinition {
         tool_type: "function".into(),
@@ -528,11 +552,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_registry_new_is_empty() {
+    #[tokio::test]
+    async fn test_registry_new_is_empty() {
         let reg = McpRegistry::new();
         assert!(reg.all_tool_definitions().is_empty());
-        assert!(reg.status_list().is_empty());
+        assert!(reg.status_list().await.is_empty());
         assert!(reg.connected_ids().is_empty());
     }
 }

@@ -45,10 +45,24 @@ impl StdioTransport {
                 command
             ));
         }
-        const UNSAFE_PREFIXES: &[&str] = &["/tmp/", "/var/tmp/", "/dev/shm/"];
-        let cmd_lower = command.to_lowercase();
+        // B144: include macOS canonical /tmp paths (/private/tmp, /private/var/tmp).
+        // Prefer canonicalized form so symlinked /tmp -> /private/tmp resolves to a
+        // hit too.
+        const UNSAFE_PREFIXES: &[&str] = &[
+            "/tmp/",
+            "/var/tmp/",
+            "/dev/shm/",
+            "/private/tmp/",
+            "/private/var/tmp/",
+        ];
+        let canonical_lower = cmd_path
+            .canonicalize()
+            .ok()
+            .map(|p| p.to_string_lossy().to_lowercase());
+        let check_str: &str = canonical_lower.as_deref().unwrap_or(command);
+        let check_lower = check_str.to_lowercase();
         for prefix in UNSAFE_PREFIXES {
-            if cmd_lower.starts_with(prefix) {
+            if check_lower.starts_with(prefix) {
                 return Err(format!(
                     "MCP server command rejected: executable in unsafe directory '{}'",
                     command
@@ -200,18 +214,37 @@ impl StdioTransport {
             map.insert(id, tx);
         }
 
-        // Serialize and send
-        let body = serde_json::to_vec(&request).map_err(|e| format!("Serialize error: {}", e))?;
-        self.writer_tx
-            .send(body)
-            .await
-            .map_err(|_| "Transport writer closed".to_string())?;
+        // B140: any early-exit branch from here on must remove the pending
+        // entry so the map doesn't accumulate dead senders for every timed-out
+        // request.
+        let body = match serde_json::to_vec(&request) {
+            Ok(b) => b,
+            Err(e) => {
+                self.pending.lock().await.remove(&id);
+                return Err(format!("Serialize error: {}", e));
+            }
+        };
+        if let Err(e) = self.writer_tx.send(body).await {
+            self.pending.lock().await.remove(&id);
+            return Err(format!("Transport writer closed: {}", e));
+        }
 
-        // Await response with timeout
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
+        let resp = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
             .await
-            .map_err(|_| format!("MCP request timed out after {}s (id={})", timeout_secs, id))?
-            .map_err(|_| "Response channel dropped".to_string())?;
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => {
+                // Receiver was already taken by the response handler.
+                return Err("Response channel dropped".to_string());
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(format!(
+                    "MCP request timed out after {}s (id={})",
+                    timeout_secs, id
+                ));
+            }
+        };
 
         Ok(resp)
     }
@@ -262,14 +295,27 @@ impl StdioTransport {
 
 impl Drop for StdioTransport {
     fn drop(&mut self) {
-        // Best-effort synchronous kill — the async shutdown should be called first
+        // B145: `tokio::spawn` panics outside a runtime. Drop can run during
+        // process shutdown when the runtime has already been torn down (e.g.
+        // tests, `block_on` exit) — fall back to a sync best-effort kill.
         let child = self.child.clone();
-        tokio::spawn(async move {
-            let mut guard = child.lock().await;
-            if let Some(ref mut child) = *guard {
-                let _ = child.kill().await;
+        match tokio::runtime::Handle::try_current() {
+            Ok(_handle) => {
+                tokio::spawn(async move {
+                    let mut guard = child.lock().await;
+                    if let Some(ref mut c) = *guard {
+                        let _ = c.kill().await;
+                    }
+                });
             }
-        });
+            Err(_) => {
+                if let Ok(mut guard) = child.try_lock() {
+                    if let Some(ref mut c) = *guard {
+                        let _ = c.start_kill();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -304,6 +350,16 @@ async fn read_message<R: tokio::io::AsyncRead + Unpin>(
     }
 
     let len = content_length.ok_or("Missing Content-Length header")?;
+    // B139: cap message size so a hostile/buggy MCP server can't push us into
+    // an OOM with an attacker-controlled Content-Length header. 16 MiB is far
+    // larger than any legitimate JSON-RPC payload.
+    const MAX_MCP_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+    if len > MAX_MCP_MESSAGE_BYTES {
+        return Err(format!(
+            "MCP message too large: {} bytes (cap {} bytes — possible DoS)",
+            len, MAX_MCP_MESSAGE_BYTES
+        ));
+    }
     let mut body = vec![0u8; len];
     reader
         .read_exact(&mut body)
@@ -546,35 +602,54 @@ impl SseTransport {
                 .ok_or_else(|| "SSE transport: no endpoint URL available".to_string())?
         };
 
-        // POST the request
-        let body = serde_json::to_vec(&request).map_err(|e| format!("Serialize error: {}", e))?;
+        // B140: any early-exit branch must remove the pending entry.
+        let body = match serde_json::to_vec(&request) {
+            Ok(b) => b,
+            Err(e) => {
+                self.pending.lock().await.remove(&id);
+                return Err(format!("Serialize error: {}", e));
+            }
+        };
 
-        let resp = self
+        let resp = match self
             .http
             .post(&post_url)
             .header("Content-Type", "application/json")
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("POST request failed: {}", e))?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                self.pending.lock().await.remove(&id);
+                return Err(format!("POST request failed: {}", e));
+            }
+        };
 
         if !resp.status().is_success() && resp.status().as_u16() != 202 {
-            // Clean up pending
-            let mut map = self.pending.lock().await;
-            map.remove(&id);
+            self.pending.lock().await.remove(&id);
             return Err(format!("POST returned {}", resp.status()));
         }
 
         // Await response on the SSE stream
-        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
-            .await
-            .map_err(|_| {
-                format!(
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            rx,
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => {
+                return Err("SSE response channel dropped".to_string());
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(format!(
                     "MCP SSE request timed out after {}s (id={})",
                     timeout_secs, id
-                )
-            })?
-            .map_err(|_| "SSE response channel dropped".to_string())?;
+                ));
+            }
+        };
 
         Ok(result)
     }
@@ -736,16 +811,25 @@ impl StreamableHttpTransport {
                 .text()
                 .await
                 .map_err(|e| format!("Read SSE response: {}", e))?;
-            // Find the last "data:" line containing a JSON-RPC response
-            for line in text.lines().rev() {
+            // B146: prefer the response whose id matches our request — `text.lines().rev()`
+            // would happily return an unrelated notification or a stale response left over
+            // from a prior call on a long-lived connection. Walk forward, keep the first
+            // matching id; fall back to the last parseable response if no id matches (so
+            // older servers that omit the id still work).
+            let target_id = request.id;
+            let mut last_seen: Option<JsonRpcResponse> = None;
+            for line in text.lines() {
                 if let Some(data) = line.strip_prefix("data:") {
                     let data = data.trim();
                     if let Ok(rpc_resp) = serde_json::from_str::<JsonRpcResponse>(data) {
-                        return Ok(rpc_resp);
+                        if rpc_resp.id == Some(target_id) {
+                            return Ok(rpc_resp);
+                        }
+                        last_seen = Some(rpc_resp);
                     }
                 }
             }
-            Err("No valid JSON-RPC response in SSE stream".to_string())
+            last_seen.ok_or_else(|| "No valid JSON-RPC response in SSE stream".to_string())
         } else {
             // Direct JSON response
             let rpc_resp: JsonRpcResponse = resp
