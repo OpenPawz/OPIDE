@@ -38,3 +38,7 @@ which = "6"
 dirs = "5"
 glob = "0.3"
 chrono = "0.4"
+
+# Extension installer (B63/B64) — replaces curl/unzip shell pipelines.
+zip = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

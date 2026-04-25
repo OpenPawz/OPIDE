@@ -243,34 +243,55 @@ export async function registerFormatCommand(): Promise<void> {
  * Extracts to ~/.opide/extensions/{publisher}.{name}/
  * Then checks for a matching MCP adapter and registers it.
  */
+/**
+ * Validate an extension id (`publisher.name`) before letting it anywhere
+ * near a URL or filesystem path. Refuses anything outside the canonical
+ * shape — including `..`, slashes, and empty segments — which closes the
+ * shell-injection vector that B63 documented.
+ */
+function validateExtensionId(id: string): { publisher: string; name: string } {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(id)) {
+    throw new Error(`Invalid extension id: '${id}' (expected publisher.name with [A-Za-z0-9_.-])`)
+  }
+  if (id.includes('..') || id.includes('/') || id.includes('\\')) {
+    throw new Error(`Invalid extension id: '${id}' (path-like characters refused)`)
+  }
+  const dot = id.indexOf('.')
+  return { publisher: id.slice(0, dot), name: id.slice(dot + 1) }
+}
+
 export async function installExtensionFromOpenVsx(extensionId: string): Promise<boolean> {
   const log = (msg: string) => invoke('ext_host_log', { message: `[install] ${msg}` }).catch(() => {})
 
   try {
     await log(`Installing ${extensionId}...`)
 
-    // Parse publisher.name
-    const parts = extensionId.split('.')
-    if (parts.length < 2) {
-      await log(`Invalid extension ID: ${extensionId} (expected publisher.name)`)
+    // B63: validate id BEFORE we use it in any URL or file path.
+    let publisher: string, name: string
+    try {
+      ({ publisher, name } = validateExtensionId(extensionId))
+    } catch (e) {
+      await log(String(e))
       return false
     }
-    const publisher = parts[0]
-    const name = parts.slice(1).join('.')
 
     // Get the home dir for extensions path
     const extBase = await getExtensionsBase()
     const extDir = `${extBase}/${extensionId}`
 
-    // Download .vsix from Open VSX
-    // API: https://open-vsx.org/api/{publisher}/{name}
-    // Download: https://open-vsx.org/api/{publisher}/{name}/latest/file/{publisher}.{name}-{version}.vsix
+    // B63: fetch metadata via the native ext_fetch_url_text command, which
+    // validates the host against an Open VSX/Marketplace allowlist and
+    // refuses non-https URLs. No more curl-in-shell with interpolated
+    // server data.
     await log(`Fetching metadata from Open VSX...`)
-    const metadataResult = await invoke('ide_run_command', {
-      command: `curl -sL "https://open-vsx.org/api/${publisher}/${name}"`,
-      cwd: '/tmp',
-    }) as any
-    const stdout = metadataResult?.stdout || ''
+    let stdout = ''
+    try {
+      stdout = await invoke('ext_fetch_url_text', {
+        url: `https://open-vsx.org/api/${publisher}/${name}`,
+      }) as string
+    } catch (e) {
+      await log(`Metadata fetch failed: ${e}`)
+    }
 
     let version = 'latest'
     let downloadUrl = ''
@@ -285,37 +306,34 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
       await log(`Metadata parse failed, trying direct download`)
     }
 
-    // Download the .vsix
+    // B63: download via native command (also allowlisted).
     const vsixPath = `/tmp/opide-${extensionId}.vsix`
     await log(`Downloading .vsix...`)
-    await invoke('ide_run_command', {
-      command: `curl -sL "${downloadUrl}" -o "${vsixPath}"`,
-      cwd: '/tmp',
-    })
-
-    // Verify download
-    const checkResult = await invoke('ide_run_command', {
-      command: `file "${vsixPath}"`,
-      cwd: '/tmp',
-    }) as any
-    if (!(checkResult?.stdout || '').includes('Zip')) {
-      await log(`Download failed — not a valid .vsix (zip) file`)
+    try {
+      await invoke('ext_download_url_to_path', { url: downloadUrl, destPath: vsixPath })
+    } catch (e) {
+      await log(`Download failed: ${e}`)
       return false
     }
 
-    // Extract to extensions directory
+    // B64: extract via native zip command. Skips entries whose names
+    // contain `..` or absolute paths and confines extraction to extDir.
     await log(`Extracting to ${extDir}...`)
-    await invoke('ide_run_command', {
-      command: `mkdir -p "${extDir}" && cd "${extDir}" && unzip -o "${vsixPath}" -d . > /dev/null 2>&1 && if [ -d extension ]; then mv extension/* . 2>/dev/null; mv extension/.* . 2>/dev/null; rmdir extension 2>/dev/null; fi && rm -f "${vsixPath}"`,
-      cwd: '/tmp',
-    })
+    try {
+      await invoke('ext_extract_vsix', { vsixPath, targetDir: extDir })
+    } catch (e) {
+      await log(`Extraction failed: ${e}`)
+      return false
+    }
 
-    // Verify package.json exists
-    const verifyResult = await invoke('ide_run_command', {
-      command: `cat "${extDir}/package.json" | head -5`,
-      cwd: '/',
-    }) as any
-    if (!(verifyResult?.stdout || '').includes('"name"')) {
+    // Verify package.json exists via the existing read_file tool.
+    let pkgContent = ''
+    try {
+      pkgContent = await invoke('ide_read_file', { path: `${extDir}/package.json` }) as string
+    } catch {
+      // ignore — handled by the `includes` check below
+    }
+    if (!pkgContent.includes('"name"')) {
       await log(`Install failed — no valid package.json in extracted extension`)
       return false
     }
