@@ -39,8 +39,19 @@ static OPENAI_CIRCUITS: LazyLock<Mutex<HashMap<String, Arc<CircuitBreaker>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Get (or create) the circuit breaker for a given base URL.
+/// B108: cap the map so a long-running process spinning up many distinct
+/// endpoints (e.g. per-deployment Azure URLs) doesn't grow the map without
+/// bound. Eviction is arbitrary (HashMap iteration order) since circuits are
+/// stateless modulo recent failure counts — a freshly-created circuit for the
+/// same URL is correct, just resets the failure window.
 fn get_circuit(base_url: &str) -> Arc<CircuitBreaker> {
+    const MAX_CIRCUITS: usize = 32;
     let mut map = OPENAI_CIRCUITS.lock().unwrap();
+    if map.len() >= MAX_CIRCUITS && !map.contains_key(base_url) {
+        if let Some(k) = map.keys().next().cloned() {
+            map.remove(&k);
+        }
+    }
     map.entry(base_url.to_string())
         .or_insert_with(|| Arc::new(CircuitBreaker::new(5, 60)))
         .clone()
@@ -155,7 +166,20 @@ impl OpenAiProvider {
                     .nth(1)
                     .and_then(|v| v.split('&').next())
                     .unwrap_or("2025-03-01-preview");
-                let model = config.default_model.as_deref().unwrap_or("gpt-4o");
+                // B106: Azure deployments require the deployment name in the URL,
+                // and there is no "default deployment" — falling back to "gpt-4o"
+                // always produced a 404 on accounts that didn't happen to name
+                // their deployment that. Surface the misconfiguration instead.
+                let model = match config.default_model.as_deref() {
+                    Some(m) if !m.is_empty() => m,
+                    _ => {
+                        warn!(
+                            "[engine] AzureFoundry deployment URL but no default_model configured \
+                             — set provider.default_model to your Azure deployment name."
+                        );
+                        "MISSING_DEPLOYMENT_NAME"
+                    }
+                };
                 base_url = format!(
                     "{}/openai/deployments/{}/chat/completions?api-version={}",
                     host, model, api_version
@@ -171,7 +195,18 @@ impl OpenAiProvider {
             }
         }
 
-        let is_azure = base_url.contains(".azure.com");
+        // B105: parse the URL and match host suffixes instead of substring search.
+        // The old `.contains(".azure.com")` matched proxies/paths that happen to
+        // include the literal text "azure.com" anywhere in the URL.
+        let is_azure = url::Url::parse(&base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+            .map(|h| {
+                h.ends_with(".azure.com")
+                    || h.ends_with(".cognitiveservices.azure.com")
+                    || h.ends_with(".services.ai.azure.com")
+            })
+            .unwrap_or(false);
         let circuit = get_circuit(&base_url);
         OpenAiProvider {
             client: pinned_client(),
@@ -184,7 +219,12 @@ impl OpenAiProvider {
         }
     }
 
-    fn format_messages(messages: &[Message]) -> Vec<Value> {
+    fn format_messages(messages: &[Message], provider_kind: ProviderKind) -> Vec<Value> {
+        // B100: only Moonshot/Kimi reasoning models require `reasoning_content`
+        // to be present on every replayed assistant message. Other providers
+        // (OpenAI, OpenRouter, Ollama, Azure OpenAI) ignore the field; passing
+        // an empty string just leaks an internal artifact into the wire format.
+        let needs_reasoning = matches!(provider_kind, ProviderKind::Moonshot);
         messages
             .iter()
             .map(|msg| {
@@ -227,11 +267,17 @@ impl OpenAiProvider {
                         );
                     }
                 }
-                // Kimi (and other reasoning models) require reasoning_content on
-                // ALL assistant messages when thinking mode is enabled — even if
-                // the content is empty. Missing field = 400 error.
                 if msg.role == Role::Assistant {
-                    m["reasoning_content"] = json!(msg.reasoning_content.as_deref().unwrap_or(""));
+                    if needs_reasoning {
+                        // Moonshot/Kimi rejects assistant replays missing this
+                        // field — even an empty string is required.
+                        m["reasoning_content"] =
+                            json!(msg.reasoning_content.as_deref().unwrap_or(""));
+                    } else if let Some(rc) = &msg.reasoning_content {
+                        // Pass through real reasoning when other providers happen to
+                        // send it (no spurious empty field on every message).
+                        m["reasoning_content"] = json!(rc);
+                    }
                 }
                 if let Some(id) = &msg.tool_call_id {
                     m["tool_call_id"] = json!(id);
@@ -838,12 +884,16 @@ impl AiProvider for OpenAiProvider {
             format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
         };
 
+        // B98: use the model-aware ceiling instead of hardcoded 8192. The old
+        // value silently truncated on models with much larger output windows
+        // (gpt-5, o3, kimi-k2) and over-requested on smaller ones.
+        let max_out = crate::engine::engram::model_caps::resolve_max_output_tokens(model);
         let mut body = json!({
             "model": model,
-            "messages": Self::format_messages(messages),
+            "messages": Self::format_messages(messages, self.provider_kind),
             "stream": true,
             "stream_options": {"include_usage": true},
-            "max_completion_tokens": 8192,
+            "max_completion_tokens": max_out,
         });
 
         if !tools.is_empty() {
