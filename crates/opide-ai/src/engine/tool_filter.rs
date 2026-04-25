@@ -48,10 +48,6 @@ pub const IDE_ALLOWED_TOOLS: &[&str] = &[
     "web_search",
     "web_read",
 
-    // request_tools REMOVED — it bypasses the tool filter by loading cold tools
-    // (trading, Slack, Discord, squads, canvas) on demand. OPIDE should only use
-    // the tools explicitly listed in this allowlist.
-
     // Parallel execution — read/edit multiple files at once
     "execute_plan",
 

@@ -127,7 +127,11 @@ impl DailyTokenTracker {
             return None;
         }
         let (_, _, usd) = self.estimated_spend_usd();
-        let pct = (usd / budget_usd * 100.0) as u8;
+        // B173: clamp before `as u8` — at >2.55x budget the raw cast wraps
+        // around (modular u8) and we'd report e.g. 5% spend on a 5.05x
+        // overage, silencing the warning.
+        let pct_f = (usd / budget_usd * 100.0).max(0.0).min(255.0);
+        let pct = pct_f as u8;
         let thresholds = [90u8, 75, 50]; // check highest first
         let mut emitted = self.warnings_emitted.lock();
         for &t in &thresholds {
@@ -137,6 +141,22 @@ impl DailyTokenTracker {
             }
         }
         None
+    }
+
+    /// Returns the spend ratio when it has exceeded 2× budget. Useful for
+    /// firing a "runaway" alarm that escalates beyond the standard 90%
+    /// threshold (which only fires once per session).
+    pub fn check_runaway(&self, budget_usd: f64) -> Option<f64> {
+        if budget_usd <= 0.0 {
+            return None;
+        }
+        let (_, _, usd) = self.estimated_spend_usd();
+        let ratio = usd / budget_usd;
+        if ratio >= 2.0 {
+            Some(ratio)
+        } else {
+            None
+        }
     }
 }
 

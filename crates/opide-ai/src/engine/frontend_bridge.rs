@@ -89,13 +89,24 @@ pub async fn request_edit_review(
         tool_name: tool_name.to_string(),
         description: description.to_string(),
     };
+    // B170: same cleanup discipline as request_from_frontend_timeout.
+    let cleanup_review = |id: &str| {
+        if let Some(state) = app.try_state::<FrontendBridgeState>() {
+            if let Ok(mut pending) = state.pending_reviews.lock() {
+                let _ = pending.remove(id);
+            }
+        }
+    };
+
     let emitted = app
         .get_webview_window("main")
         .and_then(|w: tauri::WebviewWindow| w.emit("ide-edit-review", &payload).ok());
     if emitted.is_none() {
-        // No main window — fall back to broadcast
-        app.emit("ide-edit-review", &payload)
-            .map_err(|e| format!("Failed to emit edit review request: {e}"))?;
+        // No main window — fall back to broadcast.
+        if let Err(e) = app.emit("ide-edit-review", &payload) {
+            cleanup_review(&request_id);
+            return Err(format!("Failed to emit edit review request: {e}"));
+        }
     }
 
     log::info!("[frontend-bridge] Edit review requested for {} ({})", path, request_id);
@@ -108,12 +119,7 @@ pub async fn request_edit_review(
         }
         Ok(Err(_)) => Err("Edit review channel closed".to_string()),
         Err(_) => {
-            // Clean up timed-out review
-            if let Some(state) = app.try_state::<FrontendBridgeState>() {
-                if let Ok(mut pending) = state.pending_reviews.lock() {
-                    let _ = pending.remove(&request_id);
-                }
-            }
+            cleanup_review(&request_id);
             Err("Edit review timed out (120s) — edit was not applied".to_string())
         }
     }
@@ -166,28 +172,34 @@ pub async fn request_from_frontend_timeout(
         return Err("FrontendBridgeState not registered".to_string());
     }
 
-    // Emit the request to the frontend
-    app.emit(
+    // B170: any failure path between `pending.insert` and the timeout match
+    // must remove the pending entry, or the map leaks for the lifetime of the
+    // FrontendBridgeState. The emit error case below was the missing branch.
+    let cleanup = |id: &str| {
+        if let Some(state) = app.try_state::<FrontendBridgeState>() {
+            if let Ok(mut pending) = state.pending.lock() {
+                let _ = pending.remove(id);
+            }
+        }
+    };
+
+    if let Err(e) = app.emit(
         "ide-tool-request",
         ToolRequest {
             request_id: request_id.clone(),
             tool: tool.to_string(),
             args,
         },
-    )
-    .map_err(|e| format!("Failed to emit tool request: {e}"))?;
+    ) {
+        cleanup(&request_id);
+        return Err(format!("Failed to emit tool request: {e}"));
+    }
 
-    // Await response with caller-specified timeout
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(_)) => Err("Frontend bridge channel closed".to_string()),
         Err(_) => {
-            // Clean up timed-out request
-            if let Some(state) = app.try_state::<FrontendBridgeState>() {
-                if let Ok(mut pending) = state.pending.lock() {
-                    let _ = pending.remove(&request_id);
-                }
-            }
+            cleanup(&request_id);
             Err(format!("Frontend tool request timed out ({}s)", timeout_secs))
         }
     }

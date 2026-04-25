@@ -216,7 +216,25 @@ async fn execute_fetch(
         .map(|h| h.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
         .unwrap_or(false);
 
-    if !has_auth_header && url.contains("discord.com/api") {
+    // B169: match Discord API hosts by canonical hostname so canary/ptb/staging
+    // subdomains (canary.discord.com, ptb.discord.com) also get the bot token
+    // injected. The substring `discord.com/api` excluded those.
+    let parsed_url_for_inject = url::Url::parse(url).ok();
+    let host_lower = parsed_url_for_inject
+        .as_ref()
+        .and_then(|u| u.host_str())
+        .map(|h| h.to_lowercase())
+        .unwrap_or_default();
+    let path_lower = parsed_url_for_inject
+        .as_ref()
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
+    let is_discord_api = matches!(
+        host_lower.as_str(),
+        "discord.com" | "canary.discord.com" | "ptb.discord.com" | "staging.discord.com"
+    ) && path_lower.starts_with("/api");
+
+    if !has_auth_header && is_discord_api {
         if let Some(state) = app_handle.try_state::<crate::engine::state::EngineState>() {
             if let Ok(creds) = crate::engine::skills::get_skill_credentials(&state.store, "discord")
             {
@@ -231,7 +249,7 @@ async fn execute_fetch(
     }
 
     // Auto-inject Content-Type for Discord API mutations when body is present
-    if url.contains("discord.com/api") && args["body"].is_string() {
+    if is_discord_api && args["body"].is_string() {
         let has_ct = args["headers"]
             .as_object()
             .map(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type")))
@@ -241,9 +259,18 @@ async fn execute_fetch(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    // B168: lazy-static client so we keep a connection pool across calls.
+    // Building a fresh reqwest::Client per fetch threw away connection reuse
+    // and re-resolved DNS on every call.
+    use std::sync::LazyLock;
+    static FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("Failed to build fetch client")
+    });
+    let client = &*FETCH_CLIENT;
 
     // ── Retry loop for transient errors ──────────────────────────────
     use crate::engine::http::{is_retryable_status, parse_retry_after, retry_delay, MAX_RETRIES};
@@ -335,13 +362,19 @@ async fn execute_fetch(
         }
     };
 
+    // B167: floor to a UTF-8 char boundary before slicing — non-ASCII response
+    // bodies (international API responses, JSON with non-ASCII strings)
+    // panicked when MAX_BODY landed mid-codepoint. Reuses S9's helper.
     const MAX_BODY: usize = 50_000;
-    let truncated = if body.len() > MAX_BODY {
-        format!(
-            "{}...\n[truncated, {} total bytes]",
-            &body[..MAX_BODY],
-            body.len()
-        )
+    let body_len = body.len();
+    let truncated = if body_len > MAX_BODY {
+        let mut head = body;
+        crate::engine::util::safe_truncate_in_place(
+            &mut head,
+            MAX_BODY,
+            &format!("...\n[truncated, {} total bytes]", body_len),
+        );
+        head
     } else {
         body
     };
