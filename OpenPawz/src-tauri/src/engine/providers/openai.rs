@@ -296,18 +296,18 @@ impl OpenAiProvider {
     }
 
     fn format_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+        // B99: route through `engine::util::sanitize_tool_name` so two
+        // distinct originals that happen to lower-case to the same string
+        // (e.g. `foo.bar` vs `foo_bar`) don't collide. Names that are
+        // already valid pass through untouched, so built-in snake_case
+        // names round-trip correctly through the agent loop's tier check.
         tools
             .iter()
             .map(|t| {
-                // Sanitize function name: only [a-zA-Z0-9_-] allowed.
-                // Some APIs (Kimi/Moonshot) are strict about this.
-                let sanitized_name: String = t.function.name.chars()
-                    .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-                    .collect();
                 json!({
                     "type": t.tool_type,
                     "function": {
-                        "name": sanitized_name,
+                        "name": crate::engine::util::sanitize_tool_name(&t.function.name),
                         "description": t.function.description,
                         "parameters": t.function.parameters,
                     }
@@ -446,15 +446,13 @@ impl OpenAiProvider {
         if !tools.is_empty() {
             // Responses API uses a flat tool format with top-level
             // name/description/parameters (NOT nested under "function").
+            // B99: same shared sanitizer as format_tools (Responses API path).
             let resp_tools: Vec<Value> = tools
                 .iter()
                 .map(|t| {
-                    let sanitized_name: String = t.function.name.chars()
-                        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-                        .collect();
                     json!({
                         "type": "function",
-                        "name": sanitized_name,
+                        "name": crate::engine::util::sanitize_tool_name(&t.function.name),
                         "description": t.function.description,
                         "parameters": t.function.parameters,
                     })
