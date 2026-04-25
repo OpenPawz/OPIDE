@@ -8,7 +8,14 @@ use crate::engine::sandbox;
 use crate::engine::state::EngineState;
 use crate::engine::util::safe_truncate;
 use log::{info, warn};
+use std::sync::LazyLock;
 use tauri::Manager;
+use tokio::sync::Semaphore;
+
+/// B134: cap concurrent exec calls so one runaway agent (or 50 parallel
+/// `cargo build` invocations) can't fork-bomb the host. 8 is enough to
+/// keep build/test workflows responsive; serialised callers wait briefly.
+static EXEC_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8));
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition {
@@ -55,6 +62,12 @@ async fn execute_exec(
     app_handle: &tauri::AppHandle,
     agent_id: &str,
 ) -> EngineResult<String> {
+    // B134: serialise concurrent exec calls behind a small semaphore.
+    let _permit = EXEC_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|e| format!("exec semaphore closed: {}", e))?;
+
     let command = args["command"]
         .as_str()
         .ok_or("exec: missing 'command' argument")?;
@@ -261,11 +274,15 @@ async fn execute_exec(
                 result = format!("(exit code: {})", out.status.code().unwrap_or(-1));
             }
 
+            // B130: round to char boundary so non-ASCII shell output (e.g.
+            // `git log` with non-ASCII commit messages, paths with diacritics)
+            // doesn't panic when the cut lands mid-codepoint.
             const MAX_OUTPUT: usize = 50_000;
-            if result.len() > MAX_OUTPUT {
-                result.truncate(MAX_OUTPUT);
-                result.push_str("\n\n... [output truncated]");
-            }
+            crate::engine::util::safe_truncate_in_place(
+                &mut result,
+                MAX_OUTPUT,
+                "\n\n... [output truncated]",
+            );
 
             Ok(result)
         }

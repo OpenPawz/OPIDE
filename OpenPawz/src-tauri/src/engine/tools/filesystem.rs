@@ -284,16 +284,20 @@ async fn execute_read_file(args: &serde_json::Value, agent_id: &str) -> EngineRe
 
     info!("[engine] read_file: {} (agent={})", path, agent_id);
 
+    // B131: previously this also blocked any `.rs` file from reads while
+    // write_file happily allowed `.rs` writes — an asymmetric posture that
+    // protected nothing while breaking Rust development workflows. The
+    // engine-source carve-out is enforced symmetrically inside
+    // `resolve_and_validate` (B138 / B73 BLOCKED_TOOLS handle the
+    // `is_opide_host` case); blocking by extension here is dead policy.
     let normalized = path.replace('\\', "/").to_lowercase();
-    if normalized.contains("src-tauri/src/engine/")
-        || normalized.contains("src/engine/")
-        || normalized.ends_with(".rs")
-    {
+    if normalized.contains("src-tauri/src/engine/") || normalized.contains("src/engine/") {
         return Err(format!(
             "Cannot read engine source file '{}'. \
              Use your available tools directly — credentials and authentication are handled automatically.",
             path
-        ).into());
+        )
+        .into());
     }
 
     let content = std::fs::read_to_string(&resolved)
@@ -402,6 +406,7 @@ async fn execute_list_directory(args: &serde_json::Value, agent_id: &str) -> Eng
     }
 
     let mut entries = Vec::new();
+    let mut truncated_at_depth = false;
 
     fn walk_dir(
         dir: &std::path::Path,
@@ -409,8 +414,10 @@ async fn execute_list_directory(args: &serde_json::Value, agent_id: &str) -> Eng
         depth: usize,
         max_depth: usize,
         entries: &mut Vec<String>,
+        truncated: &mut bool,
     ) -> std::io::Result<()> {
         if depth > max_depth {
+            *truncated = true;
             return Ok(());
         }
         let mut items: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
@@ -436,15 +443,27 @@ async fn execute_list_directory(args: &serde_json::Value, agent_id: &str) -> Eng
                     depth + 1,
                     max_depth,
                     entries,
+                    truncated,
                 )?;
+            } else if is_dir {
+                // Reached max_depth — there are subdirs we won't descend into.
+                *truncated = true;
             }
         }
         Ok(())
     }
 
     if recursive {
-        walk_dir(&resolved, "", 0, max_depth, &mut entries)
+        walk_dir(&resolved, "", 0, max_depth, &mut entries, &mut truncated_at_depth)
             .map_err(|e| format!("Failed to list directory '{}': {}", path, e))?;
+        // B137: surface the depth truncation so the agent knows the listing is
+        // incomplete instead of treating it as exhaustive.
+        if truncated_at_depth {
+            entries.push(format!(
+                "[note: deeper paths truncated at max_depth={}]",
+                max_depth
+            ));
+        }
     } else {
         let mut items: Vec<_> = std::fs::read_dir(&resolved)
             .map_err(|e| format!("Failed to list directory '{}': {}", path, e))?

@@ -1329,9 +1329,15 @@ pub async fn run_agent_turn(
             ];
 
             // ─── T4: Dangerous — financial / destructive (always prompt) ───
+            // B136: classify file deletion alongside exec/run_command. Without
+            // this, `delete_file` / `ide_delete_file` fall through to the
+            // default tier and are auto-approved on agents that haven't opted
+            // out, which can wipe user files unrecoverably.
             let tier4_dangerous: &[&str] = &[
                 "exec",
                 "run_command",
+                "delete_file",
+                "ide_delete_file",
                 "sol_swap",
                 "sol_transfer",
                 "sol_wallet_create",

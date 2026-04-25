@@ -8,6 +8,20 @@ pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..s.floor_char_boundary(max_bytes)]
 }
 
+/// Truncate a `String` in place at the largest char boundary ≤ `max_bytes`,
+/// then append a marker. Replaces ad-hoc `String::truncate(n)` calls that
+/// would panic when `n` lands on a multi-byte UTF-8 boundary
+/// (B130 exec output, B167 fetch body).
+#[inline]
+pub fn safe_truncate_in_place(s: &mut String, max_bytes: usize, marker: &str) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let cut = s.floor_char_boundary(max_bytes);
+    s.truncate(cut);
+    s.push_str(marker);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
