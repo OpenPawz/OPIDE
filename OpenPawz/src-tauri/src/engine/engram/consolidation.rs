@@ -98,33 +98,56 @@ pub async fn run_consolidation(
     // ── 2.5. LLM-assisted PII scan (Layer 2) ────────────────────────────
     // Run LLM PII detection on cleartext memories to catch context-dependent
     // PII that the regex patterns (Layer 1) missed.
+    //
+    // B158: throttle this. Previously the LLM scan fired on every consolidation
+    // cycle (default ≈5min) against all cleartext candidates — expensive and
+    // mostly redundant since the same memory wouldn't change. Now run once
+    // per N cycles AND only on memories that have aged enough (≥24h) for
+    // context-dependent PII to be worth catching.
+    const PII_SCAN_INTERVAL_RUNS: u64 = 12; // ≈ once per hour at the default 5min cadence
+    const PII_SCAN_MIN_AGE_SECS: u64 = 24 * 3600;
+    static CYCLE_COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let cycle = CYCLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pii_scan_due = cycle % PII_SCAN_INTERVAL_RUNS == 0;
+
     let mut pii_upgrades_applied = 0usize;
-    if let Some(client) = embedding_client {
-        let cleartext_memories: Vec<(String, String)> = enriched
-            .iter()
-            .filter(|m| !super::encryption::is_encrypted(&m.content.full))
-            .map(|m| (m.id.clone(), m.content.full.clone()))
-            .collect();
+    if pii_scan_due {
+        if let Some(client) = embedding_client {
+            let now_secs = chrono::Utc::now().timestamp() as u64;
+            let cleartext_memories: Vec<(String, String)> = enriched
+                .iter()
+                .filter(|m| !super::encryption::is_encrypted(&m.content.full))
+                .filter(|m| {
+                    let age = chrono::DateTime::parse_from_rfc3339(&m.created_at)
+                        .ok()
+                        .map(|t| now_secs.saturating_sub(t.timestamp() as u64))
+                        .unwrap_or(0);
+                    age >= PII_SCAN_MIN_AGE_SECS
+                })
+                .map(|m| (m.id.clone(), m.content.full.clone()))
+                .collect();
 
-        if !cleartext_memories.is_empty() {
-            let (pii_report, upgrades) =
-                super::encryption::llm_pii_scan(&cleartext_memories, client).await;
+            if !cleartext_memories.is_empty() {
+                let (pii_report, upgrades) =
+                    super::encryption::llm_pii_scan(&cleartext_memories, client).await;
 
-            if !upgrades.is_empty() {
-                match super::encryption::apply_pii_upgrades(store, &upgrades) {
-                    Ok(count) => pii_upgrades_applied = count,
-                    Err(e) => warn!(
-                        "[engram:consolidation] PII upgrade application failed: {}",
-                        e
-                    ),
+                if !upgrades.is_empty() {
+                    match super::encryption::apply_pii_upgrades(store, &upgrades) {
+                        Ok(count) => pii_upgrades_applied = count,
+                        Err(e) => warn!(
+                            "[engram:consolidation] PII upgrade application failed: {}",
+                            e
+                        ),
+                    }
                 }
-            }
 
-            if pii_report.scanned > 0 {
-                info!(
-                    "[engram:consolidation] LLM PII scan: {} scanned, {} upgraded, {} errors",
-                    pii_report.scanned, pii_report.upgraded, pii_report.errors
-                );
+                if pii_report.scanned > 0 {
+                    info!(
+                        "[engram:consolidation] LLM PII scan (cycle {}): {} scanned, {} upgraded, {} errors",
+                        cycle, pii_report.scanned, pii_report.upgraded, pii_report.errors
+                    );
+                }
             }
         }
     }
