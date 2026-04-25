@@ -105,14 +105,26 @@ pub struct OpideToolAssembler;
 
 impl ToolAssembler for OpideToolAssembler {
     fn filter_tools(&self, tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
-        tools
+        // Filter to the exposed allowlist (or any MCP-prefixed tool).
+        let filtered: Vec<ToolDefinition> = tools
             .into_iter()
             .filter(|tool| {
                 let name = tool.function.name.as_str();
-                name.starts_with("mcp_")
-                    || OPIDE_EXPOSED_TOOLS.contains(&name)
+                name.starts_with("mcp_") || OPIDE_EXPOSED_TOOLS.contains(&name)
             })
-            .collect()
+            .collect();
+
+        // Dedupe by name. Tools arrive in (builtins → MCP → skills) order; the
+        // first definition wins, which gives builtins precedence over MCP
+        // duplicates and over skill-injected duplicates (B85). Without this
+        // dedupe, the model could see two tools with the same name and the
+        // provider would 400 the request.
+        let mut seen: std::collections::HashMap<String, ToolDefinition> =
+            std::collections::HashMap::new();
+        for tool in filtered {
+            seen.entry(tool.function.name.clone()).or_insert(tool);
+        }
+        seen.into_values().collect()
     }
 }
 
@@ -147,9 +159,9 @@ fn opide_procedural_memories() -> Vec<ProceduralMemory> {
             trigger: "create files refactor scaffold rename across files write multiple files edit code".into(),
             steps: vec![
                 ProceduralStep {
-                    description: "Use execute_code for all file operations. Write a function run(ctx) that calls ctx.file_read() to read files and ctx.file_write() to write them. This batches multiple operations into one round instead of individual tool calls. All writes go through diff editor review.".into(),
+                    description: "Use execute_code for all file operations. Write a function run(ctx) that calls ctx.file_read('<path>') and ctx.file_write('<path>', <new_contents>). Replace <path> with the actual file path and <new_contents> with the contents you want to write. This batches multiple operations into one round; all writes go through the diff editor review.".into(),
                     tool_name: Some("execute_code".into()),
-                    args_pattern: Some("{\"code\": \"function run(ctx) { var content = ctx.file_read('path'); ctx.file_write('path', modified); return { done: true }; }\"}".into()),
+                    args_pattern: Some("{\"code\": \"function run(ctx) { /* substitute <path>/<new_contents> with real values */ var c = ctx.file_read('<path>'); ctx.file_write('<path>', c); return { done: true }; }\"}".into()),
                     expected_outcome: Some("Multiple files read/written in one sandbox execution".into()),
                 },
             ],
@@ -181,9 +193,9 @@ fn opide_procedural_memories() -> Vec<ProceduralMemory> {
             trigger: "fix test run tests debug failure test loop".into(),
             steps: vec![
                 ProceduralStep {
-                    description: "Use execute_code to batch the test-fix cycle: read the failing test, read the source, apply the fix, run the test, check the output — all in one sandbox execution. Use ctx.file_read(), ctx.file_write(), ctx.exec() within a single function run(ctx).".into(),
+                    description: "Use execute_code to batch the test-fix cycle. Inside `function run(ctx)` substitute <test_path> with the failing test's path, <src_path> with the file you intend to modify, and <fixed_source> with the corrected contents. The pattern is: read both, write the fix, exec the test runner, return the result.".into(),
                     tool_name: Some("execute_code".into()),
-                    args_pattern: Some("{\"code\": \"function run(ctx) { var test = ctx.file_read('test.rs'); var src = ctx.file_read('src.rs'); ctx.file_write('src.rs', fixed); var result = ctx.exec('cargo test'); return result; }\"}".into()),
+                    args_pattern: Some("{\"code\": \"function run(ctx) { /* substitute <test_path>/<src_path>/<fixed_source>/<test_command> */ var t = ctx.file_read('<test_path>'); var s = ctx.file_read('<src_path>'); ctx.file_write('<src_path>', '<fixed_source>'); return ctx.exec('<test_command>'); }\"}".into()),
                     expected_outcome: Some("Test fixed and verified in one round".into()),
                 },
             ],

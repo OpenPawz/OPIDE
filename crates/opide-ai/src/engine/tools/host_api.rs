@@ -8,21 +8,29 @@ use tauri::Manager;
 
 pub(crate) struct OpideHostApi {
     app_handle: tauri::AppHandle,
-    rt: tokio::runtime::Handle,
 }
 
 impl OpideHostApi {
     pub(crate) fn new(app_handle: tauri::AppHandle) -> Self {
-        Self {
-            app_handle,
-            rt: tokio::runtime::Handle::current(),
-        }
+        Self { app_handle }
     }
 
     /// Run an async future from sync context without panicking.
-    /// Uses block_in_place to avoid "Cannot start a runtime from within a runtime".
+    ///
+    /// B83: look up the tokio runtime at call time rather than caching at
+    /// construction. Tauri's main runtime is multi-threaded so the primary
+    /// path uses `block_in_place`. If we're somehow called outside a tokio
+    /// runtime (panic unwind, sync helper), we spin up a temporary
+    /// current-thread runtime instead of panicking.
     fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-        tokio::task::block_in_place(|| self.rt.block_on(future))
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => tokio::task::block_in_place(|| rt.block_on(future)),
+            Err(_) => tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build temporary tokio runtime")
+                .block_on(future),
+        }
     }
 }
 
@@ -50,17 +58,54 @@ impl opide_sandbox::HostApi for OpideHostApi {
         let path = path.to_string();
         let content = content.to_string();
 
-        let original = self.block_on(async {
-            tokio::fs::read_to_string(&path).await.unwrap_or_default()
+        // B80 (1): distinguish "file genuinely doesn't exist" from "read
+        // failed for some other reason." The previous unwrap_or_default
+        // treated permission errors as "new file" → auto-approve bypass.
+        let read_outcome: Result<Option<String>, String> = self.block_on(async {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(s) => Ok(Some(s)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(format!("Read failed: {e}")),
+            }
         });
+        let (original, file_existed) = match read_outcome {
+            Ok(Some(s)) => (s, true),
+            Ok(None) => (String::new(), false),
+            Err(e) => return Err(format!(
+                "Cannot determine current contents of '{}': {} — refusing to bypass review.",
+                path, e
+            )),
+        };
 
-        // New files are auto-approved — no diff to show, no review needed.
-        // Writes to /tmp/ are always auto-approved — they're outside the project,
-        // no user files are at risk (pipeline output, build artifacts, etc).
-        // Only modifications to existing project files require user review.
-        let is_tmp = path.starts_with("/tmp/") || path.starts_with("/var/folders/");
-        if original.is_empty() || is_tmp {
-            log::info!("[host-api] file_write: '{}' — auto-approved", path);
+        // B80 (2): canonicalize before trusting any prefix-based auto-approve
+        // — defeats `..` traversal and symlink tricks. Use the parent dir if
+        // the file doesn't exist yet so canonicalization can still succeed.
+        let canonical = if file_existed {
+            std::path::Path::new(&path).canonicalize().ok()
+        } else if let Some(parent) = std::path::Path::new(&path).parent() {
+            if parent.as_os_str().is_empty() {
+                std::env::current_dir().ok()
+            } else {
+                parent.canonicalize().ok().and_then(|p| {
+                    Some(p.join(std::path::Path::new(&path).file_name()?))
+                })
+            }
+        } else {
+            None
+        };
+        let is_tmp = canonical.as_ref().map(|p| {
+            let s = p.to_string_lossy();
+            // Include macOS canonical /tmp aliases.
+            s.starts_with("/tmp/") || s.starts_with("/private/tmp/") || s.starts_with("/var/folders/")
+        }).unwrap_or(false);
+
+        // Auto-approve only when the file genuinely doesn't exist (new file,
+        // no diff to review) OR the canonical path is inside a temp directory.
+        if !file_existed || is_tmp {
+            log::info!(
+                "[host-api] file_write: '{}' — auto-approved (new={}, tmp={})",
+                path, !file_existed, is_tmp
+            );
             return self.block_on(opide_shell::ide_mcp::ide_write_file(path, content));
         }
 
@@ -127,10 +172,18 @@ impl opide_sandbox::HostApi for OpideHostApi {
             &self.app_handle, &path, &path, "", "ide_delete_file", &desc,
         )) {
             Ok(true) => match self.block_on(async {
-                match tokio::fs::remove_file(&path).await {
-                    Ok(()) => Ok(()),
-                    Err(_) => tokio::fs::remove_dir(&path).await
-                        .map_err(|e| format!("Delete failed: {e}")),
+                // B81: stat first; branch on actual file kind. The previous
+                // code fell back to remove_dir on ANY remove_file failure
+                // (permissions, busy, etc.), which could clobber the wrong
+                // entity if the path resolved to a directory unexpectedly.
+                let meta = tokio::fs::metadata(&path).await
+                    .map_err(|e| format!("Cannot stat '{}': {}", path, e))?;
+                if meta.is_dir() {
+                    tokio::fs::remove_dir_all(&path).await
+                        .map_err(|e| format!("Failed to delete directory '{}': {}", path, e))
+                } else {
+                    tokio::fs::remove_file(&path).await
+                        .map_err(|e| format!("Failed to delete file '{}': {}", path, e))
                 }
             }) {
                 Ok(()) => Ok(()),
@@ -531,10 +584,13 @@ impl opide_sandbox::HostApi for OpideHostApi {
     }
 
     fn tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
-        // Gate through IDE tool filter — sandbox cannot call tools outside the allowlist.
+        // Gate through IDE tool filter — sandbox cannot call tools outside the
+        // allowlist. B86: return Err so the sandbox sees a thrown JS exception
+        // (clean failure) instead of an Ok with an "error" payload (which the
+        // sandbox JS could ignore and keep retrying).
         if !crate::engine::tool_filter::IDE_ALLOWED_TOOLS.contains(&name) {
             log::warn!("[host-api] ctx.tool('{}') blocked — not in IDE_ALLOWED_TOOLS", name);
-            return Ok(json!({"error": format!("Tool '{}' is not available in this context", name)}));
+            return Err(format!("Tool '{}' is not available in this context", name));
         }
 
         // Emit sandbox-subtool-start so the activity feed can show this sub-tool in real time.

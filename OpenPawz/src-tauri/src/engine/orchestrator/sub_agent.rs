@@ -283,7 +283,10 @@ When told to install a package:
         None,
         Some(agent_id),
     )?;
-    let provider = AnyProvider::from_config(&provider_config);
+    // B74 (sub-agent path): consult OPIDE's ProviderFactory the same way the
+    // orchestrator boss does — without this, host-specific providers like
+    // ClaudeCode silently fall back to the OpenAI-compatible default.
+    let provider = AnyProvider::from_config_auto(&provider_config, app_handle);
     let pending = state.pending_approvals.clone();
     let pid = project_id.to_string();
     let aid = agent_id.to_string();
