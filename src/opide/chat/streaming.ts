@@ -407,7 +407,7 @@ function finalizeStreaming(ev: Extract<EngineEvent, { kind: 'complete' }>): void
           await invoke('git_checkpoint_restore', {
             repoPath: ws2,
             headSha: cp.head_sha,
-            stashIndex: cp.stash_index ?? undefined,
+            stashOid: cp.stash_oid ?? undefined,
           })
           revertBar.innerHTML = '<span class="codicon codicon-check" style="font-size:12px;color:#89d185"></span><span style="font-size:11px;color:var(--vscode-descriptionForeground)">Reverted to pre-agent state</span>'
           S.checkpoint = null

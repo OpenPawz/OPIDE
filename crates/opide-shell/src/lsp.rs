@@ -118,36 +118,69 @@ fn encode_lsp_message(json: &str) -> Vec<u8> {
     msg
 }
 
+/// Outcome of one read_lsp_message call.
+/// `Skip` means the framing was malformed but the stream is still alive — caller
+/// should continue. Used by B123 to keep the reader thread up after a corrupt
+/// message instead of treating it as EOF.
+enum LspRead {
+    Message(String),
+    Skip,
+    Eof,
+}
+
 /// Read one JSON-RPC message from a BufReader (blocking)
-fn read_lsp_message(reader: &mut BufReader<std::process::ChildStdout>) -> Option<String> {
-    // Read headers
-    let mut content_length: usize = 0;
+fn read_lsp_message(reader: &mut BufReader<std::process::ChildStdout>) -> LspRead {
+    // Cap message size at 16 MiB so a malicious or buggy server can't OOM us.
+    const MAX_MSG_BYTES: usize = 16 * 1024 * 1024;
+
+    let mut content_length: Option<usize> = None;
+    let mut header_line = String::new();
     loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => return None, // EOF
+        header_line.clear();
+        match reader.read_line(&mut header_line) {
+            Ok(0) => return LspRead::Eof,
             Ok(_) => {
-                let trimmed = line.trim();
+                let trimmed = header_line.trim();
                 if trimmed.is_empty() {
                     break; // End of headers
                 }
                 if let Some(len_str) = trimmed.strip_prefix("Content-Length: ") {
-                    content_length = len_str.parse().unwrap_or(0);
+                    match len_str.parse::<usize>() {
+                        Ok(n) if n <= MAX_MSG_BYTES => content_length = Some(n),
+                        Ok(n) => {
+                            log::warn!(
+                                "[lsp] Content-Length too large ({}); skipping message",
+                                n
+                            );
+                            // B123: skip rather than return EOF — server is still alive.
+                            return LspRead::Skip;
+                        }
+                        Err(e) => {
+                            log::warn!("[lsp] Bad Content-Length '{}': {}", len_str, e);
+                            return LspRead::Skip;
+                        }
+                    }
                 }
             }
-            Err(_) => return None,
+            Err(_) => return LspRead::Eof,
         }
     }
 
-    if content_length == 0 {
-        return None;
+    let len = match content_length {
+        Some(n) => n,
+        None => return LspRead::Skip, // header block ended without Content-Length
+    };
+    if len == 0 {
+        return LspRead::Skip;
     }
 
-    // Read body
-    let mut body = vec![0u8; content_length];
+    let mut body = vec![0u8; len];
     match std::io::Read::read_exact(reader, &mut body) {
-        Ok(()) => String::from_utf8(body).ok(),
-        Err(_) => None,
+        Ok(()) => match String::from_utf8(body) {
+            Ok(s) => LspRead::Message(s),
+            Err(_) => LspRead::Skip,
+        },
+        Err(_) => LspRead::Eof,
     }
 }
 
@@ -162,13 +195,12 @@ pub async fn lsp_start(
     let config = get_lsp_config(&request.language)
         .ok_or_else(|| format!("No language server configured for: {}", request.language))?;
 
-    // Check if the command exists
-    let which_result = Command::new("which")
-        .arg(config.command)
-        .output();
-    if which_result.map(|o| !o.status.success()).unwrap_or(true) {
+    // B119: cross-platform existence check via the `which` crate. The old
+    // `Command::new("which")` only worked on Unix and shelled out for every
+    // start, which also made it racy with PATH changes mid-session.
+    if which::which(config.command).is_err() {
         return Err(format!(
-            "Language server '{}' not found. Install it first.",
+            "Language server '{}' not found in PATH. Install it first.",
             config.command
         ));
     }
@@ -216,7 +248,7 @@ pub async fn lsp_start(
         let mut reader = BufReader::new(stdout);
         loop {
             match read_lsp_message(&mut reader) {
-                Some(message) => {
+                LspRead::Message(message) => {
                     let _ = app_handle.emit(
                         "lsp-message",
                         LspMessageEvent {
@@ -225,8 +257,15 @@ pub async fn lsp_start(
                         },
                     );
                 }
-                None => {
+                // B123: malformed frame — already logged inside the reader.
+                LspRead::Skip => continue,
+                LspRead::Eof => {
                     log::info!("[opide-lsp] reader ended for {}", sid);
+                    // B122: notify frontend so it can drop its handle / restart.
+                    let _ = app_handle.emit(
+                        "lsp-exit",
+                        serde_json::json!({ "server_id": &sid }),
+                    );
                     break;
                 }
             }
@@ -296,22 +335,51 @@ pub async fn lsp_stop(
     state: tauri::State<'_, LspState>,
     server_id: String,
 ) -> Result<(), String> {
-    let mut servers = state.servers.lock().map_err(|e| e.to_string())?;
+    let instance = {
+        let mut servers = state.servers.lock().map_err(|e| e.to_string())?;
+        servers.remove(&server_id)
+    };
+    let Some(mut instance) = instance else {
+        return Err(format!("LSP server not found: {server_id}"));
+    };
 
-    if let Some(mut instance) = servers.remove(&server_id) {
-        // Send shutdown request then kill
-        if let Some(ref mut stdin) = instance.stdin_writer {
-            let shutdown = r#"{"jsonrpc":"2.0","id":999999,"method":"shutdown","params":null}"#;
-            if let Err(e) = stdin.write_all(&encode_lsp_message(shutdown)) { log::warn!("[lsp] shutdown write failed: {}", e); }
-            if let Err(e) = stdin.flush() { log::warn!("[lsp] shutdown flush failed: {}", e); }
+    // B120: use a UUID-based shutdown id instead of the magic 999999 — that
+    // value can collide with real long-running request ids on busy servers.
+    if let Some(ref mut stdin) = instance.stdin_writer {
+        let shutdown = format!(
+            r#"{{"jsonrpc":"2.0","id":"opide-shutdown-{}","method":"shutdown","params":null}}"#,
+            uuid::Uuid::new_v4()
+        );
+        if let Err(e) = stdin.write_all(&encode_lsp_message(&shutdown)) {
+            log::warn!("[lsp] shutdown write failed: {}", e);
         }
-        // Give it a moment then kill
-        if let Err(e) = instance.child.kill() { log::warn!("[lsp] kill failed: {}", e); }
-        log::info!("[opide-lsp] stopped {}", server_id);
-        Ok(())
-    } else {
-        Err(format!("LSP server not found: {server_id}"))
+        if let Err(e) = stdin.flush() {
+            log::warn!("[lsp] shutdown flush failed: {}", e);
+        }
     }
+    // Drop stdin so the server sees EOF and exits gracefully.
+    instance.stdin_writer = None;
+
+    // B121: give the server up to 2s to exit cleanly; only SIGKILL if it
+    // doesn't go on its own. Run the wait off the async runtime.
+    let mut child = instance.child;
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..20 {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+        if let Err(e) = child.kill() {
+            log::warn!("[lsp] kill failed: {}", e);
+        }
+        let _ = child.wait();
+    })
+    .await
+    .map_err(|e| format!("LSP wait task: {e}"))?;
+
+    log::info!("[opide-lsp] stopped {}", server_id);
+    Ok(())
 }
 
 #[tauri::command]

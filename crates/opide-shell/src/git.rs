@@ -238,11 +238,51 @@ pub async fn git_stage(repo_path: String, paths: Vec<String>) -> Result<(), Stri
     Ok(())
 }
 
+/// B114: refuse to stage all when the workdir contains files whose names look
+/// like credentials or keys. Callers that genuinely need to stage such files
+/// should use `git_stage` with explicit paths.
+const CRED_PATTERNS: &[&str] = &[
+    ".env",
+    "id_rsa",
+    "id_ed25519",
+    "id_dsa",
+    "credentials",
+    ".npmrc",
+    ".pypirc",
+    ".aws/credentials",
+];
+
 #[tauri::command]
 pub async fn git_stage_all(repo_path: String) -> Result<(), String> {
     let repo = open_repo(&repo_path)?;
-    let mut index = repo.index().map_err(|e| e.to_string())?;
 
+    // Sniff for credential-pattern files among modified/untracked entries.
+    let mut opts = StatusOptions::new();
+    opts.show(StatusShow::IndexAndWorkdir).include_untracked(true);
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+    let mut suspicious = Vec::new();
+    for entry in statuses.iter() {
+        if entry.status().is_ignored() {
+            continue;
+        }
+        if let Some(path) = entry.path() {
+            let lower = path.to_lowercase();
+            let ends_with_secret_ext =
+                lower.ends_with(".pem") || lower.ends_with(".key") || lower.ends_with(".p12");
+            if ends_with_secret_ext || CRED_PATTERNS.iter().any(|p| lower.contains(p)) {
+                suspicious.push(path.to_string());
+            }
+        }
+    }
+    if !suspicious.is_empty() {
+        return Err(format!(
+            "Refusing to stage all — found credential-like files: {}. \
+             Stage explicitly with git_stage if intentional.",
+            suspicious.join(", ")
+        ));
+    }
+
+    let mut index = repo.index().map_err(|e| e.to_string())?;
     index
         .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
         .map_err(|e| e.to_string())?;
@@ -376,11 +416,16 @@ pub async fn git_checkout(repo_path: String, branch_name: String) -> Result<(), 
 
 /// Snapshot returned by git_checkpoint_create.
 /// head_sha: the HEAD commit to restore to.
-/// stash_index: Some(0) if dirty files were stashed before the checkpoint, None otherwise.
+/// stash_oid: Some(oid_hex) if dirty files were stashed before the checkpoint, None otherwise.
+///
+/// B112: previously held a `stash_index: Option<usize>` that was always `None`,
+/// silently dropping any pre-existing user work on revert. We now actually
+/// stash, and reference the stash by OID — indices shift when newer stashes
+/// land, so storing the index is unsafe across multiple checkpoints.
 #[derive(Debug, Serialize, Clone)]
 pub struct GitCheckpoint {
     pub head_sha: String,
-    pub stash_index: Option<usize>,
+    pub stash_oid: Option<String>,
 }
 
 /// Save a checkpoint: record HEAD SHA and stash any existing dirty work.
@@ -404,17 +449,37 @@ pub async fn git_checkpoint_create(repo_path: String) -> Result<GitCheckpoint, S
         statuses.iter().any(|e| !e.status().is_ignored())
     };
 
-    // Only stash if the tree is clean — i.e. dirty files were introduced by
-    // a previous agent run. If the user already has uncommitted changes before
-    // the agent starts (deleted folders, WIP edits, etc.) we leave them alone.
-    // The HEAD SHA is enough to hard-reset agent commits on restore.
-    let stash_index = None;
-    if has_dirty {
-        log::info!("[opide-git] checkpoint: dirty tree before agent run — skipping stash, HEAD recorded only");
-    }
+    // B112: actually stash so the user's pre-existing dirty work survives a
+    // hard-reset on revert. INCLUDE_UNTRACKED preserves new files too.
+    let stash_oid = if has_dirty {
+        let sig = repo
+            .signature()
+            .map_err(|e| format!("git signature missing: {e}"))?;
+        let oid = repo
+            .stash_save2(
+                &sig,
+                Some(&format!(
+                    "opide-checkpoint-{}",
+                    chrono::Utc::now().timestamp()
+                )),
+                Some(git2::StashFlags::INCLUDE_UNTRACKED),
+            )
+            .map_err(|e| format!("stash save failed: {e}"))?;
+        log::info!("[opide-git] checkpoint: stashed dirty work as {}", oid);
+        Some(oid.to_string())
+    } else {
+        None
+    };
 
-    log::info!("[opide-git] checkpoint created at {}", head_sha);
-    Ok(GitCheckpoint { head_sha, stash_index })
+    log::info!(
+        "[opide-git] checkpoint created at {} (stash={:?})",
+        head_sha,
+        stash_oid
+    );
+    Ok(GitCheckpoint {
+        head_sha,
+        stash_oid,
+    })
 }
 
 /// Restore from a checkpoint: hard-reset to head_sha, then pop the stash if one was created.
@@ -422,12 +487,35 @@ pub async fn git_checkpoint_create(repo_path: String) -> Result<GitCheckpoint, S
 pub async fn git_checkpoint_restore(
     repo_path: String,
     head_sha: String,
-    stash_index: Option<usize>,
+    stash_oid: Option<String>,
 ) -> Result<(), String> {
     let mut repo = open_repo(&repo_path)?;
 
     let oid = git2::Oid::from_str(&head_sha)
         .map_err(|e| format!("Invalid checkpoint SHA: {e}"))?;
+
+    // B113: tag the current HEAD before the destructive reset so the user can
+    // recover via `git checkout opide/before-revert/<ts>` if revert was a
+    // mistake. Lightweight tag avoids needing a tagger signature.
+    if let Ok(current_head) = repo.head() {
+        if let Some(current_oid) = current_head.target() {
+            let tag_name = format!(
+                "opide/before-revert/{}",
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            );
+            if let Ok(commit) = repo.find_commit(current_oid) {
+                if let Err(e) = repo.tag_lightweight(&tag_name, commit.as_object(), false) {
+                    log::warn!(
+                        "[opide-git] safety tag '{}' failed (continuing): {}",
+                        tag_name,
+                        e
+                    );
+                } else {
+                    log::info!("[opide-git] safety tag created: {}", tag_name);
+                }
+            }
+        }
+    }
 
     // Scope the commit borrow so it's dropped before stash_pop (which needs &mut repo)
     {
@@ -438,10 +526,31 @@ pub async fn git_checkpoint_restore(
             .map_err(|e| format!("Hard reset failed: {e}"))?;
     }
 
-    if let Some(idx) = stash_index {
-        repo.stash_pop(idx, None)
-            .map_err(|e| format!("Stash pop failed: {e}"))?;
-        log::info!("[opide-git] stash popped after checkpoint restore");
+    // B112: walk the stash list to find the matching OID — indices may have
+    // shifted since the checkpoint was created if newer stashes landed.
+    if let Some(oid_str) = stash_oid {
+        let target_oid = git2::Oid::from_str(&oid_str)
+            .map_err(|e| format!("bad stash oid: {e}"))?;
+        let mut found_idx: Option<usize> = None;
+        repo.stash_foreach(|i, _msg, oid| {
+            if *oid == target_oid {
+                found_idx = Some(i);
+                false
+            } else {
+                true
+            }
+        })
+        .map_err(|e| format!("stash_foreach: {e}"))?;
+        if let Some(idx) = found_idx {
+            repo.stash_pop(idx, None)
+                .map_err(|e| format!("Stash pop failed: {e}"))?;
+            log::info!("[opide-git] stash {} popped after checkpoint restore", oid_str);
+        } else {
+            log::warn!(
+                "[opide-git] checkpoint stash {} not found (may have been dropped)",
+                oid_str
+            );
+        }
     }
 
     log::info!("[opide-git] checkpoint restored to {}", head_sha);

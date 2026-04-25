@@ -85,4 +85,4 @@ export interface PendingTool { call: ToolCall; preContent?: string }
 
 export interface Attachment { name: string; content: string; isImage: boolean }
 
-export interface AgentCheckpoint { head_sha: string; stash_index: number | null }
+export interface AgentCheckpoint { head_sha: string; stash_oid: string | null }

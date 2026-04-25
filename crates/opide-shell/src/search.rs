@@ -78,15 +78,15 @@ pub async fn search_files(request: SearchRequest) -> Result<SearchResult, String
 
         let path = entry.path();
 
-        // Skip known large non-source directories that blow up context
+        // B125: previously this list also blocked Solidity-specific dirs
+        // (`deployments/`, `artifacts/`, `cache_forge/`, `typechain-types/`,
+        // `out/`) which made search opaque on non-Solidity workspaces. Rely
+        // on `.gitignore` (already honored by WalkBuilder above) for
+        // project-specific exclusions, and only keep universal noise here.
         let path_str_check = path.to_string_lossy();
-        if path_str_check.contains("/deployments/")
-            || path_str_check.contains("/artifacts/")
-            || path_str_check.contains("/cache/")
-            || path_str_check.contains("/cache_forge/")
-            || path_str_check.contains("/out/")
-            || path_str_check.contains("/typechain-types/")
-            || path_str_check.contains("/node_modules/")
+        if path_str_check.contains("/node_modules/")
+            || path_str_check.contains("/.git/")
+            || path_str_check.contains("/target/")
         {
             continue;
         }
@@ -187,14 +187,12 @@ pub async fn search_file_list(root: String, max_results: Option<usize>) -> Resul
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Simple glob matching — supports * and ? wildcards
+/// B126: real glob semantics via the `glob` crate — handles `**`, `{a,b}`,
+/// `[abc]`, `?`, `*`. The naive replace-based regex previously produced
+/// false matches on patterns containing brackets, braces, or other
+/// regex-meaningful characters that aren't part of the glob spec.
 fn glob_match(pattern: &str, name: &str) -> bool {
-    // Convert simple glob to regex
-    let regex_str = pattern
-        .replace('.', "\\.")
-        .replace('*', ".*")
-        .replace('?', ".");
-    regex::Regex::new(&format!("^{regex_str}$"))
-        .map(|re| re.is_match(name))
+    glob::Pattern::new(pattern)
+        .map(|p| p.matches(name))
         .unwrap_or(false)
 }
