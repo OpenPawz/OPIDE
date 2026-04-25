@@ -81,12 +81,41 @@ pub fn should_force_single_tool(tc: &ToolCall) -> bool {
     !is_single_query
 }
 
+/// Escape a JSON-string payload for safe embedding inside a JS double-quoted
+/// string literal. The wrapped JS does `JSON.parse(<this>)` — so the input is
+/// already JSON; we just need to make it survive the JS lexer.
+///
+/// This avoids the `${...}` interpolation hazard that template literals (`...`)
+/// have: double-quoted JS strings do NOT interpolate, so we sidestep it
+/// entirely.
+fn js_quote_json(args: &str) -> String {
+    let mut out = String::with_capacity(args.len() + 8);
+    out.push('"');
+    for c in args.chars() {
+        match c {
+            '"'  => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Build JS code that wraps a single tool call for sandbox execution.
 pub fn build_single_tool_sandbox_code(tc: &ToolCall) -> String {
-    let args_clean = tc.function.arguments.replace('\\', "\\\\").replace('`', "\\`");
+    let args_literal = js_quote_json(&tc.function.arguments);
     format!(
-        "function run(ctx) {{\n  var result = ctx.tool(\"{}\", JSON.parse(`{}`));\n  return result;\n}}",
-        tc.function.name, args_clean
+        "function run(ctx) {{\n  var result = ctx.tool({:?}, JSON.parse({}));\n  return result;\n}}",
+        tc.function.name, args_literal
     )
 }
 
@@ -112,12 +141,15 @@ pub fn build_batch_sandbox_code(tool_calls: &[ToolCall]) -> String {
     js_lines.push("  var results = [];".to_string());
 
     for tc in tool_calls {
-        let args_clean = tc.function.arguments.replace('\\', "\\\\").replace('`', "\\`");
+        let args_literal = js_quote_json(&tc.function.arguments);
         js_lines.push(format!(
-            "  results.push({{ tool: \"{}\", result: ctx.tool(\"{}\", JSON.parse(`{}`)) }});",
-            tc.function.name, tc.function.name, args_clean
+            "  results.push({{ tool: {:?}, result: ctx.tool({:?}, JSON.parse({})) }});",
+            tc.function.name, tc.function.name, args_literal
         ));
-        js_lines.push(format!("  ctx.log(\"Executed: {}\");", tc.function.name));
+        js_lines.push(format!(
+            "  ctx.log({:?});",
+            format!("Executed: {}", tc.function.name)
+        ));
     }
 
     js_lines.push("  return { batch: true, count: results.length, results: results };".to_string());
@@ -133,4 +165,68 @@ pub fn is_sandbox_auto_approved(tc: &ToolCall) -> bool {
     tc.function.name.starts_with("ide_")
         || tc.function.name.starts_with("wasm_")
         || tc.function.name == "execute_code"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::types::{FunctionCall, ToolCall};
+
+    fn make_tc(name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: "test_id".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: name.into(),
+                arguments: args.into(),
+            },
+            thought_signature: None,
+            thought_parts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn js_quote_json_handles_template_literal_traps() {
+        // The classic "${...}" interpolation trap that broke template-literal builders.
+        let q = js_quote_json(r#"{"path": "${HOME}/.ssh/id_rsa"}"#);
+        // The output is wrapped in double quotes (not backticks), so ${} doesn't interpolate.
+        assert!(q.starts_with('"') && q.ends_with('"'));
+        assert!(q.contains("${HOME}"));
+        assert!(!q.contains('`'));
+    }
+
+    #[test]
+    fn js_quote_json_escapes_double_quote_and_backslash() {
+        let q = js_quote_json(r#"{"key": "value with \"quote\" and \\ backslash"}"#);
+        // Backslashes and quotes must be properly escaped for JS string literal.
+        assert!(q.contains(r#"\\\""#) || q.contains(r#"\""#));
+    }
+
+    #[test]
+    fn js_quote_json_escapes_control_chars() {
+        let q = js_quote_json("line1\nline2\ttab");
+        assert!(q.contains("\\n"));
+        assert!(q.contains("\\t"));
+    }
+
+    #[test]
+    fn build_single_tool_sandbox_code_safe_against_dollar_brace() {
+        let tc = make_tc("ide_read_file", r#"{"path": "${PWD}/secret"}"#);
+        let code = build_single_tool_sandbox_code(&tc);
+        // Body uses double quotes for the args literal; ${} inside double quotes
+        // is just a literal character sequence in JS.
+        assert!(code.contains("JSON.parse("));
+        assert!(!code.contains('`'), "no backticks should appear in the generated code");
+    }
+
+    #[test]
+    fn build_batch_sandbox_code_safe_against_dollar_brace() {
+        let calls = vec![
+            make_tc("ide_read_file",  r#"{"path": "${A}"}"#),
+            make_tc("ide_write_file", r#"{"content": "x${B}y"}"#),
+        ];
+        let code = build_batch_sandbox_code(&calls);
+        assert!(!code.contains('`'));
+        assert!(code.contains("JSON.parse("));
+    }
 }
