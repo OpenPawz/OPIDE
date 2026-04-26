@@ -930,6 +930,10 @@ impl AiProvider for OpenAiProvider {
             // thinking is enabled with a 400. Detect by provider_kind OR
             // by model name (kimi/moonshot) OR by base_url, since users
             // can wire Moonshot through Custom providers too.
+            info!(
+                "[engine] B191-trace: provider_kind={:?} model='{}' url='{}' tool_choice={:?} thinking={:?}",
+                self.provider_kind, model, self.base_url, tool_choice, thinking_level
+            );
             if let Some(tc) = tool_choice {
                 let model_l = model.to_lowercase();
                 let url_l = self.base_url.to_lowercase();
@@ -946,6 +950,10 @@ impl AiProvider for OpenAiProvider {
                         model, self.base_url
                     );
                 } else {
+                    info!(
+                        "[engine] B191: NOT dropping (is_kimi_like={} tc={} thinking_on={})",
+                        is_kimi_like, tc, thinking_on
+                    );
                     body["tool_choice"] = json!(tc);
                 }
             }
