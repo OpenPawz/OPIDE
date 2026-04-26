@@ -201,7 +201,7 @@ async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }
       toolName: ev.tool_call.name,
     })
     renderMessages()
-    addApprovalButtons(ev.tool_call.id)
+    addApprovalButtons(ev.tool_call.id, ev.tool_call.name, tier)
   } else {
     updateStatus(`Running: ${ev.tool_call.name}`)
     showToolIndicator(ev.tool_call.name)
@@ -210,33 +210,65 @@ async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }
 
 // ─── Approval Buttons ────────────────────────────────────────────────────────
 
-function addApprovalButtons(toolCallId: string): void {
-  if (!S.msgList) return
-  const lastBubble = S.msgList.lastElementChild
-  if (!lastBubble) return
+/**
+ * Render an obvious, full-width approval row in the message list.
+ *
+ * The previous implementation appended the buttons inside the tool
+ * message's flex wrap (display:flex, child width:100%), which compressed
+ * the button row to zero width — the engine asked, the buttons existed
+ * in the DOM, but nothing visible appeared. The user reported "zero
+ * permission requests EVER" because of this. (Live repro 2026-04-26
+ * after B198 fixed the engine-side auto-approve bug.)
+ *
+ * Now: build a self-contained row, append it to msgList directly as a
+ * sibling of the message bubbles, with a clear "Approval needed" label
+ * and a faint background so it's hard to miss.
+ */
+function addApprovalButtons(toolCallId: string, toolName: string, tier: string): void {
+  if (!S.msgList) {
+    console.warn('[opide-chat] addApprovalButtons: msgList is null — cannot render approval UI')
+    return
+  }
+  console.log('[opide-chat] approval needed:', toolName, 'tier=', tier, 'id=', toolCallId)
 
-  const btnRow = document.createElement('div')
-  btnRow.style.cssText = 'display:flex;gap:6px;padding:4px 12px'
+  const row = document.createElement('div')
+  row.dataset.approvalForToolCall = toolCallId
+  row.style.cssText = [
+    'display:flex',
+    'align-items:center',
+    'gap:8px',
+    'margin:6px 14px',
+    'padding:8px 12px',
+    'border-radius:6px',
+    'background:rgba(212,168,67,0.08)',
+    'border:1px solid rgba(212,168,67,0.35)',
+  ].join(';')
+
+  const label = document.createElement('span')
+  label.style.cssText = 'flex:1;font-size:12px;color:var(--vscode-foreground)'
+  label.innerHTML = `<strong>Approval needed:</strong> <code style="font-family:var(--vscode-editor-font-family,monospace)">${toolName}</code> <span style="opacity:0.6">(${tier})</span>`
+  row.appendChild(label)
 
   const approveBtn = document.createElement('button')
   approveBtn.textContent = 'Approve'
-  approveBtn.style.cssText = 'background:#2ea043;color:white;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer'
+  approveBtn.style.cssText = 'background:#2ea043;color:white;border:none;border-radius:4px;padding:4px 12px;font-size:12px;cursor:pointer;font-weight:500'
   approveBtn.addEventListener('click', () => {
     invoke('engine_approve_tool', { sessionId: S.sessionId, toolCallId, approved: true }).catch(console.error)
-    btnRow.remove()
+    row.remove()
   })
 
   const denyBtn = document.createElement('button')
   denyBtn.textContent = 'Deny'
-  denyBtn.style.cssText = 'background:#da3633;color:white;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer'
+  denyBtn.style.cssText = 'background:#da3633;color:white;border:none;border-radius:4px;padding:4px 12px;font-size:12px;cursor:pointer;font-weight:500'
   denyBtn.addEventListener('click', () => {
     invoke('engine_approve_tool', { sessionId: S.sessionId, toolCallId, approved: false }).catch(console.error)
-    btnRow.remove()
+    row.remove()
   })
 
-  btnRow.appendChild(approveBtn)
-  btnRow.appendChild(denyBtn)
-  lastBubble.appendChild(btnRow)
+  row.appendChild(approveBtn)
+  row.appendChild(denyBtn)
+  S.msgList.appendChild(row)
+  S.msgList.scrollTop = S.msgList.scrollHeight
 }
 
 // ─── Tool Result ─────────────────────────────────────────────────────────────
