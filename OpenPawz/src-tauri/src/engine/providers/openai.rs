@@ -927,17 +927,23 @@ impl AiProvider for OpenAiProvider {
             // Apply tool_choice override if provided.
             //
             // B191: Moonshot/Kimi rejects tool_choice='required' when
-            // thinking is enabled with a 400. Drop the override on those
-            // model+thinking combos so the model can still pick tools
-            // freely instead of erroring out the whole turn.
+            // thinking is enabled with a 400. Detect by provider_kind OR
+            // by model name (kimi/moonshot) OR by base_url, since users
+            // can wire Moonshot through Custom providers too.
             if let Some(tc) = tool_choice {
-                let kimi_required_with_thinking = matches!(self.provider_kind, ProviderKind::Moonshot)
-                    && tc == "required"
-                    && thinking_level.map(|l| l != "none").unwrap_or(false);
-                if kimi_required_with_thinking {
+                let model_l = model.to_lowercase();
+                let url_l = self.base_url.to_lowercase();
+                let is_kimi_like = matches!(self.provider_kind, ProviderKind::Moonshot)
+                    || model_l.contains("kimi")
+                    || model_l.contains("moonshot")
+                    || url_l.contains("moonshot.ai")
+                    || url_l.contains("moonshot.cn");
+                let thinking_on = thinking_level.map(|l| l != "none").unwrap_or(false);
+                if is_kimi_like && tc == "required" && thinking_on {
                     info!(
-                        "[engine] Skipping tool_choice='required' on Moonshot/Kimi with thinking enabled \
-                         (API rejects the combo). Model will still call tools when appropriate."
+                        "[engine] B191: dropping tool_choice='required' on Kimi-like \
+                         model='{}' url='{}' (API rejects with thinking enabled)",
+                        model, self.base_url
                     );
                 } else {
                     body["tool_choice"] = json!(tc);
