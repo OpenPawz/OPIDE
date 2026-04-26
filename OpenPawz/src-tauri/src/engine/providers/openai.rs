@@ -926,36 +926,35 @@ impl AiProvider for OpenAiProvider {
 
             // Apply tool_choice override if provided.
             //
-            // B191: Moonshot/Kimi rejects tool_choice='required' when
-            // thinking is enabled with a 400. Detect by provider_kind OR
-            // by model name (kimi/moonshot) OR by base_url, since users
-            // can wire Moonshot through Custom providers too. Using warn!
-            // for the trace so it surfaces past the providers-only Warn
-            // filter set in lib.rs while we verify the gate.
-            warn!(
-                "[engine] B191-trace: provider_kind={:?} model='{}' url='{}' tool_choice={:?} thinking={:?}",
-                self.provider_kind, model, self.base_url, tool_choice, thinking_level
-            );
+            // B191: Kimi-family models (kimi-k2, kimi-k2.6, etc.) are
+            // intrinsically thinking models — Moonshot's API reports
+            // "thinking enabled" for them regardless of whether we send
+            // a `thinking_level` parameter. Sending `tool_choice='required'`
+            // returns a hard 400.
+            //
+            // Detect by model name OR base_url so Custom-provider configs
+            // pointing at moonshot.ai/.cn also match. The gate intentionally
+            // does NOT inspect `thinking_level` — that's our caller's
+            // request, not the model's behavior.
+            //
+            // Other reasoning models (o1/o3/o4/gpt-5) accept
+            // tool_choice='required'; this fix is narrow to Kimi.
             if let Some(tc) = tool_choice {
                 let model_l = model.to_lowercase();
                 let url_l = self.base_url.to_lowercase();
-                let is_kimi_like = matches!(self.provider_kind, ProviderKind::Moonshot)
+                let is_kimi = matches!(self.provider_kind, ProviderKind::Moonshot)
                     || model_l.contains("kimi")
                     || model_l.contains("moonshot")
                     || url_l.contains("moonshot.ai")
                     || url_l.contains("moonshot.cn");
-                let thinking_on = thinking_level.map(|l| l != "none").unwrap_or(false);
-                if is_kimi_like && tc == "required" && thinking_on {
+                if is_kimi && tc == "required" {
                     warn!(
-                        "[engine] B191: dropping tool_choice='required' on Kimi-like \
-                         model='{}' url='{}' (API rejects with thinking enabled)",
-                        model, self.base_url
+                        "[engine] B191: dropping tool_choice='required' for Kimi-family model='{}' \
+                         (Moonshot API rejects this — thinking is intrinsic to these models). \
+                         Model can still call tools when appropriate.",
+                        model
                     );
                 } else {
-                    warn!(
-                        "[engine] B191: NOT dropping (is_kimi_like={} tc={} thinking_on={:?})",
-                        is_kimi_like, tc, thinking_on
-                    );
                     body["tool_choice"] = json!(tc);
                 }
             }
