@@ -541,6 +541,13 @@ pub struct EngineState {
     /// Every `engine-event` is sent here alongside the Tauri webview emit so that
     /// non-webview clients receive real-time streaming events.
     pub sse_events: tokio::sync::broadcast::Sender<String>,
+    /// B197: the active OPIDE workspace path (the folder the user has open in
+    /// Monaco). Set by the frontend via `engine_set_active_workspace` when an
+    /// `open-workspace` event fires. Read by host_api.rs to enforce the
+    /// "operations outside the project require approval" policy and by the
+    /// system-prompt builder to tell the agent which folder it's working in.
+    /// `None` until the user opens a folder.
+    pub active_workspace: Arc<Mutex<Option<String>>>,
 }
 
 impl EngineState {
@@ -638,6 +645,7 @@ impl EngineState {
             inject_queues: Arc::new(Mutex::new(HashMap::new())),
             surface_signals: Arc::new(Mutex::new(HashMap::new())),
             session_workspaces: Arc::new(Mutex::new(HashMap::new())),
+            active_workspace: Arc::new(Mutex::new(None)),
             cognitive_states: Arc::new(Mutex::new(HashMap::new())),
             hnsw_index,
             sse_events: sse_tx,

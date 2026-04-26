@@ -277,6 +277,8 @@ pub fn run() {
             commands::chat::engine_session_cleanup,
             commands::chat::engine_session_compact,
             commands::chat::engine_approve_tool,
+            // B197: workspace bound for the agent (workspace-aware approval).
+            commands::chat::engine_set_active_workspace,
             // ── Engine Config & Sandbox ──
             commands::config::engine_sandbox_check,
             commands::config::engine_sandbox_get_config,

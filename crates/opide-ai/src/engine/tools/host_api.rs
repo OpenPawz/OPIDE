@@ -58,6 +58,18 @@ impl opide_sandbox::HostApi for OpideHostApi {
         let path = path.to_string();
         let content = content.to_string();
 
+        // B197: read the active workspace from EngineState so we can decide
+        // whether `path` is inside the user's project, in an allowlisted
+        // temp dir, or somewhere we should pause and ask before writing.
+        let active_workspace: Option<String> = self
+            .app_handle
+            .try_state::<paw_temp_lib::engine::state::EngineState>()
+            .and_then(|st| st.active_workspace.lock().clone());
+        let target = paw_temp_lib::engine::util::classify_write_target(
+            &path,
+            active_workspace.as_deref(),
+        );
+
         // B194 (1): refuse credential-shaped content unconditionally,
         // regardless of file existence or auto-approve eligibility.
         // The OPIDE sandbox path was the only file-write surface that
@@ -126,17 +138,38 @@ impl opide_sandbox::HostApi for OpideHostApi {
             s.starts_with("/tmp/") || s.starts_with("/private/tmp/") || s.starts_with("/var/folders/")
         }).unwrap_or(false);
 
-        // Auto-approve only when the file genuinely doesn't exist (new file,
-        // no diff to review) OR the canonical path is inside a temp directory.
-        if !file_existed || is_tmp {
+        // B197: route based on workspace classification.
+        //
+        //  - InsideWorkspace (or legacy `is_tmp` short-circuit): existing
+        //    behavior — auto-approve new files, diff-editor review for
+        //    edits to existing files.
+        //  - Allowlisted (e.g. /tmp): always auto-approve.
+        //  - OffWorkspace / NoWorkspace: ALWAYS run through the diff
+        //    editor regardless of new vs existing, so the user has a
+        //    chance to review writes that land outside the project.
+        use paw_temp_lib::engine::util::WriteTarget;
+        let force_review = matches!(target, WriteTarget::OffWorkspace | WriteTarget::NoWorkspace);
+
+        if !force_review && (!file_existed || is_tmp || target == WriteTarget::Allowlisted) {
             log::info!(
-                "[host-api] file_write: '{}' — auto-approved (new={}, tmp={})",
-                path, !file_existed, is_tmp
+                "[host-api] file_write: '{}' — auto-approved (new={}, tmp={}, target={:?})",
+                path,
+                !file_existed,
+                is_tmp,
+                target
             );
             return self.block_on(opide_shell::ide_mcp::ide_write_file(path, content));
         }
 
-        let desc = format!("Modify {} ({} bytes)", path, content.len());
+        let desc = if force_review {
+            format!(
+                "Write outside the active workspace: {} ({} bytes). Approve only if you trust this destination.",
+                path,
+                content.len()
+            )
+        } else {
+            format!("Modify {} ({} bytes)", path, content.len())
+        };
         match self.block_on(crate::engine::frontend_bridge::request_edit_review(
             &self.app_handle, &path, &original, &content, "ide_write_file", &desc,
         )) {
@@ -176,14 +209,28 @@ impl opide_sandbox::HostApi for OpideHostApi {
             return Err(reason);
         }
 
+        // B197: same workspace classification used in file_write — appends
+        // outside the project go through review.
+        let active_workspace: Option<String> = self
+            .app_handle
+            .try_state::<paw_temp_lib::engine::state::EngineState>()
+            .and_then(|st| st.active_workspace.lock().clone());
+        let target = paw_temp_lib::engine::util::classify_write_target(
+            &path,
+            active_workspace.as_deref(),
+        );
+        use paw_temp_lib::engine::util::WriteTarget;
+        let force_review = matches!(target, WriteTarget::OffWorkspace | WriteTarget::NoWorkspace);
+
         let existing = match self.block_on(opide_shell::ide_mcp::ide_read_file(path.clone())) {
             Ok(fc) => fc.content,
             Err(_) => String::new(),
         };
         let combined = format!("{}{}", existing, content);
 
-        // Appending to a new file (no existing content) is auto-approved.
-        if existing.is_empty() {
+        // Appending to a new file (no existing content) is auto-approved
+        // ONLY when the destination is inside the workspace or allowlisted.
+        if existing.is_empty() && !force_review {
             log::info!("[host-api] file_append: new file '{}' — auto-approved", path);
             return match self.block_on(opide_shell::ide_mcp::ide_write_file(path.clone(), combined)) {
                 Ok(()) => Ok(()),
@@ -191,7 +238,15 @@ impl opide_sandbox::HostApi for OpideHostApi {
             };
         }
 
-        let desc = format!("Append to {} ({} bytes)", path, content.len());
+        let desc = if force_review {
+            format!(
+                "Append outside the active workspace: {} ({} bytes). Approve only if you trust this destination.",
+                path,
+                content.len()
+            )
+        } else {
+            format!("Append to {} ({} bytes)", path, content.len())
+        };
         match self.block_on(crate::engine::frontend_bridge::request_edit_review(
             &self.app_handle, &path, &existing, &combined, "ide_append_file", &desc,
         )) {

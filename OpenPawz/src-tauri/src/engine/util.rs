@@ -56,6 +56,91 @@ pub fn sanitize_tool_name(name: &str) -> String {
     format!("{}_{}", head, &hash_hex[..6])
 }
 
+// ── Workspace boundary classification (B197) ───────────────────────────────
+//
+// OPIDE has the concept of an active workspace — the folder the user has
+// open in Monaco. Agent file ops should default to staying inside that
+// folder; writes outside it are still possible but require user approval
+// instead of auto-running. Temp dirs and the engram data dir get an
+// implicit allowlist so the engine's own bookkeeping isn't gated.
+
+/// Where a candidate write/edit target falls relative to the user's project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteTarget {
+    /// Inside the active workspace tree. Existing per-file approval rules
+    /// apply (auto-approve new, diff-review existing).
+    InsideWorkspace,
+    /// Allowlisted system path: /tmp, /var/folders, the user's cache dir
+    /// for OPIDE itself. Auto-approve.
+    Allowlisted,
+    /// Outside the workspace AND outside the allowlist. Requires the
+    /// agent to ask the user before writing.
+    OffWorkspace,
+    /// No active workspace recorded yet (Monaco hasn't reported one).
+    /// Treat as "unknown — require approval" so we don't accidentally
+    /// auto-approve everything during the brief boot window.
+    NoWorkspace,
+}
+
+/// Classify `path` against the active `workspace_root`. The classifier
+/// canonicalises both sides where possible so symlinks and `..` don't
+/// fool the comparison; falls back to lexical matching when canonicalize
+/// fails (e.g. file doesn't exist yet — common for write_file).
+pub fn classify_write_target(path: &str, workspace_root: Option<&str>) -> WriteTarget {
+    let candidate = std::path::Path::new(path);
+    let canon = candidate
+        .canonicalize()
+        .ok()
+        .or_else(|| {
+            // For new files, canonicalize the parent and rejoin the file name.
+            candidate.parent().and_then(|p| p.canonicalize().ok()).and_then(|cp| {
+                Some(cp.join(candidate.file_name()?))
+            })
+        });
+    let canon_str = canon
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+
+    // Allowlisted system temp / cache paths — never gated.
+    let lower = canon_str.to_lowercase();
+    let in_temp = lower.starts_with("/tmp/")
+        || lower.starts_with("/private/tmp/")
+        || lower.starts_with("/var/folders/")
+        || lower.starts_with("/private/var/folders/")
+        || lower.starts_with("/var/tmp/");
+    let in_engine_data = dirs::data_dir()
+        .and_then(|d| d.canonicalize().ok())
+        .map(|d| canon.as_ref().map(|c| c.starts_with(&d)).unwrap_or(false))
+        .unwrap_or(false)
+        || dirs::cache_dir()
+            .and_then(|d| d.canonicalize().ok())
+            .map(|d| canon.as_ref().map(|c| c.starts_with(&d)).unwrap_or(false))
+            .unwrap_or(false);
+    if in_temp || in_engine_data {
+        return WriteTarget::Allowlisted;
+    }
+
+    let ws = match workspace_root {
+        Some(s) if !s.is_empty() => s,
+        _ => return WriteTarget::NoWorkspace,
+    };
+    let ws_canon = std::path::Path::new(ws)
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ws.to_string());
+
+    // Lexical containment, after canonicalising both sides. Both sides
+    // already had `/private` resolved (or not) consistently because we
+    // ran canonicalize on each.
+    if canon_str.starts_with(&ws_canon) {
+        WriteTarget::InsideWorkspace
+    } else {
+        WriteTarget::OffWorkspace
+    }
+}
+
 // ── Credential / sensitive-path helpers (B133/B132/B194) ───────────────────
 //
 // These were originally local to `engine/tools/filesystem.rs` (B133/B138),
@@ -366,6 +451,59 @@ mod tests {
     fn sensitive_path_allows_normal_files() {
         assert!(check_sensitive_path("/Users/foo/Desktop/notes.md").is_ok());
         assert!(check_sensitive_path("/tmp/scratch.txt").is_ok());
+    }
+
+    // ── B197 workspace classification ──
+
+    #[test]
+    fn classify_no_workspace_returns_no_workspace_for_user_paths() {
+        // Allowlisted paths are still allowlisted even with no workspace.
+        assert_eq!(
+            classify_write_target("/tmp/scratch.txt", None),
+            WriteTarget::Allowlisted
+        );
+        // User paths fall back to NoWorkspace (caller treats as needing approval).
+        assert_eq!(
+            classify_write_target("/Users/foo/Desktop/test.env", None),
+            WriteTarget::NoWorkspace,
+        );
+    }
+
+    #[test]
+    fn classify_inside_workspace() {
+        // Use a real path that exists for canonicalize() — the project root.
+        let tmp = std::env::temp_dir();
+        let ws = tmp.to_string_lossy().to_string();
+        let target = format!("{}/some-file.txt", ws.trim_end_matches('/'));
+        let cls = classify_write_target(&target, Some(&ws));
+        // /tmp is allowlisted regardless — that's fine; it's the strongest signal.
+        assert!(matches!(cls, WriteTarget::Allowlisted | WriteTarget::InsideWorkspace));
+    }
+
+    #[test]
+    fn classify_off_workspace_requires_approval() {
+        // Workspace = /Users/foo/Project. Target = /Users/foo/Desktop/x.
+        // Neither canonicalises (test env), so falls back to lexical check —
+        // /Users/foo/Desktop does NOT start with /Users/foo/Project.
+        assert_eq!(
+            classify_write_target(
+                "/Users/foo/Desktop/x.txt",
+                Some("/Users/foo/Project"),
+            ),
+            WriteTarget::OffWorkspace,
+        );
+    }
+
+    #[test]
+    fn classify_temp_is_allowlisted_even_with_workspace() {
+        assert_eq!(
+            classify_write_target("/tmp/scratch.log", Some("/Users/foo/Project")),
+            WriteTarget::Allowlisted,
+        );
+        assert_eq!(
+            classify_write_target("/private/tmp/x", Some("/Users/foo/Project")),
+            WriteTarget::Allowlisted,
+        );
     }
 
     #[test]

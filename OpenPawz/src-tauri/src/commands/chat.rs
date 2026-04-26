@@ -479,8 +479,36 @@ pub async fn engine_chat_send(
     // These were missing from the ContextBuilder path, causing the agent to lose
     // self-awareness of what OpenPawz is and what tools/capabilities it has.
     // In OPIDE: use IDE prompts instead of generic OpenPawz platform awareness.
+    //
+    // B197: inject the active workspace path so the agent thinks of paths
+    // relative to the user's project. Operations outside the workspace
+    // require user approval (enforced server-side in host_api.rs).
+    let workspace_block = {
+        let ws = state.active_workspace.lock().clone();
+        match ws.as_deref() {
+            Some(path) if !path.is_empty() => format!(
+                "\n\n## Active workspace\n\
+                 The user's open project is at `{}`. Treat this folder as your default \
+                 working directory. Prefer relative paths inside this tree. Writes \
+                 outside the workspace are still possible but will require explicit \
+                 user approval through the IDE's review panel — only step outside the \
+                 project when the user has clearly asked you to.",
+                path,
+            ),
+            _ => "\n\n## Active workspace\n\
+                  No workspace is currently open in OPIDE. Suggest the user open a \
+                  folder (or call `ide_open_workspace` if they tell you a path) before \
+                  doing project work. File writes outside an obvious temp dir will \
+                  require explicit user approval.".to_string(),
+        }
+    };
     builder = builder.platform_awareness(
-        format!("{}\n\n{}", chat_org::build_ide_platform_prompt(), chat_org::build_ide_coding_guidelines())
+        format!(
+            "{}\n\n{}{}",
+            chat_org::build_ide_platform_prompt(),
+            chat_org::build_ide_coding_guidelines(),
+            workspace_block,
+        )
     );
     // Use IDE-specific MCP note instead of foreman.md — keeps n8n/Slack/worker
     // model instructions (and the "Architect vs Foreman" framing) out of OPIDE.
@@ -1349,6 +1377,36 @@ pub async fn engine_session_compact(
 }
 
 // ── Tool approval ─────────────────────────────────────────────────────────────
+
+/// B197: tell the engine which folder Monaco currently has open. Called by
+/// the frontend's `open-workspace` listener so `host_api.rs` and the system
+/// prompt builder can use the path to enforce workspace confinement
+/// (writes outside the project require approval) and to steer the agent.
+///
+/// Pass `None`/empty to clear (no workspace open).
+#[tauri::command]
+pub fn engine_set_active_workspace(
+    state: State<'_, EngineState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let normalized = path.and_then(|p| {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    let mut guard = state
+        .active_workspace
+        .lock();
+    *guard = normalized.clone();
+    log::info!(
+        "[engine] active workspace set to {}",
+        normalized.as_deref().unwrap_or("(none)")
+    );
+    Ok(())
+}
 
 #[tauri::command]
 pub fn engine_approve_tool(

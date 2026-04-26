@@ -7,9 +7,23 @@
  */
 
 import { open } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { initScmProvider } from './scm-provider.ts'
 import { registerSearchProviders } from './search-provider.ts'
+
+/**
+ * B197: tell the engine which folder is now active so its host_api.rs and
+ * system-prompt builder can scope agent operations accordingly. Best-effort
+ * — failure to update the engine shouldn't block opening the folder.
+ */
+async function notifyEngineWorkspace(path: string | null): Promise<void> {
+  try {
+    await invoke('engine_set_active_workspace', { path })
+  } catch (e) {
+    console.warn('[opide-workspace] engine_set_active_workspace failed:', e)
+  }
+}
 
 // ─── Deduplication guards ───────────────────────────────────────────────────
 
@@ -43,6 +57,12 @@ async function ensureServicesForPath(path: string): Promise<void> {
 }
 
 async function emitOpenWorkspaceOnce(path: string): Promise<void> {
+  // B197: always tell the engine, even if the indexer event was already
+  // emitted earlier in this session. The engine state is process-local
+  // (vs. the indexer's per-file caching) and missing it here means
+  // host_api treats every write as off-workspace.
+  await notifyEngineWorkspace(path)
+
   if (_openWorkspaceEmitted.has(path)) {
     console.log('[opide-workspace] open-workspace already emitted for', path, '— skipping')
     return
