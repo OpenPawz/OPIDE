@@ -117,10 +117,26 @@ export async function doSend(): Promise<void> {
     : baseSystemPrompt
   S.lastSendWasPlan = S.planMode
 
+  // B200: generate the session id BEFORE invoke so the engine-event listener
+  // has a non-null S.sessionId when tool_request / delta / etc. start arriving.
+  // Previously we set S.sessionId only AFTER invoke resolved — but invoke
+  // awaits the entire chat turn (tool approvals included). During the turn
+  // the listener saw `!S.sessionId` and silently dropped every event,
+  // including tool_request, so the approval UI never rendered. This was
+  // *the* reason "zero permission requests EVER" surfaced after the
+  // engine-side B196/B197/B198 fixes — the engine asked, the listener
+  // dropped the question.
+  //
+  // The backend uses request.session_id when provided, falling back to its
+  // own UUID otherwise (commands/chat.rs::engine_chat_send), so a frontend-
+  // generated id round-trips correctly.
+  const sessionId = S.sessionId ?? `eng-${crypto.randomUUID()}`
+  S.sessionId = sessionId
+
   try {
     const response = await invoke<ChatResponse>('engine_chat_send', {
       request: {
-        session_id: S.sessionId ?? undefined,
+        session_id: sessionId,
         message: fullMessage,
         system_prompt: systemPrompt,
         agent_id: S.selectedAgent?.agent_id ?? undefined,
@@ -132,6 +148,8 @@ export async function doSend(): Promise<void> {
         is_redirect: isMidStreamRedirect || isDeepSession,
       },
     })
+    // Engine echoes back the same session_id; reassigning is a no-op but
+    // keeps us aligned if the backend ever decides to migrate sessions.
     S.sessionId = response.session_id
     // Always update runId — on redirect, old complete events won't match new runId
     // so they'll be filtered, and the existing streaming bubble continues for the new run
@@ -161,10 +179,15 @@ export async function executeApprovedPlan(): Promise<void> {
   setStreaming(true)
   showStreamingBubble()
   if (S.planSteps.length > 0) attachPlanProgress()
+  // B200: same upfront-id pattern as sendChat — keeps the listener filter
+  // happy while the engine is mid-turn.
+  const sessionId = S.sessionId ?? `eng-${crypto.randomUUID()}`
+  S.sessionId = sessionId
+
   try {
     const response = await invoke<ChatResponse>('engine_chat_send', {
       request: {
-        session_id: S.sessionId ?? undefined,
+        session_id: sessionId,
         message: execMsg,
         system_prompt: S.selectedAgent?.system_prompt || buildSystemPrompt(getWorkspace()),
         agent_id: S.selectedAgent?.agent_id ?? undefined,
