@@ -924,9 +924,24 @@ impl AiProvider for OpenAiProvider {
                 );
             }
 
-            // Apply tool_choice override if provided
+            // Apply tool_choice override if provided.
+            //
+            // B191: Moonshot/Kimi rejects tool_choice='required' when
+            // thinking is enabled with a 400. Drop the override on those
+            // model+thinking combos so the model can still pick tools
+            // freely instead of erroring out the whole turn.
             if let Some(tc) = tool_choice {
-                body["tool_choice"] = json!(tc);
+                let kimi_required_with_thinking = matches!(self.provider_kind, ProviderKind::Moonshot)
+                    && tc == "required"
+                    && thinking_level.map(|l| l != "none").unwrap_or(false);
+                if kimi_required_with_thinking {
+                    info!(
+                        "[engine] Skipping tool_choice='required' on Moonshot/Kimi with thinking enabled \
+                         (API rejects the combo). Model will still call tools when appropriate."
+                    );
+                } else {
+                    body["tool_choice"] = json!(tc);
+                }
             }
         }
         if let Some(temp) = temperature {
