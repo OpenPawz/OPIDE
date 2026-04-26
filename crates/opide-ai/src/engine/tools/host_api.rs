@@ -338,6 +338,36 @@ impl opide_sandbox::HostApi for OpideHostApi {
     fn exec(&self, command: &str, cwd: Option<&str>) -> Result<opide_sandbox::ExecResult, String> {
         let command = command.to_string();
         let cwd = cwd.map(|s| s.to_string());
+
+        // B195: same gates as `tool_executor::ide_run_command`. The
+        // sandbox `ctx.exec` is the second shell entry point — without
+        // this check, `ctx.exec("printf 'KEY=sk-...' > file")` bypasses
+        // the file-write credential heuristic the same way the direct
+        // tool dispatch did.
+        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&command) {
+            log::warn!(
+                "[host-api] B195: refusing exec — command contains {}",
+                kind
+            );
+            return Err(format!(
+                "Refusing to run command: it contains what looks like a {}. \
+                 Use the engine's skill vault for credentials, or pass them \
+                 via environment variables instead of literal values.",
+                kind
+            ));
+        }
+        if let Some(target) = super::tool_executor::sensitive_redirect_target(&command) {
+            log::warn!(
+                "[host-api] B195: refusing exec — redirects to sensitive path '{}'",
+                target
+            );
+            return Err(format!(
+                "Refusing to run command: redirects to '{}', which is blocked by \
+                 the sensitive-path policy.",
+                target
+            ));
+        }
+
         match self.block_on(opide_shell::ide_mcp::ide_run_command(command.clone(), cwd)) {
             Ok(result) => Ok(opide_sandbox::ExecResult {
                 stdout: result.stdout,

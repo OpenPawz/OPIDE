@@ -8,6 +8,162 @@ use serde_json::Value;
 use std::sync::Arc;
 use tauri::Manager;
 
+/// B195: if the command redirects into a sensitive path, return that
+/// target so the caller can refuse before invoking the shell. Returns
+/// `None` for everything that looks safe.
+///
+/// This is intentionally a heuristic, not a parser: shells have many
+/// ways to express I/O (heredocs, `dd of=`, named pipes, here-strings),
+/// and a determined adversary can always find a bypass. The point is to
+/// catch the obvious shapes so a simple `printf '…' > /etc/passwd`
+/// doesn't sail through. Defence-in-depth, not a security boundary —
+/// the real boundary is the user-approval gate at the agent loop tier.
+pub(crate) fn sensitive_redirect_target(command: &str) -> Option<String> {
+    let target = extract_redirect_target(command)?;
+    if paw_temp_lib::engine::util::check_sensitive_path(&target).is_err() {
+        Some(target)
+    } else {
+        None
+    }
+}
+
+fn extract_redirect_target(command: &str) -> Option<String> {
+    // Strip strings so we don't confuse `echo "> /etc/passwd"` for a redirect.
+    let mut depth_squote = false;
+    let mut depth_dquote = false;
+    let mut prev_was_escape = false;
+    let mut sanitised = String::with_capacity(command.len());
+    for c in command.chars() {
+        if prev_was_escape {
+            sanitised.push(c);
+            prev_was_escape = false;
+            continue;
+        }
+        match c {
+            '\\' => {
+                prev_was_escape = true;
+                sanitised.push(c);
+            }
+            '\'' if !depth_dquote => {
+                depth_squote = !depth_squote;
+                sanitised.push(' ');
+            }
+            '"' if !depth_squote => {
+                depth_dquote = !depth_dquote;
+                sanitised.push(' ');
+            }
+            _ if depth_squote || depth_dquote => sanitised.push(' '),
+            _ => sanitised.push(c),
+        }
+    }
+
+    // `>`, `>>`, `1>`, `2>`, `&>` then path. Also `tee [-a] path`.
+    let tokens: Vec<&str> = sanitised.split_whitespace().collect();
+    for (i, tok) in tokens.iter().enumerate() {
+        let redirect = matches!(*tok, ">" | ">>" | "1>" | "2>" | "&>" | "1>>" | "2>>");
+        if redirect {
+            if let Some(target) = tokens.get(i + 1) {
+                return Some((*target).to_string());
+            }
+        }
+        if *tok == "tee" {
+            // tee [-a] [-i] target
+            let mut j = i + 1;
+            while let Some(t) = tokens.get(j) {
+                if t.starts_with('-') {
+                    j += 1;
+                } else {
+                    return Some((*t).to_string());
+                }
+            }
+        }
+        // `>file` (no space). Strip leading > / >>.
+        if let Some(rest) = tok
+            .strip_prefix(">>")
+            .or_else(|| tok.strip_prefix('>'))
+            .filter(|r| !r.is_empty())
+        {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::extract_redirect_target;
+
+    #[test]
+    fn detects_simple_redirect() {
+        assert_eq!(
+            extract_redirect_target("printf 'hi' > /tmp/x"),
+            Some("/tmp/x".to_string()),
+        );
+    }
+
+    #[test]
+    fn detects_append_redirect() {
+        assert_eq!(
+            extract_redirect_target("echo line >> /etc/hosts"),
+            Some("/etc/hosts".to_string()),
+        );
+    }
+
+    #[test]
+    fn detects_no_space_redirect() {
+        // Reproducing the exact shape Kimi used to bypass B194:
+        // `printf 'OPENAI_API_KEY=…' >/Users/.../test.env`
+        assert_eq!(
+            extract_redirect_target("printf 'KEY=v' >/Users/foo/test.env"),
+            Some("/Users/foo/test.env".to_string()),
+        );
+    }
+
+    #[test]
+    fn detects_tee() {
+        assert_eq!(
+            extract_redirect_target("echo hi | tee /etc/passwd"),
+            Some("/etc/passwd".to_string()),
+        );
+        assert_eq!(
+            extract_redirect_target("echo hi | tee -a /etc/hosts"),
+            Some("/etc/hosts".to_string()),
+        );
+    }
+
+    #[test]
+    fn ignores_string_literals() {
+        // `echo "> /etc/passwd"` is just printing text; not a redirect.
+        assert_eq!(
+            extract_redirect_target("echo \"> /etc/passwd\""),
+            None,
+        );
+        assert_eq!(
+            extract_redirect_target("echo '> /etc/passwd'"),
+            None,
+        );
+    }
+
+    #[test]
+    fn ignores_safe_commands() {
+        assert_eq!(extract_redirect_target("ls -la"), None);
+        assert_eq!(extract_redirect_target("git status"), None);
+        assert_eq!(extract_redirect_target("cargo build"), None);
+    }
+
+    #[test]
+    fn detects_stderr_and_combined() {
+        assert_eq!(
+            extract_redirect_target("cmd 2> /tmp/err.log"),
+            Some("/tmp/err.log".to_string()),
+        );
+        assert_eq!(
+            extract_redirect_target("cmd &> /etc/output"),
+            Some("/etc/output".to_string()),
+        );
+    }
+}
+
 pub async fn execute(
     name: &str,
     args: &Value,
@@ -135,6 +291,45 @@ pub async fn execute(
 
             if command.is_empty() {
                 return Some(Err("ide_run_command: 'command' is required".to_string()));
+            }
+
+            // B195: shell commands bypass host_api.rs and the B194 file
+            // gates. Reproduced 2026-04-26: after B194 refused
+            // `ctx.file_write(.../test.env, OPENAI_API_KEY=sk-...)`, the
+            // model retried via `ide_run_command` with
+            // `printf 'OPENAI_API_KEY=sk-...' > .../test.env` and the
+            // shell happily wrote the credential to disk.
+            //
+            // Run the same credential heuristic over the command string
+            // itself. Any literal credential-shaped value in the command
+            // (in a `printf`/`echo`/heredoc) gets refused before the
+            // shell sees it.
+            if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&command) {
+                log::warn!(
+                    "[tools] B195: refusing ide_run_command — command contains {}",
+                    kind
+                );
+                return Some(Err(format!(
+                    "Refusing to run command: it contains what looks like a {}. \
+                     Use the engine's skill vault for credentials, or pass them \
+                     via environment variables instead of literal values.",
+                    kind
+                )));
+            }
+
+            // B195: also reject commands that redirect into known-sensitive
+            // paths even when the content alone wouldn't trip. Catches
+            // `cat foo > ~/.ssh/authorized_keys`, `touch /etc/passwd`, etc.
+            if let Some(target) = sensitive_redirect_target(&command) {
+                log::warn!(
+                    "[tools] B195: refusing ide_run_command — redirects to sensitive path '{}'",
+                    target
+                );
+                return Some(Err(format!(
+                    "Refusing to run command: redirects to '{}', which is blocked by \
+                     the sensitive-path policy.",
+                    target
+                )));
             }
 
             match opide_shell::ide_mcp::ide_run_command(command.clone(), cwd.clone()).await {
