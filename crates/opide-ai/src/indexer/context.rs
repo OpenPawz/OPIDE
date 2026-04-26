@@ -228,7 +228,16 @@ pub async fn ide_get_codebase_context(
             }
             Ok(parts.join("\n\n"))
         }
-        None => Ok(String::new()),
+        // B193: previously returned `Ok(String::new())` here, which left
+        // the agent with an empty result and no way to tell why. Now we
+        // explicitly say "no index" so the agent knows to call
+        // `ide_open_workspace` instead of guessing the project is empty.
+        None => Ok(
+            "No workspace is currently indexed. Call `ide_open_workspace` with an absolute \
+             path to load one, or `ide_create_project` to scaffold a new project. AST and \
+             semantic tools become available once indexing completes."
+                .to_string(),
+        ),
     }
 }
 

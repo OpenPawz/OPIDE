@@ -58,6 +58,33 @@ impl opide_sandbox::HostApi for OpideHostApi {
         let path = path.to_string();
         let content = content.to_string();
 
+        // B194 (1): refuse credential-shaped content unconditionally,
+        // regardless of file existence or auto-approve eligibility.
+        // The OPIDE sandbox path was the only file-write surface that
+        // never ran this check; without it, a single execute_code call
+        // could plant an OPENAI_API_KEY=sk-… file on the user's
+        // Desktop with zero prompt. Reproduced by Kimi 2026-04-26.
+        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&content) {
+            log::warn!(
+                "[host-api] B194: refusing write to '{}' — content contains {} (auto-approve bypassed regardless)",
+                path, kind
+            );
+            return Err(format!(
+                "Refusing to write '{}': content contains what looks like a {}. \
+                 Credentials should be stored via the engine's skill vault, not on disk.",
+                path, kind
+            ));
+        }
+
+        // B194 (2): refuse paths that hit the engine's sensitive-path
+        // blocklist (~/.ssh, .aws/credentials, /etc/passwd, engine
+        // source, etc.). The blocklist is defined once in engine::util
+        // and shared with the standalone filesystem tool.
+        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+            log::warn!("[host-api] B194: {}", reason);
+            return Err(reason);
+        }
+
         // B80 (1): distinguish "file genuinely doesn't exist" from "read
         // failed for some other reason." The previous unwrap_or_default
         // treated permission errors as "new file" → auto-approve bypass.
@@ -128,6 +155,27 @@ impl opide_sandbox::HostApi for OpideHostApi {
     fn file_append(&self, path: &str, content: &str) -> Result<(), String> {
         let path = path.to_string();
         let content = content.to_string();
+
+        // B194: same gates as file_write. The new content alone gets the
+        // credential check (we don't punish the user for credentials
+        // already in the existing file — those landed via some other
+        // path). The path itself is checked against the sensitive list.
+        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&content) {
+            log::warn!(
+                "[host-api] B194: refusing append to '{}' — content contains {}",
+                path, kind
+            );
+            return Err(format!(
+                "Refusing to append to '{}': content contains what looks like a {}. \
+                 Credentials should be stored via the engine's skill vault, not on disk.",
+                path, kind
+            ));
+        }
+        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+            log::warn!("[host-api] B194: {}", reason);
+            return Err(reason);
+        }
+
         let existing = match self.block_on(opide_shell::ide_mcp::ide_read_file(path.clone())) {
             Ok(fc) => fc.content,
             Err(_) => String::new(),
@@ -167,6 +215,17 @@ impl opide_sandbox::HostApi for OpideHostApi {
 
     fn file_delete(&self, path: &str) -> Result<(), String> {
         let path = path.to_string();
+
+        // B194: refuse deletes against the sensitive-path blocklist
+        // even before we ask for review. This stops an agent that's
+        // been auto-approved-everything from rm -rf'ing the user's
+        // .ssh tree just because the user clicked "yes" once on a
+        // delete prompt for a benign file.
+        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+            log::warn!("[host-api] B194: {}", reason);
+            return Err(reason);
+        }
+
         let desc = format!("Delete {}", path);
         match self.block_on(crate::engine::frontend_bridge::request_edit_review(
             &self.app_handle, &path, &path, "", "ide_delete_file", &desc,
@@ -221,6 +280,25 @@ impl opide_sandbox::HostApi for OpideHostApi {
     fn apply_edit(&self, path: &str, start_line: usize, end_line: usize, new_content: &str) -> Result<(), String> {
         let path = path.to_string();
         let new_content = new_content.to_string();
+
+        // B194: same gates as file_write — apply_edit is just a
+        // structured write. Run them BEFORE reading the original so we
+        // don't disclose its contents in any error path.
+        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&new_content) {
+            log::warn!(
+                "[host-api] B194: refusing edit to '{}' — new content contains {}",
+                path, kind
+            );
+            return Err(format!(
+                "Refusing to edit '{}': new content contains what looks like a {}. \
+                 Credentials should be stored via the engine's skill vault, not on disk.",
+                path, kind
+            ));
+        }
+        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+            log::warn!("[host-api] B194: {}", reason);
+            return Err(reason);
+        }
 
         // Gate through edit review if frontend is available
         let original = match self.block_on(async {

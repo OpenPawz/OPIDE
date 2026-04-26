@@ -75,6 +75,10 @@ const OPIDE_EXPOSED_TOOLS: &[&str] = &[
 
     // Workspace
     "ide_create_project",
+    // B192: open an EXISTING folder as the active workspace. Without this
+    // entry the agent could create new projects but had no way to point
+    // OPIDE at an existing repo on disk — Kimi flagged this 2026-04-26.
+    "ide_open_workspace",
 
     // OpenPawz tools kept for workflows
     "memory_store",
