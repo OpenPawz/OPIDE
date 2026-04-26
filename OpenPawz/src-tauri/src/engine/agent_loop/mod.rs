@@ -1299,6 +1299,17 @@ pub async fn run_agent_turn(
             ];
 
             // ─── T2: Reversible — local writes, can be undone (auto-approve) ───
+            //
+            // B198: `execute_code` USED to live here on the theory that the
+            // sandbox makes it equivalent to individual tool calls. That
+            // reasoning was wrong: the sandbox isolates JS from native code
+            // but the JS body can call `ctx.tool('ide_run_command', …)` /
+            // `ctx.exec(…)` to reach the host shell with full user privilege.
+            // A `execute_code` auto-approve at this layer let an agent
+            // sneak a `printf 'KEY=…' > /Users/…/Desktop/x` past every other
+            // gate in the system. Removed from auto-approve so the user
+            // sees and reviews the JS body before it runs (B196 made the
+            // sandbox-enforcement layer agree; this completes the fix).
             let tier2_reversible: &[&str] = &[
                 "soul_write",
                 "memory_store",
@@ -1313,8 +1324,6 @@ pub async fn run_agent_turn(
                 "create_squad",
                 "manage_squad",
                 "squad_broadcast",
-                // OPIDE execution engine — sandboxed, same security as individual tool calls
-                "execute_code",
             ];
 
             // ─── T3: External — irreversible outbound actions (prompt, offer Always Allow) ───

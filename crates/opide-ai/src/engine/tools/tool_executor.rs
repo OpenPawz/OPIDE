@@ -27,6 +27,28 @@ pub(crate) fn sensitive_redirect_target(command: &str) -> Option<String> {
     }
 }
 
+/// B198: if the command redirects into a path outside the user's
+/// active workspace, return that target so the caller can refuse.
+/// Returns `None` if there's no redirect, the redirect lands inside
+/// the workspace, or the redirect lands in an allowlisted temp dir.
+///
+/// Without this, an agent that's already inside an approved
+/// `execute_code` block could call `ctx.tool('ide_run_command',
+/// 'echo "..." > /Users/.../Desktop/x')` to write anywhere on disk.
+/// The B195 sensitive-path check only catches a small blocklist; B198
+/// adds the workspace boundary as a separate refusal axis.
+pub(crate) fn off_workspace_redirect_target(
+    command: &str,
+    active_workspace: Option<&str>,
+) -> Option<String> {
+    let target = extract_redirect_target(command)?;
+    use paw_temp_lib::engine::util::WriteTarget;
+    match paw_temp_lib::engine::util::classify_write_target(&target, active_workspace) {
+        WriteTarget::OffWorkspace | WriteTarget::NoWorkspace => Some(target),
+        _ => None,
+    }
+}
+
 fn extract_redirect_target(command: &str) -> Option<String> {
     // Strip strings so we don't confuse `echo "> /etc/passwd"` for a redirect.
     let mut depth_squote = false;
@@ -149,6 +171,70 @@ mod redirect_tests {
         assert_eq!(extract_redirect_target("ls -la"), None);
         assert_eq!(extract_redirect_target("git status"), None);
         assert_eq!(extract_redirect_target("cargo build"), None);
+    }
+
+    // ── B198 workspace-boundary redirect tests ─────────────────────
+
+    #[test]
+    fn b198_off_workspace_no_redirect_returns_none() {
+        // No redirect at all — nothing to gate.
+        assert_eq!(
+            super::off_workspace_redirect_target("ls -la", Some("/Users/foo/Project")),
+            None
+        );
+    }
+
+    #[test]
+    fn b198_redirect_inside_workspace_returns_none() {
+        // Workspace-internal redirect — fine.
+        assert_eq!(
+            super::off_workspace_redirect_target(
+                "echo hi > /Users/foo/Project/notes.txt",
+                Some("/Users/foo/Project"),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn b198_redirect_to_tmp_returns_none() {
+        // /tmp is allowlisted; allowed even with a workspace open.
+        assert_eq!(
+            super::off_workspace_redirect_target(
+                "echo hi > /tmp/scratch.txt",
+                Some("/Users/foo/Project"),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn b198_off_workspace_redirect_returns_target() {
+        // The exact bypass shape the user reproduced 2026-04-26:
+        // workspace = /Users/.../OPIDE, redirect target = /Users/.../Desktop/x.
+        assert_eq!(
+            super::off_workspace_redirect_target(
+                "echo hi > /Users/elibury/Desktop/test5.md",
+                Some("/Users/elibury/Desktop/OPIDE"),
+            ),
+            Some("/Users/elibury/Desktop/test5.md".to_string()),
+        );
+    }
+
+    #[test]
+    fn b198_no_workspace_treats_user_paths_as_off_workspace() {
+        // No folder open in OPIDE → user paths are off-workspace; tmp still allowlisted.
+        assert_eq!(
+            super::off_workspace_redirect_target(
+                "echo hi > /Users/foo/Desktop/x.md",
+                None,
+            ),
+            Some("/Users/foo/Desktop/x.md".to_string()),
+        );
+        assert_eq!(
+            super::off_workspace_redirect_target("echo hi > /tmp/y.log", None),
+            None,
+        );
     }
 
     #[test]
@@ -328,6 +414,31 @@ pub async fn execute(
                 return Some(Err(format!(
                     "Refusing to run command: redirects to '{}', which is blocked by \
                      the sensitive-path policy.",
+                    target
+                )));
+            }
+
+            // B198: also reject commands that redirect outside the active
+            // workspace. Closes the bypass where an approved `execute_code`
+            // block called `ctx.tool('ide_run_command', 'echo "..." > /off/path')`
+            // — B195 only catches the small sensitive blocklist; this adds
+            // the workspace boundary as an independent refusal axis. Tell
+            // the agent to use ctx.file_write instead so the diff-editor
+            // review can fire.
+            let active_workspace: Option<String> = _app_handle
+                .try_state::<paw_temp_lib::engine::state::EngineState>()
+                .and_then(|st| st.active_workspace.lock().clone());
+            if let Some(target) =
+                off_workspace_redirect_target(&command, active_workspace.as_deref())
+            {
+                log::warn!(
+                    "[tools] B198: refusing ide_run_command — redirect target '{}' is outside the active workspace",
+                    target
+                );
+                return Some(Err(format!(
+                    "Refusing to run command: it redirects to '{}', which is outside the \
+                     active workspace. Use `ctx.file_write` for that path so the user gets \
+                     a review prompt, or open that folder as the workspace first.",
                     target
                 )));
             }

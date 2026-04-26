@@ -423,6 +423,29 @@ impl opide_sandbox::HostApi for OpideHostApi {
             ));
         }
 
+        // B198: workspace boundary on the redirect target. Same logic as
+        // tool_executor's ide_run_command path so `ctx.exec("echo > x")`
+        // and `ctx.tool('ide_run_command', …)` are gated identically.
+        let active_workspace: Option<String> = self
+            .app_handle
+            .try_state::<paw_temp_lib::engine::state::EngineState>()
+            .and_then(|st| st.active_workspace.lock().clone());
+        if let Some(target) = super::tool_executor::off_workspace_redirect_target(
+            &command,
+            active_workspace.as_deref(),
+        ) {
+            log::warn!(
+                "[host-api] B198: refusing exec — redirect target '{}' is outside the active workspace",
+                target
+            );
+            return Err(format!(
+                "Refusing to run command: it redirects to '{}', which is outside the \
+                 active workspace. Use `ctx.file_write` for that path so the user gets \
+                 a review prompt, or open that folder as the workspace first.",
+                target
+            ));
+        }
+
         match self.block_on(opide_shell::ide_mcp::ide_run_command(command.clone(), cwd)) {
             Ok(result) => Ok(opide_sandbox::ExecResult {
                 stdout: result.stdout,
