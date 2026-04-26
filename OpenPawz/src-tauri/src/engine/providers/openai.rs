@@ -929,8 +929,10 @@ impl AiProvider for OpenAiProvider {
             // B191: Moonshot/Kimi rejects tool_choice='required' when
             // thinking is enabled with a 400. Detect by provider_kind OR
             // by model name (kimi/moonshot) OR by base_url, since users
-            // can wire Moonshot through Custom providers too.
-            info!(
+            // can wire Moonshot through Custom providers too. Using warn!
+            // for the trace so it surfaces past the providers-only Warn
+            // filter set in lib.rs while we verify the gate.
+            warn!(
                 "[engine] B191-trace: provider_kind={:?} model='{}' url='{}' tool_choice={:?} thinking={:?}",
                 self.provider_kind, model, self.base_url, tool_choice, thinking_level
             );
@@ -944,14 +946,14 @@ impl AiProvider for OpenAiProvider {
                     || url_l.contains("moonshot.cn");
                 let thinking_on = thinking_level.map(|l| l != "none").unwrap_or(false);
                 if is_kimi_like && tc == "required" && thinking_on {
-                    info!(
+                    warn!(
                         "[engine] B191: dropping tool_choice='required' on Kimi-like \
                          model='{}' url='{}' (API rejects with thinking enabled)",
                         model, self.base_url
                     );
                 } else {
-                    info!(
-                        "[engine] B191: NOT dropping (is_kimi_like={} tc={} thinking_on={})",
+                    warn!(
+                        "[engine] B191: NOT dropping (is_kimi_like={} tc={} thinking_on={:?})",
                         is_kimi_like, tc, thinking_on
                     );
                     body["tool_choice"] = json!(tc);
