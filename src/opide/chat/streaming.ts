@@ -77,14 +77,36 @@ export function markRunCompleted(runId: string): void {
 export async function ensureListening(): Promise<void> {
   if (S.unlisten) return
   S.unlisten = await listen<EngineEvent>('engine-event', ({ payload }) => {
+    // B199-debug: log every event before any filters so we can prove the
+    // listener is firing. Remove once approval-UI bug is resolved.
+    console.log('[opide-chat:engine-event]',
+      payload.kind,
+      'session_id=', (payload as any).session_id,
+      'run_id=', (payload as any).run_id,
+      'S.sessionId=', S.sessionId,
+      'S.runId=', S.runId,
+    )
+
     // While no session is active (new-chat reset or startup) drop everything —
     // stale events from a previous run must never bleed into a fresh chat.
-    if (!S.sessionId) return
-    if (S.sessionId && payload.session_id !== S.sessionId) return
+    if (!S.sessionId) {
+      console.warn('[opide-chat:engine-event] DROPPED — S.sessionId is null')
+      return
+    }
+    if (S.sessionId && payload.session_id !== S.sessionId) {
+      console.warn('[opide-chat:engine-event] DROPPED — session_id mismatch')
+      return
+    }
     // Drop events from runs that have already completed (S.runId is null between runs,
     // so without this check stale delayed events would pass through unfiltered).
-    if (payload.run_id && S.completedRunIds.has(payload.run_id)) return
-    if (S.runId && payload.run_id !== S.runId) return
+    if (payload.run_id && S.completedRunIds.has(payload.run_id)) {
+      console.warn('[opide-chat:engine-event] DROPPED — run_id in completedRunIds')
+      return
+    }
+    if (S.runId && payload.run_id !== S.runId) {
+      console.warn('[opide-chat:engine-event] DROPPED — run_id mismatch')
+      return
+    }
 
     switch (payload.kind) {
       case 'delta': {
