@@ -451,10 +451,15 @@ pub async fn git_checkpoint_create(repo_path: String) -> Result<GitCheckpoint, S
 
     // B112: actually stash so the user's pre-existing dirty work survives a
     // hard-reset on revert. INCLUDE_UNTRACKED preserves new files too.
+    //
+    // Fall back to a synthetic OPIDE identity if the repo has no
+    // user.email/user.name configured — otherwise checkpointing a dirty
+    // workspace would refuse to start the agent run for users who don't
+    // have global git identity. The stash is reachable by OID either way.
     let stash_oid = if has_dirty {
-        let sig = repo
-            .signature()
-            .map_err(|e| format!("git signature missing: {e}"))?;
+        let sig = repo.signature().or_else(|_| {
+            git2::Signature::now("OPIDE Agent", "agent@opide.local")
+        }).map_err(|e| format!("git signature unavailable: {e}"))?;
         let oid = repo
             .stash_save2(
                 &sig,

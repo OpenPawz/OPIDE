@@ -180,8 +180,14 @@ fn resolve_and_validate(
     // straight to system locations as long as the literal raw string didn't
     // contain dot-dot. Now an absolute path that resolves outside the
     // agent's workspace must match an explicit allowlist.
-    let ws_root = super::agent_workspace(agent_id);
-    let canon_ws = ws_root.canonicalize().unwrap_or(ws_root.clone());
+    //
+    // Make sure the workspace exists before canonicalizing — on a fresh
+    // agent the dir might not be created yet, and on macOS the data root
+    // can pass through a symlink chain (`/tmp` → `/private/tmp`,
+    // `/Users/.../Library/...`). Without canonicalize, `canonical.starts_with(ws_root)`
+    // returns false for legitimate workspace paths and refuses real reads.
+    let ws_root = super::ensure_workspace(agent_id)?;
+    let canon_ws = ws_root.canonicalize().unwrap_or_else(|_| ws_root.clone());
     let in_workspace = canonical.starts_with(&canon_ws);
     if !in_workspace {
         // Allowlisted prefixes outside the workspace — temp dirs and the

@@ -145,7 +145,9 @@ impl DailyTokenTracker {
 
     /// Returns the spend ratio when it has exceeded 2× budget. Useful for
     /// firing a "runaway" alarm that escalates beyond the standard 90%
-    /// threshold (which only fires once per session).
+    /// threshold (which only fires once per session). One-shot per
+    /// process — uses sentinel `200u8` in `warnings_emitted` so the
+    /// runaway alarm doesn't repeat on every subsequent round.
     pub fn check_runaway(&self, budget_usd: f64) -> Option<f64> {
         if budget_usd <= 0.0 {
             return None;
@@ -153,6 +155,12 @@ impl DailyTokenTracker {
         let (_, _, usd) = self.estimated_spend_usd();
         let ratio = usd / budget_usd;
         if ratio >= 2.0 {
+            const RUNAWAY_SENTINEL: u8 = 200;
+            let mut emitted = self.warnings_emitted.lock();
+            if emitted.contains(&RUNAWAY_SENTINEL) {
+                return None;
+            }
+            emitted.push(RUNAWAY_SENTINEL);
             Some(ratio)
         } else {
             None
