@@ -1,10 +1,10 @@
 // OPIDE — Tauri entry point.
 // Boots OPIDE V2's window with the full OpenPawz engine state and commands.
-// All engine logic lives in the `paw_temp_lib` crate (OpenPawz/src-tauri).
+// All engine logic lives in the `opide_engine` crate (OpenPawz/src-tauri).
 
 // OPIDE AI crate provides engine + indexer
 
-use paw_temp_lib::commands;
+use opide_engine::commands;
 use tauri::Manager;
 use tauri::WebviewUrl;
 
@@ -71,14 +71,14 @@ pub fn run() {
     ));
     tauri::async_runtime::set(rt.handle().clone());
 
-    let engine_state = paw_temp_lib::engine::state::EngineState::new()
+    let engine_state = opide_engine::engine::state::EngineState::new()
         .expect("Failed to initialize OpenPawz engine");
 
     // Pre-load encryption keys (single keychain prompt instead of per-subsystem).
-    paw_temp_lib::engine::key_vault::prefetch();
+    opide_engine::engine::key_vault::prefetch();
 
     // Initialize cognitive event bus (required before engram/working-memory calls).
-    paw_temp_lib::engine::engram::cognitive_event::init();
+    opide_engine::engine::engram::cognitive_event::init();
 
     tauri::Builder::default()
         .manage(engine_state)
@@ -88,13 +88,13 @@ pub fn run() {
         .manage(opide_shell::dap::DapState::new())
         .manage(opide_shell::extension_host::ExtHostState::new())
         // Register OPIDE's IDE tool executor with the OpenPawz engine
-        .manage(Box::new(opide_ai::engine::OpideToolExecutor) as Box<dyn paw_temp_lib::engine::tools::ExternalToolExecutor>)
+        .manage(Box::new(opide_ai::engine::OpideToolExecutor) as Box<dyn opide_engine::engine::tools::ExternalToolExecutor>)
         // OPIDE ↔ OpenPawz bridge: custom provider factory (ClaudeCode CLI)
-        .manage(Box::new(opide_bridge::OpideProviderFactory) as Box<dyn paw_temp_lib::atoms::traits::ProviderFactory>)
+        .manage(Box::new(opide_bridge::OpideProviderFactory) as Box<dyn opide_engine::atoms::traits::ProviderFactory>)
         // OPIDE ↔ OpenPawz bridge: tool assembler — controls which tools the model sees
         // Removes individual file tools (ide_read_file, ide_write_file, etc.)
         // forcing all file work through execute_code sandbox
-        .manage(Box::new(opide_bridge::OpideToolAssembler) as Box<dyn paw_temp_lib::atoms::traits::ToolAssembler>)
+        .manage(Box::new(opide_bridge::OpideToolAssembler) as Box<dyn opide_engine::atoms::traits::ToolAssembler>)
         // Frontend bridge state (for tools that query Monaco editor)
         .manage(opide_ai::engine::frontend_bridge::FrontendBridgeState::new())
         // Codebase indexer state
@@ -118,35 +118,35 @@ pub fn run() {
                 // readable: agent rounds, tool calls, errors. Nothing else.
 
                 // Per-round noise (fires every single tool call)
-                .level_for("paw_temp_lib::engine::agent_loop::helpers", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::binary_ipc", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::engram::context_continuity", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::engram::context_builder", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::http", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::agent_loop::helpers", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::binary_ipc", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::engram::context_continuity", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::engram::context_builder", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::http", log::LevelFilter::Warn)
 
                 // Per-message noise (fires every chat send)
-                .level_for("paw_temp_lib::engine::chat", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::telemetry", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::memory::embedding", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::engram::encryption", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::engram::graph", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::engram::bridge", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::engram::cognitive_state", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::sessions::agent_files", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::chat", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::telemetry", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::memory::embedding", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::engram::encryption", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::engram::graph", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::engram::bridge", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::engram::cognitive_state", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::sessions::agent_files", log::LevelFilter::Warn)
 
                 // Provider internals (thinking budget, request signing, cache stats)
-                .level_for("paw_temp_lib::engine::providers", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::providers", log::LevelFilter::Warn)
 
                 // Pricing / cost tracking (fake estimates, not real API costs)
-                .level_for("paw_temp_lib::engine::pricing", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::pricing", log::LevelFilter::Warn)
 
                 // Skill library seeding (startup noise)
-                .level_for("paw_temp_lib::engine::engram::skill_library", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::skills", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::engram::skill_library", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::skills", log::LevelFilter::Warn)
 
                 // MCP server lifecycle (spawning, connecting, tool counts)
-                .level_for("paw_temp_lib::engine::mcp::client", log::LevelFilter::Warn)
-                .level_for("paw_temp_lib::engine::mcp::transport", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::mcp::client", log::LevelFilter::Warn)
+                .level_for("opide_engine::engine::mcp::transport", log::LevelFilter::Warn)
 
                 // Extension host / bridge (adapter scan, registration)
                 .level_for("opide_shell::extension_host", log::LevelFilter::Warn)
@@ -175,7 +175,7 @@ pub fn run() {
         .setup(|app| {
             // Set OPIDE identity on the default agent
             {
-                let state = app.state::<paw_temp_lib::engine::state::EngineState>();
+                let state = app.state::<opide_engine::engine::state::EngineState>();
                 let store = &state.store;
                 if let Err(e) = store.set_agent_file("default", "IDENTITY.md", OPIDE_IDENTITY) {
                     log::error!("[opide] Failed to seed IDENTITY.md: {}", e);
@@ -188,7 +188,7 @@ pub fn run() {
             // OPIDE: unlimited tool rounds — security audits on large codebases
             // need to run uninterrupted. Loop detector still catches stuck agents.
             {
-                let state = app.state::<paw_temp_lib::engine::state::EngineState>();
+                let state = app.state::<opide_engine::engine::state::EngineState>();
                 let mut cfg = state.config.lock();
                 cfg.max_tool_rounds = u32::MAX;
                 cfg.context_window_tokens = 200_000;

@@ -37,8 +37,8 @@ tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 # Utility (used in lib.rs for multi-window URL encoding)
 urlencoding = "2"
 
-# OpenPawz engine — pulled in as a local path dependency (NOT workspace member)
-openpawz = { path = "../OpenPawz/src-tauri", default-features = false }
+# OPIDE engine — agent loop, providers, sessions, MCP, atoms (extracted from OpenPawz)
+opide-engine = { path = "../crates/opide-engine", default-features = false }
 
 # OPIDE ↔ OpenPawz bridge — hook implementations
 opide-bridge = { path = "../crates/opide-bridge" }

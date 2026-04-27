@@ -6,7 +6,7 @@ pub mod tools;
 pub mod tool_filter;
 pub mod frontend_bridge;
 
-use paw_temp_lib::engine::tools::ExternalToolExecutor;
+use opide_engine::engine::tools::ExternalToolExecutor;
 
 /// OPIDE's IDE tool executor — routes ide_* and execute_code calls.
 pub struct OpideToolExecutor;
@@ -23,11 +23,11 @@ impl ExternalToolExecutor for OpideToolExecutor {
         tools::execute(name, args, app_handle).await
     }
 
-    fn tool_definitions(&self) -> Vec<paw_temp_lib::atoms::types::ToolDefinition> {
+    fn tool_definitions(&self) -> Vec<opide_engine::atoms::types::ToolDefinition> {
         tools::definitions()
     }
 
-    fn tool_definitions_dynamic(&self, _app_handle: &tauri::AppHandle) -> Vec<paw_temp_lib::atoms::types::ToolDefinition> {
+    fn tool_definitions_dynamic(&self, _app_handle: &tauri::AppHandle) -> Vec<opide_engine::atoms::types::ToolDefinition> {
         tools::definitions()
     }
 }

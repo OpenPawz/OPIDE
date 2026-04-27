@@ -6,8 +6,8 @@ license = "Apache-2.0"
 description = "OPIDE ↔ OpenPawz bridge — hook implementations for IDE-specific behavior"
 
 [dependencies]
-# OpenPawz engine (for traits and types)
-openpawz = { path = "../../OpenPawz/src-tauri", default-features = false }
+# OPIDE engine (for traits and types)
+opide-engine = { path = "../opide-engine", default-features = false }
 
 # Shared workspace deps
 serde.workspace = true

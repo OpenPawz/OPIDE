@@ -2,7 +2,7 @@
 // Defines the tools the AI agent can call. Each tool has a name, description,
 // and JSON schema for parameters.
 
-use paw_temp_lib::atoms::types::{FunctionDefinition, ToolDefinition};
+use opide_engine::atoms::types::{FunctionDefinition, ToolDefinition};
 use serde_json::{json, Value};
 
 // ─── Tool Definitions ────────────────────────────────────────────────────────
