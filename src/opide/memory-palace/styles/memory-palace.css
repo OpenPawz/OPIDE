@@ -186,7 +186,13 @@
   cursor: not-allowed;
 }
 
-.opide-memory-palace .palace-view.active{
+/* Root layout. Originally lived on `.palace-view.active` — that class
+   was OpenPawz's view-switcher mechanism. OPIDE renders the palace
+   straight into an EditorPane root, so the layout rule moved onto
+   `.opide-memory-palace` itself. Without this, sidebar + main were
+   stacking as block children and `.palace-main` (flex:1, no fixed
+   width) collapsed to zero — the right side rendered blank. */
+.opide-memory-palace{
   display: flex;
   flex-direction: row;
   flex: 1;
