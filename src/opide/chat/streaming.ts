@@ -186,14 +186,22 @@ export async function ensureListening(): Promise<void> {
 
 async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }>): Promise<void> {
   const tier = ev.tool_tier || 'unknown'
-  const needsApproval = needsApprovalFor(tier, ev.tool_call.name)
+  // B202: ToolCall is `{ id, type, function: { name, arguments } }` —
+  // the previous flat-shape reads (`ev.tool_call.name`,
+  // `ev.tool_call.arguments`) returned undefined on every event and
+  // tripped a TypeError on `.slice` that the listener's .catch
+  // silently swallowed. Pull from the nested `function` object now,
+  // matching the Rust serialization.
+  const toolName = ev.tool_call.function?.name ?? '(unknown)'
+  const toolArgs = ev.tool_call.function?.arguments ?? ''
+  const needsApproval = needsApprovalFor(tier, toolName)
 
   S.pendingToolCalls.set(ev.tool_call.id, { call: ev.tool_call })
 
-  if (IDE_REVIEWED_TOOLS.has(ev.tool_call.name)) {
+  if (IDE_REVIEWED_TOOLS.has(toolName)) {
     S.messages.push({
       role: 'tool',
-      content: `Reviewing edit in diff editor: **${ev.tool_call.name}**`,
+      content: `Reviewing edit in diff editor: **${toolName}**`,
       ts: new Date(),
     })
     renderMessages()
@@ -204,9 +212,9 @@ async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }
   // populated (or knows the read genuinely failed). Without the await, fast
   // tools could complete before the read resolved → diff path saw `undefined`
   // and fell back to "all lines added" (B16).
-  if (WRITE_TOOLS.has(ev.tool_call.name)) {
+  if (WRITE_TOOLS.has(toolName)) {
     try {
-      const args = JSON.parse(ev.tool_call.arguments || '{}')
+      const args = JSON.parse(toolArgs || '{}')
       const path = args.path || args.file_path || args.filename
       if (path) {
         const { readTextFile } = await import('@tauri-apps/plugin-fs')
@@ -222,15 +230,15 @@ async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }
   if (needsApproval) {
     S.messages.push({
       role: 'tool',
-      content: `Tool requires approval: **${ev.tool_call.name}**\nTier: ${tier}\nArgs: \`${ev.tool_call.arguments.slice(0, 200)}\``,
+      content: `Tool requires approval: **${toolName}**\nTier: ${tier}\nArgs: \`${toolArgs.slice(0, 200)}\``,
       ts: new Date(),
-      toolName: ev.tool_call.name,
+      toolName,
     })
     renderMessages()
-    addApprovalButtons(ev.tool_call.id, ev.tool_call.name, tier)
+    addApprovalButtons(ev.tool_call.id, toolName, tier)
   } else {
-    updateStatus(`Running: ${ev.tool_call.name}`)
-    showToolIndicator(ev.tool_call.name)
+    updateStatus(`Running: ${toolName}`)
+    showToolIndicator(toolName)
   }
 }
 
@@ -329,12 +337,14 @@ function handleToolResult(ev: Extract<EngineEvent, { kind: 'tool_result' }>): vo
     ts: new Date(),
     toolSuccess: ev.success,
     toolDuration: ev.duration_ms,
-    toolName: pending?.call.name,
+    toolName: pending?.call.function?.name,
   }
 
-  if (pending && WRITE_TOOLS.has(pending.call.name) && !IDE_REVIEWED_TOOLS.has(pending.call.name) && ev.success) {
+  // B202: same nested-shape fix here.
+  const pendingName = pending?.call.function?.name
+  if (pending && pendingName && WRITE_TOOLS.has(pendingName) && !IDE_REVIEWED_TOOLS.has(pendingName) && ev.success) {
     try {
-      const args = JSON.parse(pending.call.arguments || '{}')
+      const args = JSON.parse(pending.call.function?.arguments || '{}')
       const path = args.path || args.file_path || args.filename
       if (path) {
         msg.filePath = path

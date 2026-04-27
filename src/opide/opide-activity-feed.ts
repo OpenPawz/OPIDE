@@ -93,12 +93,17 @@ const TOOL_LABELS: Record<string, string> = {
 }
 
 function describeToolCall(call: ToolCall): string {
-  const label = TOOL_LABELS[call.name] || call.name.replace(/^ide_/, '').replace(/_/g, ' ')
+  // B202: ToolCall has nested function: { name, arguments } — match the
+  // Rust serialization. Old flat-shape reads returned undefined and
+  // tripped silently inside try/catch.
+  const name = call.function?.name ?? ''
+  const argStr = call.function?.arguments ?? ''
+  const label = TOOL_LABELS[name] || name.replace(/^ide_/, '').replace(/_/g, ' ')
   try {
-    const args = JSON.parse(call.arguments || '{}')
+    const args = JSON.parse(argStr || '{}')
 
     // For execute_code: extract a meaningful hint from the JS source
-    if (call.name === 'execute_code' && args.code) {
+    if (name === 'execute_code' && args.code) {
       const code: string = args.code
 
       // 1. Leading single-line comment — most reliable when the model adds one
@@ -377,7 +382,8 @@ async function startListening(): Promise<void> {
         })
 
         // Track active exec element so sandbox-progress and sub-tool events can update it
-        if (ev.tool_call.name === 'execute_code') {
+        // B202: nested ToolCall shape, not flat.
+        if (ev.tool_call.function?.name === 'execute_code') {
           activeExecElement = lastEl
           activeExecCallId = ev.tool_call.id
         }

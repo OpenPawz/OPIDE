@@ -59,10 +59,21 @@ export interface ChatMsg {
 
 export interface ChatResponse { run_id: string; session_id: string }
 
+/**
+ * Wire shape of an engine tool call, matching the Rust `ToolCall`
+ * struct in OpenPawz/src-tauri/src/atoms/types.rs (which is what the
+ * `engine-event` Tauri event actually sends). The previous flat form
+ * `{ id, name, arguments }` did not match the JSON the engine emits —
+ * `name` and `arguments` are nested under `function`. The mismatch
+ * caused `ev.tool_call.arguments.slice(...)` in showToolRequest to
+ * throw TypeError, which the listener's `.catch` swallowed silently
+ * — that's why the approval banner never appeared (B202).
+ */
 export interface ToolCall {
   id: string
-  name: string
-  arguments: string
+  /** Always `"function"` for now; serialised as `type` from Rust. */
+  type?: string
+  function: { name: string; arguments: string }
 }
 
 export interface TokenUsage { input_tokens: number; output_tokens: number; total_tokens: number }
