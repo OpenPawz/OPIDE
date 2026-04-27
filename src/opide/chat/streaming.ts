@@ -77,40 +77,14 @@ export function markRunCompleted(runId: string): void {
 export async function ensureListening(): Promise<void> {
   if (S.unlisten) return
   S.unlisten = await listen<EngineEvent>('engine-event', ({ payload }) => {
-    // B201-debug: also write to document.title so the user can see in
-    // the window title bar that events ARE reaching the listener even
-    // without devtools open. Format: "OPIDE — last_event_kind (N events)".
-    // Remove once approval-UI is verified working.
-    ;(globalThis as any).__opideEventCount = ((globalThis as any).__opideEventCount ?? 0) + 1
-    document.title = `OPIDE — ${payload.kind} (${(globalThis as any).__opideEventCount} events)`
-    console.log('[opide-chat:engine-event]',
-      payload.kind,
-      'session_id=', (payload as any).session_id,
-      'run_id=', (payload as any).run_id,
-      'S.sessionId=', S.sessionId,
-      'S.runId=', S.runId,
-    )
-
     // While no session is active (new-chat reset or startup) drop everything —
     // stale events from a previous run must never bleed into a fresh chat.
-    if (!S.sessionId) {
-      console.warn('[opide-chat:engine-event] DROPPED — S.sessionId is null')
-      return
-    }
-    if (S.sessionId && payload.session_id !== S.sessionId) {
-      console.warn('[opide-chat:engine-event] DROPPED — session_id mismatch')
-      return
-    }
+    if (!S.sessionId) return
+    if (S.sessionId && payload.session_id !== S.sessionId) return
     // Drop events from runs that have already completed (S.runId is null between runs,
     // so without this check stale delayed events would pass through unfiltered).
-    if (payload.run_id && S.completedRunIds.has(payload.run_id)) {
-      console.warn('[opide-chat:engine-event] DROPPED — run_id in completedRunIds')
-      return
-    }
-    if (S.runId && payload.run_id !== S.runId) {
-      console.warn('[opide-chat:engine-event] DROPPED — run_id mismatch')
-      return
-    }
+    if (payload.run_id && S.completedRunIds.has(payload.run_id)) return
+    if (S.runId && payload.run_id !== S.runId) return
 
     switch (payload.kind) {
       case 'delta': {
@@ -258,60 +232,68 @@ async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }
  * sibling of the message bubbles, with a clear "Approval needed" label
  * and a faint background so it's hard to miss.
  */
+/**
+ * Render the approval row inline inside the OPIDE chat panel as its own
+ * standalone message-list row.
+ *
+ * History:
+ *   B199 first attempt: appended buttons inside the tool-message bubble's
+ *     flex wrap → child width:100% squashed btnRow to 0px (invisible).
+ *   B201: switched to a fixed-position body overlay. Always visible, but
+ *     in the *middle of the IDE window*, not the chat panel — the user
+ *     was looking at the chat and missed it.
+ *   This version: standalone row appended to S.msgList (the chat
+ *     message list itself). Lives in the same scroll container as the
+ *     conversation, scrolls into view automatically. Falls back to
+ *     body-level overlay only if S.msgList is genuinely missing.
+ */
 function addApprovalButtons(toolCallId: string, toolName: string, tier: string): void {
-  console.log('[opide-chat] approval needed:', toolName, 'tier=', tier, 'id=', toolCallId)
-
-  // B201: render the approval as a fixed-position banner on document.body
-  // instead of inside the chat panel. The previous approach depended on
-  // S.msgList being non-null and visible, which silently failed when the
-  // user wasn't focused on the chat panel or when chat-panel layout
-  // hadn't initialised yet. A body-level overlay is unconditional —
-  // user can't miss it regardless of which IDE panel they're looking at.
-  const banner = document.createElement('div')
-  banner.dataset.approvalForToolCall = toolCallId
-  banner.style.cssText = [
-    'position:fixed',
-    'top:60px',
-    'left:50%',
-    'transform:translateX(-50%)',
-    'z-index:99999',
-    'min-width:420px',
-    'max-width:80vw',
-    'padding:12px 16px',
-    'border-radius:8px',
-    'background:#2d2620',
-    'border:2px solid #d4a843',
-    'box-shadow:0 4px 16px rgba(0,0,0,0.5)',
+  const row = document.createElement('div')
+  row.dataset.approvalForToolCall = toolCallId
+  row.style.cssText = [
     'display:flex',
     'align-items:center',
-    'gap:12px',
-    'font-family:var(--vscode-font-family,system-ui)',
+    'gap:8px',
+    'margin:6px 14px',
+    'padding:10px 12px',
+    'border-radius:6px',
+    'background:rgba(212,168,67,0.08)',
+    'border:1px solid rgba(212,168,67,0.4)',
   ].join(';')
 
   const label = document.createElement('span')
-  label.style.cssText = 'flex:1;font-size:13px;color:#e8e6e0;line-height:1.4'
-  label.innerHTML = `<strong style="color:#d4a843">Approval needed</strong><br/><code style="font-family:var(--vscode-editor-font-family,monospace);font-size:12px;color:#e8e6e0">${toolName}</code> <span style="opacity:0.55;font-size:11px">(${tier})</span>`
-  banner.appendChild(label)
+  label.style.cssText = 'flex:1;font-size:12px;color:var(--vscode-foreground);line-height:1.4'
+  label.innerHTML = `<strong style="color:#d4a843">Approval needed</strong> <code style="font-family:var(--vscode-editor-font-family,monospace);font-size:11px;opacity:0.85">${toolName}</code> <span style="opacity:0.55;font-size:10px">(${tier})</span>`
+  row.appendChild(label)
 
   const approveBtn = document.createElement('button')
   approveBtn.textContent = 'Approve'
-  approveBtn.style.cssText = 'background:#2ea043;color:white;border:none;border-radius:4px;padding:6px 14px;font-size:13px;cursor:pointer;font-weight:600'
+  approveBtn.style.cssText = 'background:#2ea043;color:white;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500'
   approveBtn.addEventListener('click', () => {
     invoke('engine_approve_tool', { sessionId: S.sessionId, toolCallId, approved: true }).catch(console.error)
-    banner.remove()
+    row.remove()
   })
 
   const denyBtn = document.createElement('button')
   denyBtn.textContent = 'Deny'
-  denyBtn.style.cssText = 'background:#da3633;color:white;border:none;border-radius:4px;padding:6px 14px;font-size:13px;cursor:pointer;font-weight:600'
+  denyBtn.style.cssText = 'background:#da3633;color:white;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500'
   denyBtn.addEventListener('click', () => {
     invoke('engine_approve_tool', { sessionId: S.sessionId, toolCallId, approved: false }).catch(console.error)
-    banner.remove()
+    row.remove()
   })
 
-  banner.appendChild(approveBtn)
-  banner.appendChild(denyBtn)
-  document.body.appendChild(banner)
+  row.appendChild(approveBtn)
+  row.appendChild(denyBtn)
+
+  if (S.msgList) {
+    S.msgList.appendChild(row)
+    S.msgList.scrollTop = S.msgList.scrollHeight
+  } else {
+    // Last-resort fallback: chat panel hasn't mounted, attach to body so the
+    // approval is at least clickable somewhere. Should be rare in practice
+    // because the chat panel is always registered before any agent run.
+    document.body.appendChild(row)
+  }
 }
 
 // ─── Tool Result ─────────────────────────────────────────────────────────────
