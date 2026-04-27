@@ -21,18 +21,34 @@
       "identifier": "fs:allow-stat",
       "allow": [
         { "path": "$HOME/**" },
+        { "path": "$HOME/**/.*" },
+        { "path": "$HOME/**/.*/**" },
         { "path": "$DESKTOP/**" },
+        { "path": "$DESKTOP/**/.*" },
+        { "path": "$DESKTOP/**/.*/**" },
         { "path": "$DOCUMENT/**" },
-        { "path": "$DOWNLOAD/**" }
+        { "path": "$DOCUMENT/**/.*" },
+        { "path": "$DOCUMENT/**/.*/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$DOWNLOAD/**/.*" },
+        { "path": "$DOWNLOAD/**/.*/**" }
       ]
     },
     {
       "identifier": "fs:allow-lstat",
       "allow": [
         { "path": "$HOME/**" },
+        { "path": "$HOME/**/.*" },
+        { "path": "$HOME/**/.*/**" },
         { "path": "$DESKTOP/**" },
+        { "path": "$DESKTOP/**/.*" },
+        { "path": "$DESKTOP/**/.*/**" },
         { "path": "$DOCUMENT/**" },
-        { "path": "$DOWNLOAD/**" }
+        { "path": "$DOCUMENT/**/.*" },
+        { "path": "$DOCUMENT/**/.*/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$DOWNLOAD/**/.*" },
+        { "path": "$DOWNLOAD/**/.*/**" }
       ]
     },
     "dialog:default",
