@@ -347,6 +347,12 @@ function handleToolResult(ev: Extract<EngineEvent, { kind: 'tool_result' }>): vo
   }
 
   S.messages.push(msg)
+  // B205: render now so _renderedCount stays in sync with S.messages.length.
+  // Without this, the count fell behind by one after each tool_result, then
+  // commitStreamingBubble's `_renderedCount++` would claim the wrong slot —
+  // finalizeStreaming's renderMessages loop then re-rendered the assistant
+  // message a second time, producing the visible "reply printed twice" bug.
+  renderMessages()
 
   if (S.planSteps.length > 0 && S.planStepIndex < S.planSteps.length) {
     S.planStepIndex++
