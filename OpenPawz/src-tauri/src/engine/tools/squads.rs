@@ -357,30 +357,8 @@ fn exec_broadcast(
         agent_id, sent, squad.name
     );
 
-    // ── Swarm auto-wake: spawn agent turns for recipients ──────────────
-    #[cfg(feature = "swarm")]
-    if sent > 0 {
-        crate::engine::swarm::set_squad_size(squad_id, squad.members.len() as u32);
-
-        let squad_name_owned = squad.name.clone();
-        let squad_goal_owned = squad.goal.clone();
-        for m in &squad.members {
-            if m.agent_id == agent_id {
-                continue;
-            }
-            if let Err(e) = crate::engine::swarm::spawn_swarm_reply(
-                app_handle,
-                squad_id,
-                &squad_name_owned,
-                &squad_goal_owned,
-                agent_id,
-                &m.agent_id,
-                content,
-            ) {
-                info!("[engine] Swarm auto-wake skipped for {}: {}", m.agent_id, e);
-            }
-        }
-    }
+    // Swarm auto-wake removed in OPIDE phase 1 (engine::swarm deleted).
+    let _ = sent;
 
     Ok(format!(
         "Broadcast sent to {} members of squad '{}'",

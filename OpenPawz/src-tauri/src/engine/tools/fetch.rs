@@ -210,36 +210,10 @@ async fn execute_fetch(
         return Err(format!("fetch: {}", msg).into());
     }
 
-    // Network policy enforcement
-    if let Some(state) = app_handle.try_state::<crate::engine::state::EngineState>() {
-        if let Ok(Some(policy_json)) = state.store.get_config("network_policy") {
-            if let Ok(policy) =
-                serde_json::from_str::<crate::commands::browser::NetworkPolicy>(&policy_json)
-            {
-                let domain = crate::commands::browser::extract_domain_from_url(url);
-                if policy
-                    .blocked_domains
-                    .iter()
-                    .any(|d| crate::commands::browser::domain_matches_pub(&domain, d))
-                {
-                    return Err(format!("Network policy: domain '{}' is blocked", domain).into());
-                }
-                if policy.enabled {
-                    let allowed = policy
-                        .allowed_domains
-                        .iter()
-                        .any(|d| crate::commands::browser::domain_matches_pub(&domain, d));
-                    if !allowed {
-                        return Err(format!(
-                            "Network policy: domain '{}' is not in the allowlist",
-                            domain
-                        )
-                        .into());
-                    }
-                }
-            }
-        }
-    }
+    // Network policy enforcement was removed in OPIDE phase 1 along with
+    // commands::browser. If an outbound allowlist is reintroduced it should
+    // live in the slim opide-engine surface, not in the legacy browser
+    // command module.
 
     // ── Auto-inject credentials for known API domains ─────────────────
     // If the agent calls a Discord API URL without an Authorization header,
@@ -272,19 +246,9 @@ async fn execute_fetch(
         "discord.com" | "canary.discord.com" | "ptb.discord.com" | "staging.discord.com"
     ) && path_lower.starts_with("/api");
 
-    if !has_auth_header && is_discord_api {
-        if let Some(state) = app_handle.try_state::<crate::engine::state::EngineState>() {
-            if let Ok(creds) = crate::engine::skills::get_skill_credentials(&state.store, "discord")
-            {
-                if let Some(token) = creds.get("DISCORD_BOT_TOKEN") {
-                    if !token.is_empty() {
-                        info!("[fetch] Auto-injecting Discord bot Authorization header");
-                        injected_headers.insert("Authorization".into(), format!("Bot {}", token));
-                    }
-                }
-            }
-        }
-    }
+    // Discord bot auto-auth header injection was removed in OPIDE phase 1
+    // along with engine::skills (the skill credential vault).
+    let _ = is_discord_api;
 
     // Auto-inject Content-Type for Discord API mutations when body is present
     if is_discord_api && args["body"].is_string() {

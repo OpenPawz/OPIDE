@@ -6,30 +6,8 @@ use log::info;
 use std::sync::atomic::Ordering;
 use tauri::{Emitter, State};
 
-// ── Sandbox ────────────────────────────────────────────────────────────
-
-#[cfg(feature = "docker")]
-#[tauri::command]
-pub async fn engine_sandbox_check() -> Result<bool, String> {
-    Ok(crate::engine::sandbox::is_docker_available().await)
-}
-
-#[cfg(feature = "docker")]
-#[tauri::command]
-pub fn engine_sandbox_get_config(
-    state: State<'_, EngineState>,
-) -> Result<crate::engine::sandbox::SandboxConfig, String> {
-    Ok(crate::engine::sandbox::load_sandbox_config(&state.store))
-}
-
-#[cfg(feature = "docker")]
-#[tauri::command]
-pub fn engine_sandbox_set_config(
-    state: State<'_, EngineState>,
-    config: crate::engine::sandbox::SandboxConfig,
-) -> Result<(), String> {
-    crate::engine::sandbox::save_sandbox_config(&state.store, &config).map_err(|e| e.to_string())
-}
+// Docker sandbox commands (engine_sandbox_check / get_config / set_config)
+// were removed in OPIDE phase 1 along with engine::sandbox.
 
 // ── Engine configuration ───────────────────────────────────────────────
 

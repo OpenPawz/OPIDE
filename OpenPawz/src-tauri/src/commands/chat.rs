@@ -32,9 +32,7 @@ pub async fn engine_chat_send(
 ) -> Result<ChatResponse, String> {
     let run_id = uuid::Uuid::new_v4().to_string();
 
-    // Reset swarm counters so sub-agents can wake fresh for this human turn
-    #[cfg(feature = "swarm")]
-    crate::engine::swarm::reset_all_counters();
+    // Swarm counter reset removed in OPIDE phase 1 (engine::swarm deleted).
 
     // ── Resolve or create session ──────────────────────────────────────────
     let session_id = match &request.session_id {
@@ -305,17 +303,13 @@ pub async fn engine_chat_send(
     let auto_capture_on = state.memory_config.lock().auto_capture;
 
     // ── Skill instructions ─────────────────────────────────────────────────
-    // In OPIDE mode: skip OpenPawz skill instructions (weather, blog, etc.)
-    // The IDE has its own WASM skills and doesn't need the OpenPawz skill system.
+    // OpenPawz skill instructions removed in OPIDE phase 1. IDE-side WASM
+    // skills are surfaced through ExternalToolExecutor instead.
+    let _ = &agent_id_owned;
     let has_ide_executor = app_handle
         .try_state::<Box<dyn crate::engine::tools::ExternalToolExecutor>>()
         .is_some();
-    let skill_instructions = if has_ide_executor {
-        String::new() // OPIDE: skip OpenPawz skill instructions
-    } else {
-        crate::engine::skills::get_enabled_skill_instructions(&state.store, &agent_id_owned)
-            .unwrap_or_default()
-    };
+    let skill_instructions = String::new();
     if !skill_instructions.is_empty() {
         info!(
             "[engine] Skill instructions injected ({} chars)",

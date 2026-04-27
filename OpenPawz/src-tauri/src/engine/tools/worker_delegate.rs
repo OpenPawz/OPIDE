@@ -108,7 +108,7 @@ pub async fn delegate_to_worker(
     let mut worker_tools: Vec<ToolDefinition> = Vec::new();
     worker_tools.extend(crate::engine::tools::fetch::definitions());
     worker_tools.extend(ToolDefinition::mcp_tools(app_handle));
-    worker_tools.extend(crate::engine::tools::n8n::definitions());
+    // n8n tool group removed in OPIDE phase 1.
 
     if worker_tools.is_empty() {
         warn!("[worker-delegate] No tools available for worker — falling back");
@@ -470,10 +470,8 @@ async fn execute_worker_tool(
         } else {
             Err("Engine state not available".into())
         }
-    } else if let Some(r) = tools::n8n::execute(name, &args, app_handle).await {
-        // n8n management tools (install_n8n_node, search_ncnodes, etc.)
-        r
     } else {
+        // tools::n8n was removed in OPIDE phase 1.
         Err(format!("Worker cannot execute tool: {}", name))
     };
 

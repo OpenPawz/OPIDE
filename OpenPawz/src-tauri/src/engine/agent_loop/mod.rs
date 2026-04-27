@@ -4,8 +4,6 @@
 
 pub(crate) mod helpers;
 pub mod sandbox_enforcement;
-#[cfg(feature = "trading")]
-mod trading;
 
 use crate::atoms::error::EngineResult;
 use crate::engine::providers::AnyProvider;
@@ -16,8 +14,6 @@ use crate::engine::types::*;
 use log::{info, warn};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
-#[cfg(feature = "trading")]
-use trading::check_trading_auto_approve;
 
 /// Emit an engine event to both the Tauri webview frontend AND any SSE
 /// subscribers (e.g. the Pawz VS Code extension via `/chat/stream`).
@@ -87,24 +83,9 @@ pub async fn run_agent_turn(
     let mut round_signatures: Vec<u64> = Vec::new();
     const MAX_REPEATED_SIGNATURES: usize = 3;
 
-    // ── Phase 3: Binary IPC delta batcher ─────────────────────────────
-    #[cfg(feature = "binary-ipc")]
-    let mut delta_batcher = crate::engine::binary_ipc::EventBatcher::new(
-        session_id,
-        run_id,
-        crate::engine::binary_ipc::BatchConfig::default(),
-    );
-
-    // ── Phase 4: Speculative tool execution tracking ──────────────────
-    #[cfg(feature = "speculative")]
-    let mut previous_tool: Option<String> = None;
-    #[cfg(feature = "speculative")]
-    let speculation_config = app_handle
-        .try_state::<crate::engine::state::EngineState>()
-        .map(|es| es.speculation_config.clone())
-        .unwrap_or_default();
-    #[cfg(feature = "speculative")]
-    let mut speculation_stats = crate::engine::speculative::SpeculationStats::default();
+    // Phase 3 (binary IPC delta batcher) and Phase 4 (speculative tool
+    // execution) were removed in OPIDE phase 1 along with their backing
+    // engine modules.
 
     loop {
         round += 1;
@@ -450,19 +431,8 @@ pub async fn run_agent_turn(
             if let Some(dt) = &chunk.delta_text {
                 text_accum.push_str(dt);
 
-                // Phase 3: Emit delta — batched (with binary-ipc) or direct
-                #[cfg(feature = "binary-ipc")]
-                if let Some(batch) = delta_batcher.push_delta(dt) {
-                    fire(
-                        app_handle,
-                        EngineEvent::Delta {
-                            session_id: session_id.to_string(),
-                            run_id: run_id.to_string(),
-                            text: batch.combined_text,
-                        },
-                    );
-                }
-                #[cfg(not(feature = "binary-ipc"))]
+                // Binary IPC delta batcher removed in OPIDE phase 1; emit
+                // every delta directly.
                 fire(
                     app_handle,
                     EngineEvent::Delta {
@@ -732,21 +702,7 @@ pub async fn run_agent_turn(
                 reasoning_content: if thinking_accum.is_empty() { None } else { Some(thinking_accum.clone()) },
             });
 
-            // ── Phase 3: Flush remaining batched deltas BEFORE Complete ──
-            #[cfg(feature = "binary-ipc")]
-            {
-                if let Some(batch) = delta_batcher.flush() {
-                    fire(
-                        app_handle,
-                        EngineEvent::Delta {
-                            session_id: session_id.to_string(),
-                            run_id: run_id.to_string(),
-                            text: batch.combined_text,
-                        },
-                    );
-                }
-                crate::engine::binary_ipc::log_session_stats(&delta_batcher.stats(), 0);
-            }
+            // Phase 3 binary IPC delta batcher removed in OPIDE phase 1.
 
             // Emit completion event
             let usage = if last_input_tokens > 0 || total_output_tokens > 0 {
@@ -801,9 +757,7 @@ pub async fn run_agent_turn(
                 telem::emit_summary(app_handle, &summary);
             }
 
-            // ── Phase 4: Log speculation stats for the session ────────
-            #[cfg(feature = "speculative")]
-            crate::engine::speculative::log_session_speculation_stats(&speculation_stats);
+            // Phase 4 speculative tool execution removed in OPIDE phase 1.
 
             return Ok(final_text);
         }
@@ -976,105 +930,8 @@ pub async fn run_agent_turn(
         //
         let tc_count = tool_calls.len();
 
-        // ── Plan interception: if the model called execute_plan, hand off
-        // to the DAG executor instead of normal tool-by-tool execution ──
-        #[cfg(feature = "plan-executor")]
-        if tool_calls.len() == 1 && tool_calls[0].function.name == "execute_plan" {
-            let tc = &tool_calls[0];
-            info!("[engine] Intercepting execute_plan — routing to DAG executor");
-
-            let args_str = &tc.function.arguments;
-            let args: serde_json::Value =
-                match serde_json::from_str(if args_str.trim().is_empty() {
-                    "{}"
-                } else {
-                    args_str
-                }) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let err_msg = format!(
-                            "Failed to parse execute_plan arguments: {}. \
-                         Please provide a valid JSON plan with 'nodes' array.",
-                            e
-                        );
-                        messages.push(Message {
-                            role: Role::Tool,
-                            content: MessageContent::Text(err_msg),
-                            tool_calls: None,
-                            tool_call_id: Some(tc.id.clone()),
-                            name: Some("execute_plan".to_string()),
-                            reasoning_content: None,
-                        });
-                        continue;
-                    }
-                };
-
-            // Parse the plan
-            let plan = match crate::engine::plan::parse_plan(&args) {
-                Ok(p) => p,
-                Err(e) => {
-                    messages.push(Message {
-                        role: Role::Tool,
-                        content: MessageContent::Text(format!(
-                            "Plan parsing failed: {}. Fix the plan and retry, or call tools individually.",
-                            e
-                        )),
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                        name: Some("execute_plan".to_string()),
-                        reasoning_content: None,
-                    });
-                    continue;
-                }
-            };
-
-            // Validate against available tools
-            let validation_errors = crate::engine::plan::validate_plan(&plan, tools);
-            if !validation_errors.is_empty() {
-                let err_list: Vec<String> =
-                    validation_errors.iter().map(|e| e.to_string()).collect();
-                messages.push(Message {
-                    role: Role::Tool,
-                    content: MessageContent::Text(format!(
-                        "Plan validation failed:\n- {}\nFix these issues and retry, or call tools individually.",
-                        err_list.join("\n- ")
-                    )),
-                    tool_calls: None,
-                    tool_call_id: Some(tc.id.clone()),
-                    name: Some("execute_plan".to_string()),
-                    reasoning_content: None,
-                });
-                continue;
-            }
-
-            // Execute the plan (parallel DAG execution)
-            let results =
-                crate::engine::plan::execute_plan(&plan, app_handle, agent_id, session_id, run_id)
-                    .await;
-
-            // Build results context for the model
-            let results_context = crate::engine::plan::build_results_context(&plan, &results);
-
-            // Track tool calls and timing for telemetry
-            let plan_node_count = plan.nodes.len() as u32;
-            tool_call_count += plan_node_count;
-
-            messages.push(Message {
-                role: Role::Tool,
-                content: MessageContent::Text(results_context),
-                tool_calls: None,
-                tool_call_id: Some(tc.id.clone()),
-                name: Some("execute_plan".to_string()),
-                reasoning_content: None,
-            });
-
-            // Continue the loop — model will synthesize results into a response
-            info!(
-                "[engine] Plan execution complete: {} nodes executed, feeding results back to model",
-                plan_node_count
-            );
-            continue;
-        }
+        // Plan-executor (DAG planner) was removed in OPIDE phase 1 along
+        // with engine::plan. The agent now executes tool calls one-by-one.
 
         // ── Sandbox enforcement: route tools through sandbox when available ──
         let has_sandbox = sandbox_enforcement::has_sandbox(app_handle);
@@ -1384,15 +1241,8 @@ pub async fn run_agent_turn(
                 .copied()
                 .collect();
 
-            // Trading write tools check the policy-based approval function
-            #[cfg(feature = "trading")]
-            let trading_write_tools = tier4_dangerous
-                .iter()
-                .filter(|t| {
-                    t.starts_with("sol_") || t.starts_with("dex_") || t.starts_with("coinbase_")
-                })
-                .copied()
-                .collect::<Vec<&str>>();
+            // Trading auto-approve removed in OPIDE phase 1 (trading feature
+            // and the dex/sol/coinbase tools were deleted).
 
             // Determine the tier label for the tool (sent to frontend for UI hints)
             let _tool_tier = if tier1_safe.contains(&tc.function.name.as_str()) {
@@ -1430,15 +1280,10 @@ pub async fn run_agent_turn(
             }
 
             // Sandboxed tools (IDE, WASM, execute_code) are always auto-approved
-            let mut skip_hil = auto_approve_all
+            let skip_hil = auto_approve_all
                 || auto_approved_tools.contains(&tc.function.name.as_str())
                 || user_approved_tools.iter().any(|t| t == &tc.function.name)
                 || sandbox_enforcement::is_sandbox_auto_approved(tc);
-
-            #[cfg(feature = "trading")]
-            if !skip_hil && trading_write_tools.contains(&tc.function.name.as_str()) {
-                skip_hil = check_trading_auto_approve(&tc.function.name, &tc.function.arguments, app_handle);
-            }
 
             let approved = if skip_hil {
                 // Distinguish agent-level auto-approve from safe-tool auto-approve in logs
@@ -1526,16 +1371,8 @@ pub async fn run_agent_turn(
                     tc.function.name, tc.id
                 );
 
-                // Audit: log tool denial
-                if let Some(es) = app_handle.try_state::<crate::engine::state::EngineState>() {
-                    crate::engine::audit::log_tool_denied(
-                        &es.store,
-                        agent_id,
-                        session_id,
-                        &tc.function.name,
-                        &tc.id,
-                    );
-                }
+                // Audit log emission removed in OPIDE phase 1 (engine::audit
+                // was deleted along with the audit Tauri commands).
 
                 // Emit denial as tool result
                 fire(
@@ -1612,19 +1449,7 @@ pub async fn run_agent_turn(
                 if result.output.len() > 200 { "..." } else { "" }
             );
 
-            // Audit: log tool execution result
-            if let Some(es) = app_handle.try_state::<crate::engine::state::EngineState>() {
-                crate::engine::audit::log_tool_call(
-                    &es.store,
-                    agent_id,
-                    session_id,
-                    &tc.function.name,
-                    &tc.id,
-                    &tc.function.arguments,
-                    result.success,
-                    &result.output,
-                );
-            }
+            // Audit log emission removed in OPIDE phase 1.
 
             // Emit tool result event
             fire(
@@ -1700,43 +1525,7 @@ pub async fn run_agent_turn(
                 tool_fail_counter.remove(&tc.function.name);
             }
 
-            // ── Phase 4: Record tool transition & predict next tool ───
-            #[cfg(feature = "speculative")]
-            {
-                if let Some(es) = app_handle.try_state::<crate::engine::state::EngineState>() {
-                    let conn = es.store.conn();
-                    let db = conn.lock();
-                    if let Some(candidate) = crate::engine::speculative::predict_and_record(
-                        &db,
-                        previous_tool.as_deref(),
-                        &tc.function.name,
-                        &speculation_config,
-                    ) {
-                        speculation_stats.predictions += 1;
-                        info!(
-                            "[speculative] Predicted next tool: {} (p={:.2})",
-                            candidate.tool_name, candidate.probability
-                        );
-
-                        if speculation_config.warm_connections {
-                            if let Some(target) =
-                                crate::engine::speculative::warm_target_for_domain(&candidate.tool_name)
-                            {
-                                if let Ok(dur) = crate::engine::speculative::warm_connection(&target) {
-                                    speculation_stats.connections_warmed += 1;
-                                    info!(
-                                        "[speculative] Pre-warmed connection to {}:{} in {:.1}ms",
-                                        target.host,
-                                        target.port,
-                                        dur.as_secs_f64() * 1000.0
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                previous_tool = Some(tc.function.name.clone());
-            }
+            // Phase 4 speculative tool execution removed in OPIDE phase 1.
         }
 
         // ── 6. Tool RAG: refresh tools if request_tools was called ─────

@@ -5,8 +5,6 @@
 use crate::engine::engram::CognitiveState;
 use crate::engine::memory::EmbeddingClient;
 use crate::engine::sessions::SessionStore;
-#[cfg(feature = "speculative")]
-use crate::engine::speculative::{SpeculationConfig, SpeculativeCache};
 use crate::engine::tool_index::ToolIndex;
 use crate::engine::tool_registry::PersistentToolRegistry;
 use crate::engine::types::*;
@@ -504,12 +502,6 @@ pub struct EngineState {
     pub tool_index: Arc<tokio::sync::Mutex<ToolIndex>>,
     /// Persistent tool registry — Phase 2: four-tier search with BM25/domain fallback.
     pub persistent_tool_registry: Arc<tokio::sync::Mutex<PersistentToolRegistry>>,
-    /// Speculative execution cache — Phase 4: predict & cache next tool calls.
-    #[cfg(feature = "speculative")]
-    pub speculation_cache: Arc<Mutex<SpeculativeCache>>,
-    /// Speculative execution config.
-    #[cfg(feature = "speculative")]
-    pub speculation_config: SpeculationConfig,
     /// Tools loaded via request_tools in the current chat turn.
     /// Cleared at the start of each new chat message.
     pub loaded_tools: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -554,15 +546,8 @@ impl EngineState {
     pub fn new() -> EngineResult<Self> {
         let store = SessionStore::open()?;
 
-        // Initialize skill vault tables
-        store.init_skill_tables()?;
-
-        // Initialize community skills table (skills.sh ecosystem)
-        store.init_community_skills_table()?;
-
-        // Seed built-in canvas visualisation skills into Engram procedural memory.
-        // Uses deterministic IDs — idempotent on every startup.
-        crate::engine::engram::skill_library::seed_builtin_canvas_skills(&store).ok();
+        // OPIDE phase 1: skill-vault and community-skills tables, plus the
+        // canvas skill seeding step, were retired with engine::skills.
 
         // Load config from DB or use defaults
         let mut config = match store.get_config("engine_config") {
@@ -599,13 +584,6 @@ impl EngineState {
         // Read max_concurrent_runs from config (default 4)
         let max_concurrent = config.max_concurrent_runs;
 
-        // Load speculation config from DB or use defaults
-        #[cfg(feature = "speculative")]
-        let speculation_config = match store.get_config("speculation_config") {
-            Ok(Some(json)) => serde_json::from_str::<SpeculationConfig>(&json).unwrap_or_default(),
-            _ => SpeculationConfig::default(),
-        };
-
         // Build HNSW index from existing episodic memory embeddings
         let hnsw_index = {
             let idx = crate::engine::engram::hnsw::new_shared();
@@ -635,10 +613,6 @@ impl EngineState {
             persistent_tool_registry: Arc::new(tokio::sync::Mutex::new(
                 PersistentToolRegistry::new(),
             )),
-            #[cfg(feature = "speculative")]
-            speculation_cache: Arc::new(Mutex::new(SpeculativeCache::new(&speculation_config))),
-            #[cfg(feature = "speculative")]
-            speculation_config,
             loaded_tools: Arc::new(Mutex::new(HashSet::new())),
             request_queue: Arc::new(Mutex::new(HashMap::new())),
             yield_signals: Arc::new(Mutex::new(HashMap::new())),

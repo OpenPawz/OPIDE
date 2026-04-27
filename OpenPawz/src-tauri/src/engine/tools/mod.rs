@@ -7,7 +7,6 @@
 
 use crate::atoms::error::EngineResult;
 use crate::atoms::types::*;
-use crate::engine::skills;
 use crate::engine::state::EngineState;
 use crate::engine::util::safe_truncate;
 use log::{debug, info};
@@ -37,35 +36,16 @@ pub mod agents;
 pub mod canvas;
 pub mod canvas_dashboards;
 pub mod canvas_templates;
-pub mod coinbase;
-#[cfg(feature = "dex")]
-pub mod dex;
-#[cfg(feature = "channels")]
-pub mod discord;
-pub mod discourse;
 pub mod exec;
 pub mod fetch;
 pub mod filesystem;
-pub mod google;
-pub mod integrations;
 pub mod memory;
-pub mod microsoft;
-#[cfg(feature = "docker")]
-pub mod n8n;
 pub mod request_tools;
-pub mod service_api;
 pub mod skill_output;
 pub mod skill_storage;
-pub mod skills_tools;
-#[cfg(feature = "dex")]
-pub mod solana;
 pub mod soul;
 pub mod squads;
 pub mod tasks;
-#[cfg(feature = "channels")]
-pub mod telegram;
-#[cfg(feature = "browser")]
-pub mod web;
 pub mod worker_delegate;
 
 /// Build the `execute_plan` tool definition (Action DAG pseudo-tool).
@@ -135,11 +115,8 @@ impl ToolDefinition {
         tools.extend(filesystem::definitions());
         tools.extend(soul::definitions());
         tools.extend(memory::definitions());
-        #[cfg(feature = "browser")]
-        tools.extend(web::definitions());
         tools.extend(tasks::definitions());
         tools.extend(agents::definitions());
-        tools.extend(skills_tools::definitions());
         tools.extend(skill_output::definitions());
         tools.extend(skill_storage::definitions());
         tools.extend(canvas::definitions());
@@ -148,8 +125,6 @@ impl ToolDefinition {
         tools.extend(agent_comms::definitions());
         tools.extend(squads::definitions());
         tools.extend(request_tools::definitions());
-        #[cfg(feature = "docker")]
-        tools.extend(n8n::definitions());
         tools.push(plan_tool_definition());
         tools
     }
@@ -178,49 +153,15 @@ impl ToolDefinition {
         }
     }
 
-    /// Return the telegram_send tool definition.
-    #[cfg(feature = "channels")]
-    pub fn telegram_send() -> Self {
-        telegram::definitions()
-            .into_iter()
-            .find(|t| t.function.name == "telegram_send")
-            .expect("telegram_send definition missing from telegram::definitions()")
-    }
-
-    /// Return the telegram_read tool definition.
-    #[cfg(feature = "channels")]
-    pub fn telegram_read() -> Self {
-        telegram::definitions()
-            .into_iter()
-            .find(|t| t.function.name == "telegram_read")
-            .expect("telegram_read definition missing from telegram::definitions()")
-    }
-
     /// Return tools for enabled skills.
-    pub fn skill_tools(enabled_skill_ids: &[String]) -> Vec<Self> {
-        let mut tools = Vec::new();
-        for id in enabled_skill_ids {
-            match id.as_str() {
-                #[cfg(feature = "channels")]
-                "telegram" => tools.extend(telegram::definitions()),
-                "rest_api" => tools.extend(integrations::definitions_for("rest_api")),
-                "webhook" => tools.extend(integrations::definitions_for("webhook")),
-                "image_gen" => tools.extend(integrations::definitions_for("image_gen")),
-                #[cfg(feature = "channels")]
-                "discord" => tools.extend(discord::definitions()),
-                "discourse" => tools.extend(discourse::definitions()),
-                "coinbase" => tools.extend(coinbase::definitions()),
-                #[cfg(feature = "dex")]
-                "solana_dex" => tools.extend(solana::definitions()),
-                #[cfg(feature = "dex")]
-                "dex" => tools.extend(dex::definitions()),
-                "google_workspace" => tools.extend(google::definitions()),
-                "microsoft_365" => tools.extend(microsoft::definitions()),
-                "connected_services" => tools.extend(service_api::definitions()),
-                _ => {}
-            }
-        }
-        tools
+    ///
+    /// Phase 1 of the OPIDE extraction removed the OpenPawz integration
+    /// skills (rest_api, image_gen, google_workspace, microsoft_365,
+    /// coinbase, discourse, etc.) along with the skill credential vault.
+    /// IDE-side skills are surfaced via `ExternalToolExecutor` instead, so
+    /// this function now returns no per-skill tool definitions.
+    pub fn skill_tools(_enabled_skill_ids: &[String]) -> Vec<Self> {
+        Vec::new()
     }
 }
 
@@ -257,21 +198,15 @@ pub async fn execute_tool(
         .try_state::<Box<dyn ExternalToolExecutor>>()
         .is_some();
     if is_opide_host {
+        // After phase 1 most of the multi-channel/integration tools are gone.
+        // Keep a minimal block list for the few generic ones still alive in
+        // tools/ so the IDE host surfaces ide_* equivalents instead.
         const BLOCKED_TOOLS: &[&str] = &[
             "request_tools",
-            "coinbase_trade", "coinbase_transfer", "coinbase_wallet_create",
-            "coinbase_prices", "coinbase_balance",
-            "sol_swap", "sol_transfer", "sol_wallet_create",
-            "dex_swap", "dex_transfer", "dex_wallet_create",
-            "dex_watch_wallet", "dex_whale_transfers", "dex_top_traders", "dex_trending",
-            "send_slack", "send_discord", "send_telegram", "send_email",
-            "discord_send_message", "discord_list_channels", "discord_list_members",
             "list_squads", "create_squad", "squad_assign",
             "canvas_push", "canvas_update", "canvas_save", "canvas_load",
             "canvas_list_dashboards", "canvas_delete_dashboard",
             "canvas_list_templates", "canvas_from_template", "canvas_create_template",
-            "trello_list_boards", "trello_get_board", "trello_search",
-            "n8n_list_workflows", "n8n_execute_workflow",
         ];
         if BLOCKED_TOOLS.contains(&name.as_str()) {
             info!("[engine] BLOCKED tool '{}' — not available in OPIDE", name);
@@ -394,13 +329,8 @@ pub async fn execute_tool(
         else if let Some(r) = filesystem::execute(name, &args, agent_id).await { Some(r) }
         else if let Some(r) = soul::execute(name, &args, app_handle, agent_id).await { Some(r) }
         else if let Some(r) = memory::execute(name, &args, app_handle, agent_id).await { Some(r) }
-        else if let Some(r) = {
-            #[cfg(feature = "browser")] { web::execute(name, &args, app_handle).await }
-            #[cfg(not(feature = "browser"))] { Option::<Result<String, String>>::None }
-        } { Some(r) }
         else if let Some(r) = tasks::execute(name, &args, app_handle, agent_id).await { Some(r) }
         else if let Some(r) = agents::execute(name, &args, app_handle, agent_id).await { Some(r) }
-        else if let Some(r) = skills_tools::execute(name, &args, app_handle, agent_id).await { Some(r) }
         else if let Some(r) = skill_output::execute(name, &args, app_handle, agent_id).await { Some(r) }
         else if let Some(r) = skill_storage::execute(name, &args, app_handle, agent_id).await { Some(r) }
         else if let Some(r) = canvas::execute(name, &args, app_handle, agent_id).await { Some(r) }
@@ -409,32 +339,6 @@ pub async fn execute_tool(
         else if let Some(r) = agent_comms::execute(name, &args, app_handle, agent_id).await { Some(r) }
         else if let Some(r) = squads::execute(name, &args, app_handle, agent_id).await { Some(r) }
         else if let Some(r) = request_tools::execute(name, &args, app_handle, agent_id).await { Some(r) }
-        else if let Some(r) = {
-            #[cfg(feature = "channels")] { telegram::execute(name, &args, app_handle).await }
-            #[cfg(not(feature = "channels"))] { Option::<Result<String, String>>::None }
-        } { Some(r) }
-        else if let Some(r) = integrations::execute(name, &args, app_handle).await { Some(r) }
-        else if let Some(r) = {
-            #[cfg(feature = "docker")] { n8n::execute(name, &args, app_handle).await }
-            #[cfg(not(feature = "docker"))] { Option::<Result<String, String>>::None }
-        } { Some(r) }
-        else if let Some(r) = coinbase::execute(name, &args, app_handle).await { Some(r) }
-        else if let Some(r) = {
-            #[cfg(feature = "dex")] { solana::execute(name, &args, app_handle).await }
-            #[cfg(not(feature = "dex"))] { Option::<Result<String, String>>::None }
-        } { Some(r) }
-        else if let Some(r) = {
-            #[cfg(feature = "dex")] { dex::execute(name, &args, app_handle).await }
-            #[cfg(not(feature = "dex"))] { Option::<Result<String, String>>::None }
-        } { Some(r) }
-        else if let Some(r) = {
-            #[cfg(feature = "channels")] { discord::execute(name, &args, app_handle).await }
-            #[cfg(not(feature = "channels"))] { Option::<Result<String, String>>::None }
-        } { Some(r) }
-        else if let Some(r) = discourse::execute(name, &args, app_handle).await { Some(r) }
-        else if let Some(r) = google::execute(name, &args, app_handle).await { Some(r) }
-        else if let Some(r) = microsoft::execute(name, &args, app_handle).await { Some(r) }
-        else if let Some(r) = service_api::execute(name, &args, app_handle).await { Some(r) }
         else { None };
 
     // Try MCP tools (prefixed with `mcp_`) if no built-in handled it.
@@ -499,61 +403,10 @@ pub fn ensure_workspace(agent_id: &str) -> EngineResult<std::path::PathBuf> {
     Ok(ws)
 }
 
-// ── Shared credential helper (used by skill modules) ──────────────────────
-
-/// Check that a skill is enabled and return its decrypted credentials.
-pub fn get_skill_creds(
-    skill_id: &str,
-    app_handle: &tauri::AppHandle,
-) -> EngineResult<std::collections::HashMap<String, String>> {
-    let state = app_handle
-        .try_state::<EngineState>()
-        .ok_or("Engine state not available")?;
-
-    // Look up default_enabled from builtin definition
-    let defs = skills::builtin_skills();
-    let default_enabled = defs
-        .iter()
-        .find(|d| d.id == skill_id)
-        .map(|d| d.default_enabled)
-        .unwrap_or(false);
-    let enabled = state
-        .store
-        .get_skill_enabled_state(skill_id)?
-        .unwrap_or(default_enabled);
-
-    if !enabled {
-        // For per-service integration skills (e.g., "linear", "stripe"), the
-        // user may not have enabled the skill in the UI but it was auto-enabled
-        // during provisioning (engine_integrations_provision sets enabled=true).
-        // If the skill_id doesn't match any builtin AND is not enabled, give
-        // a helpful error that mentions which services ARE connected.
-        return Err(format!(
-            "Skill '{}' is not enabled. Ask the user to enable it in Skills or connect the service in Settings → Integrations.",
-            skill_id
-        )
-        .into());
-    }
-
-    let creds = skills::get_skill_credentials(&state.store, skill_id)?;
-
-    if let Some(def) = defs.iter().find(|d| d.id == skill_id) {
-        let missing: Vec<&str> = def
-            .required_credentials
-            .iter()
-            .filter(|c| c.required && !creds.contains_key(&c.key))
-            .map(|c| c.key.as_str())
-            .collect();
-        if !missing.is_empty() {
-            return Err(format!(
-                "Skill '{}' is missing required credentials: {}. Ask the user to configure them in Skills.",
-                skill_id, missing.join(", ")
-            ).into());
-        }
-    }
-
-    Ok(creds)
-}
+// The shared `get_skill_creds` helper was removed in OPIDE phase 1 along
+// with engine::skills. Tools that need credentialed access to third-party
+// services (google, microsoft, coinbase, discourse, integrations) were
+// removed at the same time; OPIDE surfaces those via MCP servers instead.
 
 /// Extract JS code from a malformed execute_code JSON string.
 /// The LLM sends {"code": "function run(ctx) { ... }"} but the JS code

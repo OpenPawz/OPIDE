@@ -155,20 +155,10 @@ pub fn refresh_tool_rag(app_handle: &tauri::AppHandle, tools: &mut Vec<ToolDefin
 
     info!("[tool-rag] Will try to inject: {:?}", new_names);
 
-    // Build the full tool registry to find the definitions
-    let mut all_defs = ToolDefinition::builtins();
-    let enabled_ids: Vec<String> = crate::engine::skills::builtin_skills()
-        .iter()
-        .filter(|s| {
-            state
-                .store
-                .get_skill_enabled_state(&s.id)
-                .unwrap_or(None)
-                .unwrap_or(s.default_enabled)
-        })
-        .map(|s| s.id.clone())
-        .collect();
-    all_defs.extend(ToolDefinition::skill_tools(&enabled_ids));
+    // Build the full tool registry to find the definitions.
+    // Skill-tool registration (engine::skills) was removed in OPIDE phase 1;
+    // OPIDE surfaces extra tools via ExternalToolExecutor instead.
+    let all_defs = ToolDefinition::builtins();
 
     let mut added = 0;
     for def in all_defs {

@@ -479,8 +479,8 @@ pub(crate) fn run_migrations(conn: &Connection) -> EngineResult<()> {
     // ── Engram: Three-tier memory system tables ─────────────────────
     crate::engine::engram::schema::run_engram_migrations(conn)?;
 
-    // ── Unified Signed Audit Log ────────────────────────────────────
-    conn.execute_batch(crate::engine::audit::UNIFIED_AUDIT_SCHEMA)?;
+    // Unified Signed Audit Log was removed in OPIDE phase 1 along with
+    // engine::audit and the audit Tauri commands.
 
     // ── Canvas Components (Agent Canvas) ────────────────────────────
     conn.execute_batch(

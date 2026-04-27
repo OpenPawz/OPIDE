@@ -66,36 +66,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".into(),
             function: FunctionDefinition {
-                name: "agent_skills".into(),
-                description: "View community skills assigned to a specific agent.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_id": { "type": "string", "description": "The agent ID to inspect" }
-                    },
-                    "required": ["agent_id"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".into(),
-            function: FunctionDefinition {
-                name: "agent_skill_assign".into(),
-                description: "Add or remove a community skill from a specific agent.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "skill_id": { "type": "string", "description": "The community skill ID" },
-                        "agent_id": { "type": "string", "description": "The agent ID to assign/unassign the skill to/from" },
-                        "action": { "type": "string", "enum": ["add", "remove"], "description": "'add' to give the agent this skill, 'remove' to take it away" }
-                    },
-                    "required": ["skill_id", "agent_id", "action"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".into(),
-            function: FunctionDefinition {
                 name: "manage_session".into(),
                 description: "List, clear, or delete chat sessions. Use this to manage channel bridge sessions \
                     (Discord, Telegram, etc.) or any other session. Actions: 'list' shows sessions with message counts, \
@@ -142,12 +112,6 @@ pub async fn execute(
             .await
             .map_err(|e| e.to_string()),
         "agent_list" => execute_agent_list(app_handle)
-            .await
-            .map_err(|e| e.to_string()),
-        "agent_skills" => execute_agent_skills(args, app_handle)
-            .await
-            .map_err(|e| e.to_string()),
-        "agent_skill_assign" => execute_agent_skill_assign(args, app_handle)
             .await
             .map_err(|e| e.to_string()),
         "manage_session" => execute_manage_session(args, app_handle)
@@ -215,18 +179,8 @@ async fn execute_self_info(app_handle: &tauri::AppHandle) -> EngineResult<String
         mcfg.recall_limit,
     );
 
-    let skills_list = crate::engine::skills::builtin_skills();
-    let enabled_skills: Vec<String> = skills_list
-        .iter()
-        .filter(|s| {
-            state
-                .store
-                .get_skill_enabled_state(&s.id)
-                .unwrap_or(None)
-                .unwrap_or(s.default_enabled)
-        })
-        .map(|s| format!("  - {} ({})", s.name, s.id))
-        .collect();
+    // engine::skills was removed in OPIDE phase 1.
+    let enabled_skills: Vec<String> = Vec::new();
 
     Ok(format!(
         "# Paw Engine Self-Info\n\n\
@@ -456,37 +410,14 @@ async fn execute_agent_list(app_handle: &tauri::AppHandle) -> EngineResult<Strin
         .ok_or("Engine state not available")?;
 
     let backend_agents = state.store.list_all_agents().unwrap_or_default();
-    let all_skills = state.store.list_community_skills().unwrap_or_default();
-
-    let mut skill_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    let global_count = all_skills
-        .iter()
-        .filter(|s| s.agent_ids.is_empty() && s.enabled)
-        .count();
-
-    for skill in &all_skills {
-        if skill.enabled {
-            for aid in &skill.agent_ids {
-                *skill_counts.entry(aid.clone()).or_insert(0u64) += 1;
-            }
-        }
-    }
 
     let mut output = String::from("# Agents in System\n\n");
-
-    let global_count64 = global_count as u64;
-    let default_skills = skill_counts.get("default").cloned().unwrap_or(0) + global_count64;
-    output.push_str(&format!(
-        "1. **Default Agent** (id: `default`)\n   Role: Boss / Main Agent\n   Community skills: {} ({} agent-specific + {} global)\n\n",
-        default_skills, skill_counts.get("default").cloned().unwrap_or(0), global_count
-    ));
+    output.push_str("1. **Default Agent** (id: `default`)\n   Role: Boss / Main Agent\n\n");
 
     let mut idx = 2;
     for (_project_id, agent) in &backend_agents {
-        let agent_skills =
-            skill_counts.get(&agent.agent_id).cloned().unwrap_or(0) + global_count as u64;
         output.push_str(&format!(
-            "{}. **{}** (id: `{}`)\n   Role: {} | Specialty: {}\n   Model: {}\n   Capabilities: {}\n   Community skills: {}\n\n",
+            "{}. **{}** (id: `{}`)\n   Role: {} | Specialty: {}\n   Model: {}\n   Capabilities: {}\n\n",
             idx,
             agent.agent_id,
             agent.agent_id,
@@ -494,150 +425,12 @@ async fn execute_agent_list(app_handle: &tauri::AppHandle) -> EngineResult<Strin
             agent.specialty,
             agent.model.as_deref().unwrap_or("default"),
             if agent.capabilities.is_empty() { "all".into() } else { agent.capabilities.join(", ") },
-            agent_skills,
         ));
         idx += 1;
     }
 
-    output.push_str("**Note**: Some agents may be configured in the frontend only.");
+    output.push_str("**Note**: Community-skill assignment was removed in OPIDE phase 1.");
     Ok(output)
-}
-
-async fn execute_agent_skills(
-    args: &serde_json::Value,
-    app_handle: &tauri::AppHandle,
-) -> EngineResult<String> {
-    let agent_id = args["agent_id"]
-        .as_str()
-        .ok_or("Missing 'agent_id' parameter")?;
-
-    let state = app_handle
-        .try_state::<EngineState>()
-        .ok_or("Engine state not available")?;
-
-    let all_skills = state.store.list_community_skills()?;
-    let agent_skills: Vec<_> = all_skills
-        .iter()
-        .filter(|s| s.agent_ids.is_empty() || s.agent_ids.contains(&agent_id.to_string()))
-        .collect();
-
-    if agent_skills.is_empty() {
-        return Ok(format!("Agent '{}' has no community skills assigned.\n\nUse skill_search to find skills, then agent_skill_assign to give them to this agent.", agent_id));
-    }
-
-    let mut output = format!("# Community Skills for agent '{}'\n\n", agent_id);
-    for (i, skill) in agent_skills.iter().enumerate() {
-        let status = if skill.enabled { "Enabled" } else { "Disabled" };
-        let scope = if skill.agent_ids.is_empty() {
-            "Global (all agents)".to_string()
-        } else {
-            format!("Scoped to: {}", skill.agent_ids.join(", "))
-        };
-        output.push_str(&format!(
-            "{}. **{}** [{}]\n   ID: `{}`\n   {}\n   Scope: {}\n   Source: {}\n\n",
-            i + 1,
-            skill.name,
-            status,
-            skill.id,
-            if skill.description.is_empty() {
-                "(no description)"
-            } else {
-                &skill.description
-            },
-            scope,
-            skill.source,
-        ));
-    }
-    output.push_str("Use agent_skill_assign to add or remove skills from this agent.");
-    Ok(output)
-}
-
-async fn execute_agent_skill_assign(
-    args: &serde_json::Value,
-    app_handle: &tauri::AppHandle,
-) -> EngineResult<String> {
-    let skill_id = args["skill_id"]
-        .as_str()
-        .ok_or("Missing 'skill_id' parameter")?;
-    let agent_id = args["agent_id"]
-        .as_str()
-        .ok_or("Missing 'agent_id' parameter")?;
-    let action = args["action"]
-        .as_str()
-        .ok_or("Missing 'action' parameter (must be 'add' or 'remove')")?;
-
-    let state = app_handle
-        .try_state::<EngineState>()
-        .ok_or("Engine state not available")?;
-
-    let all_skills = state.store.list_community_skills()?;
-    let skill = all_skills
-        .iter()
-        .find(|s| s.id == skill_id)
-        .ok_or_else(|| {
-            format!(
-                "Skill '{}' not found. Use skill_list to see installed skills.",
-                skill_id
-            )
-        })?;
-
-    let mut agent_ids = skill.agent_ids.clone();
-
-    match action {
-        "add" => {
-            if agent_ids.is_empty() {
-                return Ok(format!(
-                    "Skill '{}' is already global (available to all agents including '{}').",
-                    skill.name, agent_id
-                ));
-            }
-            if agent_ids.contains(&agent_id.to_string()) {
-                return Ok(format!(
-                    "Skill '{}' is already assigned to agent '{}'.",
-                    skill.name, agent_id
-                ));
-            }
-            agent_ids.push(agent_id.to_string());
-            state
-                .store
-                .set_community_skill_agents(skill_id, &agent_ids)?;
-            let _ = app_handle.emit(
-                "community-skill-updated",
-                serde_json::json!({ "skill_id": skill_id }),
-            );
-            Ok(format!(
-                "Assigned skill '{}' to agent '{}'.",
-                skill.name, agent_id
-            ))
-        }
-        "remove" => {
-            if agent_ids.is_empty() {
-                return Ok(format!(
-                    "Skill '{}' is currently global. Cannot remove from individual agents.",
-                    skill.name
-                ));
-            }
-            if !agent_ids.contains(&agent_id.to_string()) {
-                return Ok(format!(
-                    "Skill '{}' is not assigned to agent '{}'.",
-                    skill.name, agent_id
-                ));
-            }
-            agent_ids.retain(|id| id != agent_id);
-            state
-                .store
-                .set_community_skill_agents(skill_id, &agent_ids)?;
-            let _ = app_handle.emit(
-                "community-skill-updated",
-                serde_json::json!({ "skill_id": skill_id }),
-            );
-            Ok(format!(
-                "Removed skill '{}' from agent '{}'.",
-                skill.name, agent_id
-            ))
-        }
-        _ => Err(format!("Invalid action '{}'. Must be 'add' or 'remove'.", action).into()),
-    }
 }
 
 // ── manage_session ─────────────────────────────────────────────────────

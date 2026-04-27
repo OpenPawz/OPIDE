@@ -11,7 +11,6 @@
 // Called by: commands/chat.rs (the thin System layer)
 
 use crate::engine::sessions::SessionStore;
-use crate::engine::skills;
 use crate::engine::tool_index;
 use crate::engine::tools;
 use crate::engine::types::*;
@@ -52,30 +51,12 @@ pub fn build_chat_tools(
         return vec![];
     }
 
-    // ── Build the full tool registry (same as before) ──────────────────
+    // ── Build the full tool registry ───────────────────────────────────
+    // Phase 1 of the OPIDE extraction: skill_tools() always returns an
+    // empty list now that engine::skills is gone. The auto-telegram
+    // shortcut also went away with engine::telegram.
     let mut all_tools = ToolDefinition::builtins();
-
-    let enabled_ids: Vec<String> = skills::builtin_skills()
-        .iter()
-        .filter(|s| store.is_skill_enabled(&s.id).unwrap_or(false))
-        .map(|s| s.id.clone())
-        .collect();
-    if !enabled_ids.is_empty() {
-        info!("[engine] Skills enabled: {:?}", enabled_ids);
-        all_tools.extend(ToolDefinition::skill_tools(&enabled_ids));
-    }
-
-    // Auto-add telegram tools when bridge configured but skill not enabled
-    #[cfg(feature = "channels")]
-    if !enabled_ids.contains(&"telegram".to_string()) {
-        if let Ok(tg_cfg) = crate::engine::telegram::load_telegram_config(app_handle) {
-            if !tg_cfg.bot_token.is_empty() {
-                info!("[engine] Auto-adding telegram tools (bridge configured)");
-                all_tools.push(ToolDefinition::telegram_send());
-                all_tools.push(ToolDefinition::telegram_read());
-            }
-        }
-    }
+    let _ = store;
 
     // Add external tools (OPIDE IDE tools, if registered)
     let ext_tools = ToolDefinition::external_tools(app_handle);
@@ -98,10 +79,9 @@ pub fn build_chat_tools(
     // If the agent policy explicitly lists skill tools, auto-include them
     // so users don't have to rely on request_tools for tools they manually enabled.
     let is_policy_allowed = |name: &str| tool_filter.is_some_and(|f| f.iter().any(|n| n == name));
-    // Auto-include exec and fetch when integration skills are enabled — these
-    // are needed for CLI tools (gh, git) and direct HTTP calls that skills rely on.
-    let has_integration_skills = !enabled_ids.is_empty();
-    let is_skill_required = |name: &str| has_integration_skills && matches!(name, "fetch" | "exec");
+    // Integration-skill driven auto-inclusion of exec/fetch was removed in
+    // OPIDE phase 1; engine::skills no longer exists.
+    let is_skill_required = |_name: &str| false;
 
     // Check if an external tool executor (OPIDE) is registered
     let has_external = app_handle

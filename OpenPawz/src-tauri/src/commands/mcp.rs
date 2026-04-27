@@ -1,14 +1,45 @@
 // commands/mcp.rs — Tauri IPC commands for MCP server management (Phase E)
 
 use crate::commands::state::EngineState;
-use crate::engine::channels;
 use crate::engine::mcp::types::{McpServerConfig, McpServerStatus};
-use crate::engine::skills::{decrypt_credential, encrypt_credential, get_vault_key};
+use crate::engine::vault::{decrypt_credential, encrypt_credential, get_vault_key};
+use tauri::Manager;
 use tauri::State;
 
 // ── Config key for persisting the server list ──────────────────────────
 
 const CONFIG_KEY: &str = "mcp_servers";
+
+// ── Local config persistence (was crate::engine::channels in OpenPawz) ──
+// Channels was deleted in OPIDE phase 1; the load/save helpers were just
+// thin wrappers around EngineState's SQLite config table, so we inline the
+// equivalent here.
+
+fn load_mcp_servers(app_handle: &tauri::AppHandle) -> Result<Vec<McpServerConfig>, String> {
+    let state = app_handle
+        .try_state::<EngineState>()
+        .ok_or_else(|| "Engine not initialized".to_string())?;
+    match state.store.get_config(CONFIG_KEY) {
+        Ok(Some(json)) => serde_json::from_str(&json)
+            .map_err(|e| format!("Parse {} config: {}", CONFIG_KEY, e)),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn save_mcp_servers(
+    app_handle: &tauri::AppHandle,
+    servers: &[McpServerConfig],
+) -> Result<(), String> {
+    let state = app_handle
+        .try_state::<EngineState>()
+        .ok_or_else(|| "Engine not initialized".to_string())?;
+    let json = serde_json::to_string(servers)
+        .map_err(|e| format!("Serialize {} config: {}", CONFIG_KEY, e))?;
+    state
+        .store
+        .set_config(CONFIG_KEY, &json)
+        .map_err(|e| e.to_string())
+}
 
 /// §Security: Encrypt all env values in an MCP config before persisting to DB.
 /// Idempotent — values already encrypted (prefixed "aes:") are left untouched.
@@ -36,8 +67,7 @@ fn decrypt_config_env(config: &mut McpServerConfig) -> Result<(), String> {
 
 /// Load all configs from DB and decrypt env values.
 fn load_and_decrypt(app_handle: &tauri::AppHandle) -> Result<Vec<McpServerConfig>, String> {
-    let mut servers: Vec<McpServerConfig> =
-        channels::load_channel_config(app_handle, CONFIG_KEY).unwrap_or_default();
+    let mut servers = load_mcp_servers(app_handle).unwrap_or_default();
     for s in &mut servers {
         decrypt_config_env(s)?;
     }
@@ -63,8 +93,7 @@ pub fn engine_mcp_save_server(
     // §Security: Encrypt env values before persisting to DB
     encrypt_config_env(&mut server)?;
 
-    let mut servers: Vec<McpServerConfig> =
-        channels::load_channel_config(&app_handle, CONFIG_KEY).unwrap_or_default();
+    let mut servers = load_mcp_servers(&app_handle).unwrap_or_default();
 
     // Replace existing or append new
     if let Some(pos) = servers.iter().position(|s| s.id == server.id) {
@@ -73,7 +102,7 @@ pub fn engine_mcp_save_server(
         servers.push(server);
     }
 
-    channels::save_channel_config(&app_handle, CONFIG_KEY, &servers).map_err(|e| e.to_string())
+    save_mcp_servers(&app_handle, &servers)
 }
 
 // ── Remove a server config ─────────────────────────────────────────────
@@ -91,10 +120,9 @@ pub async fn engine_mcp_remove_server(
     }
 
     // Remove from persisted config
-    let mut servers: Vec<McpServerConfig> =
-        channels::load_channel_config(&app_handle, CONFIG_KEY).unwrap_or_default();
+    let mut servers = load_mcp_servers(&app_handle).unwrap_or_default();
     servers.retain(|s| s.id != id);
-    channels::save_channel_config(&app_handle, CONFIG_KEY, &servers).map_err(|e| e.to_string())
+    save_mcp_servers(&app_handle, &servers)
 }
 
 // ── Connect to a server ────────────────────────────────────────────────

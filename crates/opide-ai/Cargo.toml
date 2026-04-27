@@ -18,7 +18,7 @@ async-trait.workspace = true
 tauri = { version = "2", features = [] }
 
 # OpenPawz engine (types, traits, EngineState)
-openpawz = { path = "../../OpenPawz/src-tauri" }
+openpawz = { path = "../../OpenPawz/src-tauri", default-features = false }
 
 # OPIDE Shell (ide_mcp, git — used by tool executor)
 opide-shell = { path = "../opide-shell" }
