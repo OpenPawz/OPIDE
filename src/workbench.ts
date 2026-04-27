@@ -132,7 +132,6 @@ import { registerOpideChat } from './opide/chat/index.ts'
 import { registerInlineEdit } from './opide/opide-inline.ts'
 import { registerGhostCompletions } from './opide/opide-completions.ts'
 import { registerOpideExtensions } from './opide/opide-extensions.ts'
-import { registerMemoryPalace } from './opide/opide-memory-palace.ts'
 import { registerActivityFeed } from './opide/opide-activity-feed.ts'
 import { initEditorIntegration } from './opide/opide-editor.ts'
 
@@ -341,14 +340,11 @@ export async function initializeWorkbench(): Promise<void> {
 export async function initializeDeferredFeatures(): Promise<void> {
   console.log('[opide] Starting deferred features...')
 
-  // ─── Start OpenPawz Engine Event Bus (must be before any views load) ────
-  try {
-    const { pawEngine } = await import('@openpawz/engine')
-    await pawEngine.startListening()
-    console.log('[opide] OpenPawz engine event bus started')
-  } catch (e) {
-    console.warn('[opide] Engine event bus failed:', e)
-  }
+  // The OpenPawz frontend's `pawEngine.startListening()` bootstrap used to
+  // run here. OPIDE listens to `engine-event` directly via Tauri's
+  // `listen()` API in src/opide/chat/streaming.ts (and the activity feed
+  // / progress listeners). Removed in extraction phase 2 along with the
+  // rest of the OpenPawz frontend assets.
 
   // ─── OPIDE AI Features ──────────────────────────────────────────────────
   // Each feature in its own try/catch so one failure doesn't kill the rest
@@ -357,7 +353,6 @@ export async function initializeDeferredFeatures(): Promise<void> {
   try { registerInlineEdit() } catch (e) { console.warn('[opide] inline edit failed:', e) }
   try { registerGhostCompletions() } catch (e) { console.warn('[opide] completions failed:', e) }
   try { registerOpideExtensions() } catch (e) { console.warn('[opide] extensions panel failed:', e) }
-  try { registerMemoryPalace() } catch (e) { console.warn('[opide] memory palace failed:', e) }
   try { registerActivityFeed() } catch (e) { console.warn('[opide] activity feed failed:', e) }
   initEditorIntegration().catch(e => console.warn('[opide] editor integration failed:', e))
 
