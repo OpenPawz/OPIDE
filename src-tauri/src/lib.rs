@@ -303,6 +303,23 @@ pub fn run() {
             commands::agent::engine_list_all_agents,
             // ── OpenPawz: Memory ────────────────────────────────────────
             commands::memory::engine_message_feedback,
+            // Memory palace surface — store/list/search/visualize engram memories.
+            // Phase 1 stripped these as "unused"; phase 2 frontend restoration
+            // showed they're load-bearing for the Memory Palace view.
+            commands::memory::engine_memory_store,
+            commands::memory::engine_memory_search,
+            commands::memory::engine_memory_stats,
+            commands::memory::engine_memory_get,
+            commands::memory::engine_memory_update,
+            commands::memory::engine_memory_delete,
+            commands::memory::engine_memory_list,
+            commands::memory::engine_memory_edges,
+            commands::memory::engine_memory_embedding_projection,
+            commands::memory::engine_memory_backfill,
+            commands::memory::engine_get_memory_config,
+            commands::memory::engine_test_embedding,
+            commands::memory::engine_embedding_status,
+            commands::memory::engine_embedding_pull_model,
             // ── OpenPawz: MCP ───────────────────────────────────────────
             commands::mcp::engine_mcp_save_server,
             commands::mcp::engine_mcp_connect,
