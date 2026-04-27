@@ -5,14 +5,14 @@
 //
 // Each module retains its original tests unchanged.
 
-use paw_temp_lib::engine::sessions::SessionStore;
+use opide_engine::engine::sessions::SessionStore;
 use rusqlite::Connection;
 
 /// Shared test helper: in-memory SessionStore.
 pub fn test_store() -> SessionStore {
     let conn = Connection::open_in_memory().expect("Failed to open in-memory DB");
     conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
-    paw_temp_lib::engine::sessions::schema_for_testing(&conn);
+    opide_engine::engine::sessions::schema_for_testing(&conn);
     SessionStore::from_connection(conn)
 }
 

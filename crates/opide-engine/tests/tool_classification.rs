@@ -5,8 +5,8 @@
 
 // ── Injection Scanner Cross-Module Tests ───────────────────────────────────
 
-use paw_temp_lib::engine::channels::{check_access, PendingUser};
-use paw_temp_lib::engine::injection::{is_likely_injection, scan_for_injection, InjectionSeverity};
+use opide_engine::engine::channels::{check_access, PendingUser};
+use opide_engine::engine::injection::{is_likely_injection, scan_for_injection, InjectionSeverity};
 
 // ── Multi-pattern stacking ──
 

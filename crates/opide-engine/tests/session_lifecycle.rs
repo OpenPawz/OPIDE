@@ -59,7 +59,7 @@ fn add_message_increments_count() {
     let store = test_store();
     store.create_session("s1", "gpt-4", None, None).unwrap();
 
-    let msg = paw_temp_lib::atoms::types::StoredMessage {
+    let msg = opide_engine::atoms::types::StoredMessage {
         id: "m1".into(),
         session_id: "s1".into(),
         role: "user".into(),
@@ -81,7 +81,7 @@ fn get_messages_returns_added_messages() {
     store.create_session("s1", "gpt-4", None, None).unwrap();
 
     for i in 0..3 {
-        let msg = paw_temp_lib::atoms::types::StoredMessage {
+        let msg = opide_engine::atoms::types::StoredMessage {
             id: format!("m{}", i),
             session_id: "s1".into(),
             role: if i % 2 == 0 {
@@ -109,7 +109,7 @@ fn delete_session_cascades_messages() {
     let store = test_store();
     store.create_session("s1", "gpt-4", None, None).unwrap();
 
-    let msg = paw_temp_lib::atoms::types::StoredMessage {
+    let msg = opide_engine::atoms::types::StoredMessage {
         id: "m1".into(),
         session_id: "s1".into(),
         role: "user".into(),

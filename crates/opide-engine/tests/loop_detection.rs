@@ -10,9 +10,9 @@
 // - No false positives on dissimilar messages
 // - Redirect message format and contents
 
-use paw_temp_lib::engine::chat::detect_response_loop;
-use paw_temp_lib::engine::types::{Message, MessageContent, Role};
-use paw_temp_lib::engine::util::safe_truncate;
+use opide_engine::engine::chat::detect_response_loop;
+use opide_engine::engine::types::{Message, MessageContent, Role};
+use opide_engine::engine::util::safe_truncate;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -332,7 +332,7 @@ fn escalation_produces_stronger_redirect() {
 // §59.2 — User Override Detection
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use paw_temp_lib::engine::chat::{detect_user_override, is_user_override_phrase};
+use opide_engine::engine::chat::{detect_user_override, is_user_override_phrase};
 
 // ── Phrase detection (unit-level) ─────────────────────────────────────────
 

@@ -23,7 +23,7 @@ fn bench_hnsw_insert(c: &mut Criterion) {
     for &count in &[100, 1_000, 5_000] {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter(|| {
-                let mut index = paw_temp_lib::engine::engram::hnsw::HnswIndex::new();
+                let mut index = opide_engine::engine::engram::hnsw::HnswIndex::new();
                 for i in 0..count {
                     index.insert(&format!("mem-{}", i), random_vec(384));
                 }
@@ -40,7 +40,7 @@ fn bench_hnsw_search(c: &mut Criterion) {
 
     for &count in &[100, 1_000, 5_000] {
         // Build index once
-        let mut index = paw_temp_lib::engine::engram::hnsw::HnswIndex::new();
+        let mut index = opide_engine::engine::engram::hnsw::HnswIndex::new();
         for i in 0..count {
             index.insert(&format!("mem-{}", i), random_vec(384));
         }
@@ -67,7 +67,7 @@ fn bench_hnsw_brute_force_comparison(c: &mut Criterion) {
     let count = 1_000;
 
     // Build HNSW index
-    let mut hnsw = paw_temp_lib::engine::engram::hnsw::HnswIndex::new();
+    let mut hnsw = opide_engine::engine::engram::hnsw::HnswIndex::new();
     let mut vecs: Vec<Vec<f32>> = Vec::with_capacity(count);
     for i in 0..count {
         let v = random_vec(dims);
