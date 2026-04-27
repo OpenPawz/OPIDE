@@ -67,6 +67,7 @@ fn add_message_increments_count() {
         tool_calls_json: None,
         tool_call_id: None,
         name: None,
+        tool_success: None,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     store.add_message(&msg).unwrap();
@@ -93,6 +94,7 @@ fn get_messages_returns_added_messages() {
             tool_calls_json: None,
             tool_call_id: None,
             name: None,
+            tool_success: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         store.add_message(&msg).unwrap();
@@ -117,6 +119,7 @@ fn delete_session_cascades_messages() {
         tool_calls_json: None,
         tool_call_id: None,
         name: None,
+        tool_success: None,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     store.add_message(&msg).unwrap();

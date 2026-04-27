@@ -23,6 +23,7 @@ fn msg(role: Role, text: &str) -> Message {
         tool_calls: None,
         tool_call_id: None,
         name: None,
+        reasoning_content: None,
     }
 }
 

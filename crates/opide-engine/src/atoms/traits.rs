@@ -116,7 +116,7 @@ pub trait AiProvider: Send + Sync {
 /// without editing the ProviderKind enum or AnyProvider::from_config().
 ///
 /// Usage: implement this trait, then register via Tauri `.manage()`:
-/// ```rust
+/// ```ignore
 /// app.manage(Box::new(MyProviderFactory) as Box<dyn ProviderFactory>);
 /// ```
 ///
@@ -133,7 +133,7 @@ pub trait ProviderFactory: Send + Sync {
 /// Hook for host apps (e.g. OPIDE) to filter the tool list before sending to the AI model.
 ///
 /// Usage: implement this trait, then register via Tauri `.manage()`:
-/// ```rust
+/// ```ignore
 /// app.manage(Box::new(MyToolAssembler) as Box<dyn ToolAssembler>);
 /// ```
 ///
