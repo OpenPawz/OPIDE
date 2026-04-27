@@ -3,15 +3,96 @@ name = "opide-engine"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "OPIDE engine — agent loop, providers, sessions, MCP. Extracted from OpenPawz."
+description = "OPIDE engine — agent loop, providers, sessions, MCP, atoms. Extracted from OpenPawz."
+autobenches = false
+autotests = false
 
 [lib]
 name = "opide_engine"
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-tokio.workspace = true
-log.workspace = true
-uuid.workspace = true
-async-trait.workspace = true
+# ── Tauri (engine code references tauri::AppHandle, command attrs, etc.) ─
+tauri = { version = "2", features = [] }
+
+log = "0.4"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+toml = "1.0"
+dirs = "6"
+getrandom = "0.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rand = "0.8"
+argon2 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+keyring = { version = "3", features = ["apple-native", "linux-native"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+base64 = "0.22"
+
+# ── Paw Agent Engine ──────────────────────────────────────────────
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "cookies", "multipart"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+urlencoding = "2"
+paste = "1"
+
+# ── URL parsing (used by tools/fetch.rs) ─────────────────────────
+url = "2"
+
+# ── TLS infrastructure (used by reqwest + MCP transport) ─────────
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+webpki-roots = "1.0"
+
+# ── Vault encryption (AES-256-GCM, used by engine::vault for MCP env) ─
+aes-gcm = "0.10"
+
+# ── Secure memory zeroing ───────────────────────────────────────
+zeroize = { version = "1", features = ["derive"] }
+
+# ── PII detection (memory encryption / GDPR) ────────────────────
+regex = "1"
+
+# ── Mutex safety (no poisoning, faster, const-constructible) ─
+parking_lot = "0.12"
+rustls-pemfile = "2"
+hkdf = "0.12"
+
+# ── Telemetry & Tracing (Canvas Phase 5) ─────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── Feature gates ───────────────────────────────────────────
+# Phase 1 of the OPIDE extraction removed the trading/speculative/
+# binary-ipc/plan-executor/swarm/channels/dex/browser/docker features
+# along with their backing modules. Only `engine-fork-mode` survives.
+[features]
+default = []
+# B138: engine forks can opt out of the `src-tauri/src/engine` block in
+# the filesystem tool's sensitive-path list. Default builds keep the
+# block on so the engine itself can't be self-edited from inside an
+# agent run.
+engine-fork-mode = []
+
+# ── Benchmarks ──────────────────────────────────────────────
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "engram_bench"
+harness = false
+
+# ── Tests: single binary to avoid OOM on codespace ──────────
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

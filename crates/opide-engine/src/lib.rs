@@ -1,12 +1,9 @@
-//! OPIDE engine — agent loop, providers, sessions, MCP.
+//! OPIDE engine — agent loop, providers, sessions, MCP, util, atoms.
 //!
-//! This crate replaces the vendored `OpenPawz/src-tauri` path-dep. The
-//! migration is sequenced in `OPENPAWZ_EXTRACTION_PLAN.md` at the repo
-//! root. During the migration, modules are moved here phase-by-phase
-//! and `paw_temp_lib::*` re-exports keep OpenPawz's own internal code
-//! compiling against the same types until phase 6 deletes the folder.
-//!
-//! Phase 0 (this commit): scaffold only — no code yet.
+//! Owned by OPIDE. Originally extracted from OpenPawz; the OpenPawz
+//! folder was deleted at the end of phase 2 of the extraction
+//! (OPENPAWZ_EXTRACTION_PLAN.md).
 
-#[doc(hidden)]
-pub fn ping() {}
+pub mod atoms;
+pub mod commands;
+pub mod engine;
