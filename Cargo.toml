@@ -6,6 +6,7 @@ members = [
     "crates/opide-bridge",
     "crates/opide-shell",
     "crates/opide-ai",
+    "crates/opide-engine",
 ]
 
 # Shared dependency versions — members use `dep.workspace = true`

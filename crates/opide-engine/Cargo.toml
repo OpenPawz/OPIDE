@@ -1,0 +1,17 @@
+[package]
+name = "opide-engine"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "OPIDE engine — agent loop, providers, sessions, MCP. Extracted from OpenPawz."
+
+[lib]
+name = "opide_engine"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+log.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
