@@ -80,18 +80,36 @@ either is wrong.
 
 ### Decision A — Engram / memory subsystem
 
-**RESOLVED: A2 (delete engram, native rating store).**
+**RESOLVED (revised 2026-04-27): A1 — engram stays.**
 
-OPIDE only calls `engine_message_feedback` from the entire memory
-subsystem, and surfaces no memory recall in any user-visible way today.
-A2 deletes the largest single subsystem in OpenPawz (engram +
-embeddings + HNSW index + cognitive event bus) with no user-visible
-regression. Behaviour change: agents no longer up/downweight context
-based on past feedback. If that turns out to matter, it comes back as
-a focused feature later.
+Original framing: A2 (delete engram, native rating store) on the basis
+that OPIDE only called `engine_message_feedback` and surfaced no memory
+recall in any user-visible way. That premise was wrong — phase 1's
+"unused command" survey was scoped to the OPIDE frontend only and
+missed the OpenPawz Memory Palace view, which is a real OPIDE
+feature ("major selling point" per the user) that visualises engram
+memory: 3D force-directed graph, embedding scatter plot, recall cards.
 
-Phase 5 implements the replacement: a `message_feedback` SQLite table
-with `(message_id, rating, note, ts)` schema.
+Phase 1 deleted the Memory Palace's UI imports along with the rest of
+the OpenPawz folder; the recovery commits (`7f21ff8`, `8b59a1f`)
+restored both layers — re-registered 14 `engine_memory_*` Tauri
+commands, and brought the 6 view files back as OPIDE-native code in
+`src/opide/memory-palace/` with local `engine.ts` / `helpers.ts` /
+`types.ts` shims and CSS scoped to `.opide-memory-palace`.
+
+What's NOT in scope of this restoration:
+- The OpenPawz **forge** subsystem (domain certification of memories)
+  is gone permanently. Memory Palace's Forge tab was pruned from
+  `molecules.ts`. If forge needs to come back, it's a separate
+  initiative.
+- The **embedding setup wizard** in `index.ts` was pruned because it
+  invoked 6 backend commands (`get_embedding_provider`,
+  `enable_memory_plugin`, etc.) that don't exist in OPIDE. Replaced
+  with a one-line "configure embeddings in OPIDE Settings →
+  Providers" message.
+
+`engine_message_feedback` keeps its existing engram-backed semantics —
+no native rating store, no behaviour change to the chat thumbs-up flow.
 
 ### Decision B — Provider abstraction
 
@@ -397,47 +415,22 @@ they touch.
 
 ---
 
-## Phase 5 — message_feedback (Decision A: 1-3 days)
+## Phase 5 — RESOLVED inline (no longer applicable)
 
-**Goal:** Land the `engine_message_feedback` command per Decision A.
+**Original goal:** Land `engine_message_feedback` per Decision A2 (delete
+engram, build a native SQLite rating store).
 
-**If A1 (port engram slice):**
-- Move `engine::engram/{encryption,cognitive_event,bridge}` plus
-  `engine::memory/` slice that `message_feedback` reaches.
-- Move HNSW + embeddings store if reachable.
-- Reasonably involved — likely 3 days.
+**Why it's gone:** Decision A flipped to A1 (engram stays) when Memory
+Palace was identified as a load-bearing user-facing feature. The
+`engine_message_feedback` handler keeps its existing engram-backed
+semantics. No engram deletion, no rating-store replacement.
 
-**If A2 (default: native rating store):**
-- Add to opide-engine: a `message_feedback` SQLite table with schema:
-  ```sql
-  CREATE TABLE IF NOT EXISTS message_feedback (
-      message_id TEXT PRIMARY KEY,
-      rating TEXT NOT NULL,
-      note TEXT,
-      ts INTEGER NOT NULL
-  );
-  ```
-- Reimplement `engine_message_feedback` as a 20-line write to that
-  table.
-- Delete `engine/engram/` and `engine/memory/` entirely.
-- ~1 day.
-
-**Steps (A2):**
-
-1. Branch: `extract/phase-5-feedback`.
-2. Add the table + migration to opide-engine's session store.
-3. Implement the new handler.
-4. Delete `engine/engram/`, `engine/memory/`, related types.
-5. Rewire the one frontend callsite if shape changed.
-6. `cargo test`. Manual verification: thumbs-up / thumbs-down on a
-   chat message, restart, query the table to confirm persistence.
-
-**Acceptance criteria:**
-- `engine_message_feedback` accepts and persists ratings.
-- No imports of `paw_temp_lib::engine::{engram, memory}::*` remain.
-- engram subsystem fully deleted (A2 only).
-
-**Land as PR #6 — "extract: port message_feedback (Decision A2)".**
+The work that *did* happen during what would have been phase 5:
+- `7f21ff8` re-registered the 14 `engine_memory_*` commands the Memory
+  Palace needs.
+- `8b59a1f` restored the Memory Palace frontend into
+  `src/opide/memory-palace/` as OPIDE-native code (option B — minus
+  the Forge tab and the embedding setup wizard).
 
 ---
 

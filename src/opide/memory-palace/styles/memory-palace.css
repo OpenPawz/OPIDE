@@ -1,5 +1,22 @@
 /* ═══ Memory Palace View ═══ */
 
+/* OPIDE token mapping. The historical CSS was written against the
+   OpenPawz design system (--bg-primary, --accent, --border, etc.).
+   Map those onto OPIDE's VS Code-derived tokens at the scope root so
+   the rest of this file works unchanged. Keep this scoped to the
+   memory palace — do not bleed into the wider workbench. */
+.opide-memory-palace {
+  --bg-primary: var(--vscode-editor-background, #1e1e1e);
+  --bg-secondary: var(--vscode-sideBar-background, #252526);
+  --bg-tertiary: var(--vscode-input-background, #3c3c3c);
+  --accent: #d4a843;                                   /* OPIDE chat-panel gold */
+  --border: var(--vscode-widget-border, rgba(255,255,255,0.08));
+  --border-subtle: var(--vscode-widget-border, rgba(255,255,255,0.04));
+  --text-primary: var(--vscode-foreground, #d4d2cc);
+  --text-secondary: var(--vscode-descriptionForeground, #a0a0a0);
+  --text-muted: var(--vscode-descriptionForeground, #888);
+}
+
 /* Palace install banner */
 .opide-memory-palace .palace-install-banner{
   position: absolute;
