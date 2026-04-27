@@ -12,13 +12,29 @@
     "fs:allow-remove",
     "fs:allow-rename",
     "fs:allow-exists",
-    "fs:allow-stat",
-    "fs:allow-lstat",
     "fs:allow-mkdir",
     "fs:scope-home-recursive",
     "fs:scope-desktop-recursive",
     "fs:scope-download-recursive",
     "fs:scope-document-recursive",
+    {
+      "identifier": "fs:allow-stat",
+      "allow": [
+        { "path": "$HOME/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-lstat",
+      "allow": [
+        { "path": "$HOME/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD/**" }
+      ]
+    },
     "dialog:default",
     "dialog:allow-open",
     "shell:default",
