@@ -11,6 +11,10 @@ pub struct SourceFile {
     pub relative_path: String,
     pub language: Language,
     pub size: u64,
+    /// B182: when the file exceeds EMBED_CAP we still parse its symbols
+    /// and dependencies but skip generating an embedding for it. AST
+    /// queries still work; semantic search ignores it.
+    pub skip_embedding: bool,
 }
 
 /// Scan a workspace directory for source files.
@@ -27,76 +31,75 @@ pub fn scan_workspace(root: &Path) -> Vec<SourceFile> {
         .max_depth(Some(20))   // don't recurse infinitely
         .build();
 
+    // B181: consolidated trailing-segment matcher. Names hit anywhere in
+    // the path tree (so `/foo/node_modules/bar/baz.js` skips even if it
+    // wasn't the relative-prefix). The previous code split the check
+    // between substring and `relative.starts_with` which both leaked
+    // (e.g. `cache/x.ts` at the root passed the relative-prefix check
+    // but caught the substring; nested `vendor/` was missed by some).
+    const SKIP_DIR_NAMES: &[&str] = &[
+        "node_modules", ".git", "target", "dist", "build", ".next", ".nuxt",
+        "vendor", ".gradle", "out", ".cache", "bazel-out", ".bazel",
+        ".idea", ".svn", ".hg", "__pycache__", "venv", ".venv", "env",
+        "coverage", ".nyc_output", ".parcel-cache", ".swc", ".turbo",
+        ".terraform", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+        // Solidity / Foundry / Hardhat
+        "deployments", "artifacts", "cache_forge", "typechain-types",
+    ];
+
+    // B182: two-tier file size policy.
+    //   - HARD_CAP: completely skip (binary files, bundles, gigantic generated code)
+    //   - EMBED_CAP: still index symbols/structure, but mark `skip_embedding`
+    //     so embeddings don't waste tokens on huge files.
+    const HARD_CAP: u64 = 5_000_000;
+    const EMBED_CAP: u64 = 1_000_000;
+
     for entry in walker.flatten() {
         let path = entry.path();
 
-        // Skip directories
         if path.is_dir() {
             continue;
         }
 
-        // Skip known non-source directories (deployment artifacts, build output, etc.)
-        let path_str = path.to_string_lossy();
-        if path_str.contains("/deployments/")
-            || path_str.contains("/artifacts/")
-            || path_str.contains("/cache/")
-            || path_str.contains("/out/")
-            || path_str.contains("/typechain-types/")
-        {
+        // Skip if any path component matches a skip-dir name.
+        let in_skip_dir = path.components().any(|c| {
+            c.as_os_str()
+                .to_str()
+                .map(|s| SKIP_DIR_NAMES.iter().any(|skip| s == *skip))
+                .unwrap_or(false)
+        });
+        if in_skip_dir {
             continue;
         }
 
-        // Skip files we can't read
         let metadata = match std::fs::metadata(path) {
             Ok(m) => m,
             Err(_) => continue,
         };
 
-        // Skip files larger than 1MB (binary files, bundles, etc.)
-        if metadata.len() > 1_000_000 {
+        if metadata.len() > HARD_CAP {
             continue;
         }
+        let skip_embedding = metadata.len() > EMBED_CAP;
 
-        // Detect language from extension
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language = Language::from_extension(ext);
-
-        // Only include parseable source files
         if !language.is_parseable() {
             continue;
         }
 
-        // Build relative path
         let relative = path
             .strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
 
-        // Skip common non-source directories that might slip through
-        if relative.starts_with("node_modules/")
-            || relative.starts_with(".git/")
-            || relative.starts_with("target/")
-            || relative.starts_with("dist/")
-            || relative.starts_with("build/")
-            || relative.starts_with(".next/")
-            || relative.contains("/node_modules/")
-            || relative.starts_with("vendor/")      // Go vendor directory
-            || relative.contains("/vendor/")
-            || relative.starts_with(".gradle/")     // Java Gradle cache
-        {
-            continue;
-        }
-
         files.push(SourceFile {
             path: path.to_path_buf(),
             relative_path: relative,
             language,
             size: metadata.len(),
+            skip_embedding,
         });
     }
 
@@ -106,69 +109,102 @@ pub fn scan_workspace(root: &Path) -> Vec<SourceFile> {
     files
 }
 
-/// Detect project framework from config files and dependencies.
-pub fn detect_framework(root: &Path) -> Option<String> {
-    // Check package.json
+/// Detect project frameworks from config files and dependencies.
+///
+/// B184: returns *all* detected frameworks instead of the first match.
+/// Many real projects are polyglot (a Next.js app with a Tailwind UI and
+/// a Solidity contracts/ subdir, a Rust workspace that also ships a
+/// React frontend), so reporting only the first hit hid relevant context
+/// from the agent.
+pub fn detect_frameworks(root: &Path) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+
     let pkg_path = root.join("package.json");
     if let Ok(content) = std::fs::read_to_string(&pkg_path) {
         if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
-            let deps = pkg.get("dependencies")
-                .and_then(|d| d.as_object())
-                .map(|d| d.keys().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-
-            if deps.iter().any(|d| d == "next") { return Some("Next.js".to_string()); }
-            if deps.iter().any(|d| d == "nuxt") { return Some("Nuxt".to_string()); }
-            if deps.iter().any(|d| d == "svelte") { return Some("Svelte".to_string()); }
-            if deps.iter().any(|d| d == "vue") { return Some("Vue".to_string()); }
-            if deps.iter().any(|d| d == "react") { return Some("React".to_string()); }
-            if deps.iter().any(|d| d == "express") { return Some("Express".to_string()); }
-            if deps.iter().any(|d| d == "fastify") { return Some("Fastify".to_string()); }
+            let mut deps_set: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for key in &["dependencies", "devDependencies"] {
+                if let Some(d) = pkg.get(key).and_then(|d| d.as_object()) {
+                    for k in d.keys() {
+                        deps_set.insert(k.clone());
+                    }
+                }
+            }
+            // Order matters: most specific stack wins the framework name,
+            // generic libs come after.
+            if deps_set.contains("astro") {
+                found.push("Astro".into());
+            }
+            if deps_set.contains("@sveltejs/kit") {
+                found.push("SvelteKit".into());
+            } else if deps_set.contains("svelte") {
+                found.push("Svelte".into());
+            }
+            if deps_set.contains("next") {
+                found.push("Next.js".into());
+            }
+            if deps_set.contains("nuxt") {
+                found.push("Nuxt".into());
+            }
+            if deps_set.contains("@remix-run/react") {
+                found.push("Remix".into());
+            }
+            if deps_set.contains("solid-js") {
+                found.push("SolidJS".into());
+            }
+            if deps_set.contains("react") && !deps_set.contains("next") {
+                found.push("React".into());
+            }
+            if deps_set.contains("vue") && !deps_set.contains("nuxt") {
+                found.push("Vue".into());
+            }
+            if deps_set.contains("express") {
+                found.push("Express".into());
+            }
+            if deps_set.contains("fastify") {
+                found.push("Fastify".into());
+            }
+            if deps_set.contains("tailwindcss") {
+                found.push("Tailwind".into());
+            }
         }
     }
-
-    // Check Cargo.toml
     if root.join("Cargo.toml").exists() {
-        return Some("Rust".to_string());
+        found.push("Rust".into());
     }
-
-    // Check pyproject.toml or setup.py
     if root.join("pyproject.toml").exists() || root.join("setup.py").exists() {
-        return Some("Python".to_string());
+        found.push("Python".into());
     }
-
-    // Solidity — foundry or hardhat
     if root.join("foundry.toml").exists() {
-        return Some("Solidity/Foundry".to_string());
+        found.push("Solidity/Foundry".into());
     }
     if root.join("hardhat.config.js").exists() || root.join("hardhat.config.ts").exists() {
-        return Some("Solidity/Hardhat".to_string());
+        found.push("Solidity/Hardhat".into());
     }
-
-    // Go
     if root.join("go.mod").exists() {
-        return Some("Go".to_string());
+        found.push("Go".into());
     }
-
-    // Java
     if root.join("pom.xml").exists() {
-        return Some("Java/Maven".to_string());
+        found.push("Java/Maven".into());
     }
     if root.join("build.gradle").exists() || root.join("build.gradle.kts").exists() {
-        return Some("Java/Gradle".to_string());
+        found.push("Java/Gradle".into());
     }
-
-    // Ruby
     if root.join("Gemfile").exists() {
-        return Some("Ruby".to_string());
+        found.push("Ruby".into());
     }
-
-    // C/C++
     if root.join("CMakeLists.txt").exists() {
-        return Some("C/C++".to_string());
+        found.push("C/C++".into());
     }
+    found
+}
 
-    None
+/// Backwards-compatible single-framework wrapper. ProjectIndex.framework
+/// is still `Option<String>`; callers that want the full set should
+/// switch to `detect_frameworks` directly.
+pub fn detect_framework(root: &Path) -> Option<String> {
+    detect_frameworks(root).into_iter().next()
 }
 
 /// Extract package dependencies from package.json or Cargo.toml.
@@ -192,14 +228,36 @@ pub fn extract_package_deps(root: &Path) -> Vec<String> {
 }
 
 /// Find entry point files.
+/// B183: extended the candidate list with modern-framework entry points
+/// (Astro, SvelteKit, Next.js app/, Remix, Nuxt 3, SolidStart) and added
+/// JSX/JS variants so React projects without TS still resolve.
 pub fn find_entry_points(root: &Path) -> Vec<String> {
     let candidates = [
-        "src/main.tsx", "src/main.ts", "src/index.tsx", "src/index.ts",
+        // React / Vite / generic JS/TS
+        "src/main.tsx", "src/main.ts", "src/main.jsx", "src/main.js",
+        "src/index.tsx", "src/index.ts", "src/index.jsx", "src/index.js",
+        // Astro
+        "src/pages/index.astro", "astro.config.mjs", "astro.config.ts",
+        // SvelteKit
+        "src/routes/+page.svelte", "src/app.html",
+        // Next.js (app router + pages router)
+        "app/page.tsx", "app/page.jsx", "pages/index.tsx", "pages/index.jsx", "pages/_app.tsx",
+        // Remix / SolidStart
+        "app/root.tsx", "src/entry-server.tsx",
+        // Nuxt
+        "app.vue", "nuxt.config.ts",
+        // Rust
         "src/main.rs", "src/lib.rs",
-        "src/app.py", "main.py", "app.py",
-        "index.html", "index.js", "index.ts",
+        // Python
+        "src/app.py", "main.py", "app.py", "src/__init__.py",
+        // Web
+        "index.html", "public/index.html", "index.js", "index.ts",
+        // Go
         "main.go", "cmd/main.go",
+        // Java
         "Main.java", "src/main/java/Main.java",
+        // Ruby
+        "config.ru", "app.rb",
     ];
 
     candidates

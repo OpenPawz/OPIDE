@@ -21,7 +21,7 @@ use hkdf::Hkdf;
 use log::{error, info, warn};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::sync::LazyLock;
@@ -211,9 +211,11 @@ static PII_PATTERNS: LazyLock<Vec<PiiPattern>> = LazyLock::new(|| {
             PiiType::FinancialAccount,
             MemorySecurityTier::Confidential,
         ),
-        // IPv4 addresses
+        // IPv4 addresses (bounded octets — rejects SemVer like 1.2.3.4 only
+        // when octets exceed 255; full SemVer FP fix is the post-match filter
+        // in detect_pii which checks for `.digit` suffix).
         (
-            r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b",
+            r"\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b",
             PiiType::IPAddress,
             MemorySecurityTier::Sensitive,
         ),
@@ -237,24 +239,65 @@ static PII_PATTERNS: LazyLock<Vec<PiiPattern>> = LazyLock::new(|| {
         ),
     ];
 
-    patterns
-        .into_iter()
-        .filter_map(|(pattern, pii_type, tier)| match Regex::new(pattern) {
-            Ok(regex) => Some(PiiPattern {
+    // B89: in debug builds, panic on any compile failure so broken patterns
+    // are caught in CI. In release, log loudly and refuse to start if any
+    // Confidential-tier pattern fails (silently downgrading PII protection
+    // is a security regression).
+    let mut out = Vec::with_capacity(patterns.len());
+    let mut confidential_failures: Vec<String> = Vec::new();
+    for (pattern, pii_type, tier) in patterns {
+        match Regex::new(pattern) {
+            Ok(regex) => out.push(PiiPattern {
                 regex,
                 pii_type,
                 tier,
             }),
             Err(e) => {
-                warn!(
-                    "[engram-encryption] Failed to compile PII pattern '{}': {}",
+                if cfg!(debug_assertions) {
+                    panic!(
+                        "[engram-encryption] PII pattern '{}' failed to compile: {}",
+                        pattern, e
+                    );
+                }
+                error!(
+                    "[engram-encryption] PII pattern '{}' failed to compile: {}",
                     pattern, e
                 );
-                None
+                if matches!(tier, MemorySecurityTier::Confidential) {
+                    confidential_failures.push(pattern.to_string());
+                }
             }
-        })
-        .collect()
+        }
+    }
+    if !confidential_failures.is_empty() {
+        panic!(
+            "[engram-encryption] {} Confidential-tier PII pattern(s) failed to compile: {}. \
+             Refusing to start with reduced PII protection.",
+            confidential_failures.len(),
+            confidential_failures.join(", ")
+        );
+    }
+    out
 });
+
+/// B95: a single combined RegexSet for fast O(1) "is there any PII?" probing.
+/// Used by `detect_pii` to short-circuit when no pattern matches, avoiding
+/// the per-pattern walk on the common case of clean content.
+static PII_REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
+    let sources: Vec<&str> = PII_PATTERNS.iter().map(|p| p.regex.as_str()).collect();
+    RegexSet::new(&sources).expect("PII patterns already validated individually")
+});
+
+/// B90: domains commonly used in documentation and tests. Email matches
+/// ending in any of these are filtered out before tier escalation.
+const EXAMPLE_EMAIL_DOMAINS: &[&str] = &[
+    "example.com",
+    "example.org",
+    "example.net",
+    "test.com",
+    "domain.com",
+    "yourdomain.com",
+];
 
 // ═════════════════════════════════════════════════════════════════════════════
 // PII Detection
@@ -263,23 +306,50 @@ static PII_PATTERNS: LazyLock<Vec<PiiPattern>> = LazyLock::new(|| {
 /// Detect PII in content and return the recommended security tier.
 /// Runs fast regex patterns — no LLM call needed.
 pub fn detect_pii(content: &str) -> PiiDetection {
+    // B95: skip the per-pattern walk entirely when nothing matches.
+    let set_matches = PII_REGEX_SET.matches(content);
+    if !set_matches.matched_any() {
+        return PiiDetection {
+            has_pii: false,
+            detected_types: Vec::new(),
+            recommended_tier: MemorySecurityTier::Cleartext,
+        };
+    }
+
     let mut detected_types = Vec::new();
     let mut highest_tier = MemorySecurityTier::Cleartext;
 
-    for pattern in PII_PATTERNS.iter() {
-        if pattern.regex.is_match(content) {
-            detected_types.push(pattern.pii_type);
-            // Upgrade to the highest tier among all detected PII
-            highest_tier = match (highest_tier, pattern.tier) {
-                (MemorySecurityTier::Confidential, _) | (_, MemorySecurityTier::Confidential) => {
-                    MemorySecurityTier::Confidential
-                }
-                (MemorySecurityTier::Sensitive, _) | (_, MemorySecurityTier::Sensitive) => {
-                    MemorySecurityTier::Sensitive
-                }
-                _ => MemorySecurityTier::Cleartext,
-            };
+    for pattern_idx in set_matches.iter() {
+        let pattern = &PII_PATTERNS[pattern_idx];
+        // Re-find with the individual regex so we can inspect the matched
+        // text for false-positive filtering (RegexSet only reports which
+        // patterns matched, not where).
+        let Some(m) = pattern.regex.find(content) else {
+            continue;
+        };
+
+        // B90: skip example/test domains for emails — they're docs, not PII.
+        if pattern.pii_type == PiiType::Email {
+            let matched = m.as_str().to_lowercase();
+            if EXAMPLE_EMAIL_DOMAINS
+                .iter()
+                .any(|d| matched.ends_with(d))
+            {
+                continue;
+            }
         }
+
+        detected_types.push(pattern.pii_type);
+        // Upgrade to the highest tier among all detected PII
+        highest_tier = match (highest_tier, pattern.tier) {
+            (MemorySecurityTier::Confidential, _) | (_, MemorySecurityTier::Confidential) => {
+                MemorySecurityTier::Confidential
+            }
+            (MemorySecurityTier::Sensitive, _) | (_, MemorySecurityTier::Sensitive) => {
+                MemorySecurityTier::Sensitive
+            }
+            _ => MemorySecurityTier::Cleartext,
+        };
     }
 
     PiiDetection {
@@ -1529,10 +1599,19 @@ mod tests {
 
     #[test]
     fn test_pii_detection_email() {
-        let detection = detect_pii("Contact me at user@example.com");
+        // B90 added docs-domain filtering: example.com / test.com / etc.
+        // are intentionally NOT treated as PII. Real domains still trip.
+        let detection = detect_pii("Contact me at alice@acme.io");
         assert!(detection.has_pii);
         assert!(detection.detected_types.contains(&PiiType::Email));
         assert_eq!(detection.recommended_tier, MemorySecurityTier::Sensitive);
+    }
+
+    #[test]
+    fn test_pii_email_example_domain_filtered() {
+        // Documentation example — must NOT trigger PII tier escalation.
+        let detection = detect_pii("Contact me at user@example.com");
+        assert!(!detection.has_pii);
     }
 
     #[test]

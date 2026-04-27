@@ -11,7 +11,7 @@
 use log::{error, info, warn};
 use tauri::{Emitter, Manager, State};
 
-use crate::commands::state::{normalize_model_name, resolve_provider_for_model, EngineState};
+use crate::commands::state::{resolve_provider_for_model, EngineState};
 use crate::engine::agent_loop;
 use crate::engine::chat as chat_org;
 use crate::engine::engram;
@@ -106,7 +106,8 @@ pub async fn engine_chat_send(
                         .clone()
                         .unwrap_or_else(|| "gpt-4o".to_string())
                 } else {
-                    normalize_model_name(&raw).to_string()
+                    // B174: notify on alias rewrites so the UI can surface the swap.
+                    crate::engine::state::normalize_model_name_with_notice(&raw, Some(&app_handle))
                 };
                 let p = resolve_provider_for_model(&m, &cfg.providers)
                     .or_else(|| {
@@ -181,7 +182,8 @@ pub async fn engine_chat_send(
             );
         }
 
-        let model = normalize_model_name(&model).to_string();
+        // B174: same alias-rewrite notice on the second resolution path.
+        let model = crate::engine::state::normalize_model_name_with_notice(&model, Some(&app_handle));
 
         let provider = if let Some(pid) = &request.provider_id {
             cfg.providers.iter().find(|p| p.id == *pid).cloned()
@@ -248,6 +250,7 @@ pub async fn engine_chat_send(
         tool_call_id: None,
         name: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        tool_success: None,
     };
     state.store.add_message(&user_msg)?;
 
@@ -476,8 +479,36 @@ pub async fn engine_chat_send(
     // These were missing from the ContextBuilder path, causing the agent to lose
     // self-awareness of what OpenPawz is and what tools/capabilities it has.
     // In OPIDE: use IDE prompts instead of generic OpenPawz platform awareness.
+    //
+    // B197: inject the active workspace path so the agent thinks of paths
+    // relative to the user's project. Operations outside the workspace
+    // require user approval (enforced server-side in host_api.rs).
+    let workspace_block = {
+        let ws = state.active_workspace.lock().clone();
+        match ws.as_deref() {
+            Some(path) if !path.is_empty() => format!(
+                "\n\n## Active workspace\n\
+                 The user's open project is at `{}`. Treat this folder as your default \
+                 working directory. Prefer relative paths inside this tree. Writes \
+                 outside the workspace are still possible but will require explicit \
+                 user approval through the IDE's review panel — only step outside the \
+                 project when the user has clearly asked you to.",
+                path,
+            ),
+            _ => "\n\n## Active workspace\n\
+                  No workspace is currently open in OPIDE. Suggest the user open a \
+                  folder (or call `ide_open_workspace` if they tell you a path) before \
+                  doing project work. File writes outside an obvious temp dir will \
+                  require explicit user approval.".to_string(),
+        }
+    };
     builder = builder.platform_awareness(
-        format!("{}\n\n{}", chat_org::build_ide_platform_prompt(), chat_org::build_ide_coding_guidelines())
+        format!(
+            "{}\n\n{}{}",
+            chat_org::build_ide_platform_prompt(),
+            chat_org::build_ide_coding_guidelines(),
+            workspace_block,
+        )
     );
     // Use IDE-specific MCP note instead of foreman.md — keeps n8n/Slack/worker
     // model instructions (and the "Architect vs Foreman" framing) out of OPIDE.
@@ -880,6 +911,18 @@ pub async fn engine_chat_send(
                                     continue;
                                 }
                             }
+                            // B190: best-effort populate tool_success from the
+                            // serialized content. The agent loop emits tool
+                            // results as `Error: ...` on failure (see
+                            // tools/mod.rs::dispatch's `output: format!("Error: {}", err)`
+                            // path) so we can recover that signal cheaply
+                            // without threading ToolResult through Message.
+                            let tool_success = if msg.role == Role::Tool {
+                                let text = msg.content.as_text();
+                                Some(!text.starts_with("Error:") && !text.starts_with("ERROR"))
+                            } else {
+                                None
+                            };
                             let stored = StoredMessage {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 session_id: session_id_clone.clone(),
@@ -896,6 +939,7 @@ pub async fn engine_chat_send(
                                 tool_call_id: msg.tool_call_id.clone(),
                                 name: msg.name.clone(),
                                 created_at: chrono::Utc::now().to_rfc3339(),
+                                tool_success,
                             };
                             if let Err(e) = engine_state.store.add_message(&stored) {
                                 error!("[engine] Failed to store message: {}", e);
@@ -1333,6 +1377,36 @@ pub async fn engine_session_compact(
 }
 
 // ── Tool approval ─────────────────────────────────────────────────────────────
+
+/// B197: tell the engine which folder Monaco currently has open. Called by
+/// the frontend's `open-workspace` listener so `host_api.rs` and the system
+/// prompt builder can use the path to enforce workspace confinement
+/// (writes outside the project require approval) and to steer the agent.
+///
+/// Pass `None`/empty to clear (no workspace open).
+#[tauri::command]
+pub fn engine_set_active_workspace(
+    state: State<'_, EngineState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let normalized = path.and_then(|p| {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    let mut guard = state
+        .active_workspace
+        .lock();
+    *guard = normalized.clone();
+    log::info!(
+        "[engine] active workspace set to {}",
+        normalized.as_deref().unwrap_or("(none)")
+    );
+    Ok(())
+}
 
 #[tauri::command]
 pub fn engine_approve_tool(

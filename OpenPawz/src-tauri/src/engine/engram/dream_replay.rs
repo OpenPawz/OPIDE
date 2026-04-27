@@ -162,26 +162,65 @@ async fn phase_reembed_stale(
 
     let candidates = store.engram_list_episodic_without_embeddings(MAX_REEMBED_PER_CYCLE)?;
 
-    let mut re_embedded = 0;
-    for mem in &candidates {
-        match client.embed(&mem.content.full).await {
-            Ok(embedding) => {
-                store.engram_update_episodic_embedding(&mem.id, &embedding, client.model_name())?;
-                re_embedded += 1;
+    // B160: parallelise the re-embed pass with bounded concurrency and a
+    // wallclock budget. Sequential calls were the bottleneck for nightly
+    // dream-replay on databases with hundreds of stale memories.
+    use futures::stream::StreamExt;
+    const REEMBED_CONCURRENCY: usize = 4;
+    const PHASE_2_BUDGET_MS: u128 = 30_000;
+    let phase_start = std::time::Instant::now();
+
+    // Build (id, text) pairs for embedding; B157 logic preserved.
+    let jobs: Vec<(String, String)> = candidates
+        .iter()
+        .filter_map(|mem| {
+            if super::encryption::is_encrypted(&mem.content.full) {
+                match mem.content.summary.as_deref() {
+                    Some(s) if !s.is_empty() => Some((mem.id.clone(), s.to_string())),
+                    _ => {
+                        log::debug!(
+                            "[engram::dream] Skipping re-embed of '{}' — encrypted, no summary",
+                            mem.id
+                        );
+                        None
+                    }
+                }
+            } else {
+                Some((mem.id.clone(), mem.content.full.clone()))
             }
-            Err(e) => {
-                warn!(
-                    "[engram::dream] Phase 2: failed to re-embed {}: {}",
-                    mem.id, e
-                );
+        })
+        .collect();
+
+    let stream = futures::stream::iter(jobs.into_iter().map(|(id, text)| {
+        async move {
+            if phase_start.elapsed().as_millis() >= PHASE_2_BUDGET_MS {
+                return None;
+            }
+            match client.embed(&text).await {
+                Ok(embedding) => Some((id, embedding)),
+                Err(e) => {
+                    warn!("[engram::dream] Phase 2: failed to re-embed {}: {}", id, e);
+                    None
+                }
             }
         }
+    }));
+
+    let results: Vec<Option<(String, Vec<f32>)>> = stream
+        .buffer_unordered(REEMBED_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut re_embedded = 0;
+    for (id, embedding) in results.into_iter().flatten() {
+        store.engram_update_episodic_embedding(&id, &embedding, client.model_name())?;
+        re_embedded += 1;
     }
 
     if re_embedded > 0 {
         info!(
-            "[engram::dream] Phase 2: re-embedded {} stale memories",
-            re_embedded
+            "[engram::dream] Phase 2: re-embedded {} stale memories (parallel x{})",
+            re_embedded, REEMBED_CONCURRENCY
         );
     }
 
@@ -212,38 +251,47 @@ fn phase_discover_connections(store: &SessionStore, scope: &MemoryScope) -> Engi
 
     let mut new_edges = 0;
 
-    // Pairwise comparison (O(n²) but bounded by DISCOVERY_SAMPLE_SIZE)
+    // B164: pull existing outgoing edges per source ONCE instead of on
+    // every pair. The previous implementation did `engram_get_edges_from`
+    // inside the inner loop, turning the O(n²) similarity check into
+    // O(n²) DB hits. We also accumulate newly-added edges in-memory so
+    // a freshly-created edge isn't queried back from SQLite for the
+    // remaining pairs in this run.
     for i in 0..with_embeddings.len() {
         if new_edges >= MAX_NEW_EDGES_PER_CYCLE {
             break;
         }
+
+        let (mem_a, _) = with_embeddings[i];
+        let mut linked_to: std::collections::HashSet<String> = store
+            .engram_get_edges_from(&mem_a.id)?
+            .into_iter()
+            .map(|e| e.target_id)
+            .collect();
 
         for j in (i + 1)..with_embeddings.len() {
             if new_edges >= MAX_NEW_EDGES_PER_CYCLE {
                 break;
             }
 
-            let (mem_a, _) = with_embeddings[i];
             let (mem_b, _) = with_embeddings[j];
+            if linked_to.contains(&mem_b.id) {
+                continue;
+            }
 
             if let (Some(emb_a), Some(emb_b)) = (&mem_a.embedding, &mem_b.embedding) {
                 let sim = cosine_similarity(emb_a, emb_b);
                 if sim >= SIMILARITY_EDGE_THRESHOLD {
-                    // Check if edge already exists
-                    let existing = store.engram_get_edges_from(&mem_a.id)?;
-                    let already_linked = existing.iter().any(|e| e.target_id == mem_b.id);
-
-                    if !already_linked {
-                        let edge = MemoryEdge {
-                            source_id: mem_a.id.clone(),
-                            target_id: mem_b.id.clone(),
-                            edge_type: EdgeType::SimilarTo,
-                            weight: sim as f32,
-                            created_at: Utc::now().to_rfc3339(),
-                        };
-                        store.engram_add_edge(&edge)?;
-                        new_edges += 1;
-                    }
+                    let edge = MemoryEdge {
+                        source_id: mem_a.id.clone(),
+                        target_id: mem_b.id.clone(),
+                        edge_type: EdgeType::SimilarTo,
+                        weight: sim as f32,
+                        created_at: Utc::now().to_rfc3339(),
+                    };
+                    store.engram_add_edge(&edge)?;
+                    linked_to.insert(mem_b.id.clone());
+                    new_edges += 1;
                 }
             }
         }

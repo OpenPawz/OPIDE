@@ -56,6 +56,22 @@ function needsApprovalFor(_tier: string, toolName: string): boolean {
   return true
 }
 
+// ─── Completed-run-id tracking (capped) ─────────────────────────────────────
+
+const MAX_COMPLETED_RUN_IDS = 64
+
+/** Add a runId to the completed set, evicting the oldest if we exceed the cap. */
+export function markRunCompleted(runId: string): void {
+  if (!runId) return
+  if (S.completedRunIds.has(runId)) return
+  S.completedRunIds.add(runId)
+  if (S.completedRunIds.size > MAX_COMPLETED_RUN_IDS) {
+    // Set preserves insertion order — first is oldest.
+    const first = S.completedRunIds.values().next().value
+    if (first) S.completedRunIds.delete(first)
+  }
+}
+
 // ─── SSE Listener ────────────────────────────────────────────────────────────
 
 export async function ensureListening(): Promise<void> {
@@ -104,7 +120,9 @@ export async function ensureListening(): Promise<void> {
       }
       case 'tool_request': {
         const ev = payload as Extract<EngineEvent, { kind: 'tool_request' }>
-        showToolRequest(ev)
+        // showToolRequest is async (it awaits the pre-write file snapshot for B16)
+        // but the event handler itself is sync — fire-and-forget with error log.
+        showToolRequest(ev).catch((e) => console.warn('[opide-chat] showToolRequest failed:', e))
         break
       }
       case 'tool_result': {
@@ -140,32 +158,45 @@ export async function ensureListening(): Promise<void> {
 
 // ─── Tool Request ────────────────────────────────────────────────────────────
 
-function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }>): void {
+async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }>): Promise<void> {
   const tier = ev.tool_tier || 'unknown'
-  const needsApproval = needsApprovalFor(tier, ev.tool_call.name)
+  // B202: ToolCall is `{ id, type, function: { name, arguments } }` —
+  // the previous flat-shape reads (`ev.tool_call.name`,
+  // `ev.tool_call.arguments`) returned undefined on every event and
+  // tripped a TypeError on `.slice` that the listener's .catch
+  // silently swallowed. Pull from the nested `function` object now,
+  // matching the Rust serialization.
+  const toolName = ev.tool_call.function?.name ?? '(unknown)'
+  const toolArgs = ev.tool_call.function?.arguments ?? ''
+  const needsApproval = needsApprovalFor(tier, toolName)
 
   S.pendingToolCalls.set(ev.tool_call.id, { call: ev.tool_call })
 
-  if (IDE_REVIEWED_TOOLS.has(ev.tool_call.name)) {
+  if (IDE_REVIEWED_TOOLS.has(toolName)) {
     S.messages.push({
       role: 'tool',
-      content: `Reviewing edit in diff editor: **${ev.tool_call.name}**`,
+      content: `Reviewing edit in diff editor: **${toolName}**`,
       ts: new Date(),
     })
     renderMessages()
   }
 
-  if (WRITE_TOOLS.has(ev.tool_call.name)) {
+  // Snapshot the file BEFORE the tool runs so the diff is accurate.
+  // Awaited synchronously so the tool_result handler always sees `preContent`
+  // populated (or knows the read genuinely failed). Without the await, fast
+  // tools could complete before the read resolved → diff path saw `undefined`
+  // and fell back to "all lines added" (B16).
+  if (WRITE_TOOLS.has(toolName)) {
     try {
-      const args = JSON.parse(ev.tool_call.arguments || '{}')
+      const args = JSON.parse(toolArgs || '{}')
       const path = args.path || args.file_path || args.filename
       if (path) {
-        import('@tauri-apps/plugin-fs').then(({ readTextFile }) =>
-          readTextFile(path).then(content => {
-            const pending = S.pendingToolCalls.get(ev.tool_call.id)
-            if (pending) pending.preContent = content
-          }).catch(() => {})
-        )
+        const { readTextFile } = await import('@tauri-apps/plugin-fs')
+        try {
+          const content = await readTextFile(path)
+          const pending = S.pendingToolCalls.get(ev.tool_call.id)
+          if (pending) pending.preContent = content
+        } catch { /* file may not exist yet — leave preContent undefined */ }
       }
     } catch { /* args not JSON */ }
   }
@@ -173,47 +204,96 @@ function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }>): vo
   if (needsApproval) {
     S.messages.push({
       role: 'tool',
-      content: `Tool requires approval: **${ev.tool_call.name}**\nTier: ${tier}\nArgs: \`${ev.tool_call.arguments.slice(0, 200)}\``,
+      content: `Tool requires approval: **${toolName}**\nTier: ${tier}\nArgs: \`${toolArgs.slice(0, 200)}\``,
       ts: new Date(),
-      toolName: ev.tool_call.name,
+      toolName,
     })
     renderMessages()
-    addApprovalButtons(ev.tool_call.id)
+    addApprovalButtons(ev.tool_call.id, toolName, tier)
   } else {
-    updateStatus(`Running: ${ev.tool_call.name}`)
-    showToolIndicator(ev.tool_call.name)
+    updateStatus(`Running: ${toolName}`)
+    showToolIndicator(toolName)
   }
 }
 
 // ─── Approval Buttons ────────────────────────────────────────────────────────
 
-function addApprovalButtons(toolCallId: string): void {
-  if (!S.msgList) return
-  const lastBubble = S.msgList.lastElementChild
-  if (!lastBubble) return
+/**
+ * Render an obvious, full-width approval row in the message list.
+ *
+ * The previous implementation appended the buttons inside the tool
+ * message's flex wrap (display:flex, child width:100%), which compressed
+ * the button row to zero width — the engine asked, the buttons existed
+ * in the DOM, but nothing visible appeared. The user reported "zero
+ * permission requests EVER" because of this. (Live repro 2026-04-26
+ * after B198 fixed the engine-side auto-approve bug.)
+ *
+ * Now: build a self-contained row, append it to msgList directly as a
+ * sibling of the message bubbles, with a clear "Approval needed" label
+ * and a faint background so it's hard to miss.
+ */
+/**
+ * Render the approval row inline inside the OPIDE chat panel as its own
+ * standalone message-list row.
+ *
+ * History:
+ *   B199 first attempt: appended buttons inside the tool-message bubble's
+ *     flex wrap → child width:100% squashed btnRow to 0px (invisible).
+ *   B201: switched to a fixed-position body overlay. Always visible, but
+ *     in the *middle of the IDE window*, not the chat panel — the user
+ *     was looking at the chat and missed it.
+ *   This version: standalone row appended to S.msgList (the chat
+ *     message list itself). Lives in the same scroll container as the
+ *     conversation, scrolls into view automatically. Falls back to
+ *     body-level overlay only if S.msgList is genuinely missing.
+ */
+function addApprovalButtons(toolCallId: string, toolName: string, tier: string): void {
+  const row = document.createElement('div')
+  row.dataset.approvalForToolCall = toolCallId
+  row.style.cssText = [
+    'display:flex',
+    'align-items:center',
+    'gap:8px',
+    'margin:6px 14px',
+    'padding:10px 12px',
+    'border-radius:6px',
+    'background:rgba(212,168,67,0.08)',
+    'border:1px solid rgba(212,168,67,0.4)',
+  ].join(';')
 
-  const btnRow = document.createElement('div')
-  btnRow.style.cssText = 'display:flex;gap:6px;padding:4px 12px'
+  const label = document.createElement('span')
+  label.style.cssText = 'flex:1;font-size:12px;color:var(--vscode-foreground);line-height:1.4'
+  label.innerHTML = `<strong style="color:#d4a843">Approval needed</strong> <code style="font-family:var(--vscode-editor-font-family,monospace);font-size:11px;opacity:0.85">${toolName}</code> <span style="opacity:0.55;font-size:10px">(${tier})</span>`
+  row.appendChild(label)
 
   const approveBtn = document.createElement('button')
   approveBtn.textContent = 'Approve'
-  approveBtn.style.cssText = 'background:#2ea043;color:white;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer'
+  approveBtn.style.cssText = 'background:#2ea043;color:white;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500'
   approveBtn.addEventListener('click', () => {
     invoke('engine_approve_tool', { sessionId: S.sessionId, toolCallId, approved: true }).catch(console.error)
-    btnRow.remove()
+    row.remove()
   })
 
   const denyBtn = document.createElement('button')
   denyBtn.textContent = 'Deny'
-  denyBtn.style.cssText = 'background:#da3633;color:white;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer'
+  denyBtn.style.cssText = 'background:#da3633;color:white;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500'
   denyBtn.addEventListener('click', () => {
     invoke('engine_approve_tool', { sessionId: S.sessionId, toolCallId, approved: false }).catch(console.error)
-    btnRow.remove()
+    row.remove()
   })
 
-  btnRow.appendChild(approveBtn)
-  btnRow.appendChild(denyBtn)
-  lastBubble.appendChild(btnRow)
+  row.appendChild(approveBtn)
+  row.appendChild(denyBtn)
+
+  if (S.msgList) {
+    S.msgList.appendChild(row)
+    S.msgList.scrollTop = S.msgList.scrollHeight
+  } else {
+    // Last-resort fallback: chat panel hasn't mounted, attach to body so the
+    // approval is at least clickable somewhere. Should be rare in practice
+    // because the chat panel is always registered before any agent run.
+    document.body.appendChild(row)
+  }
 }
 
 // ─── Tool Result ─────────────────────────────────────────────────────────────
@@ -225,18 +305,28 @@ function handleToolResult(ev: Extract<EngineEvent, { kind: 'tool_result' }>): vo
   const pending = S.pendingToolCalls.get(ev.tool_call_id)
   S.pendingToolCalls.delete(ev.tool_call_id)
 
+  // Preserve the full output on `content` (used by the expand panel) and
+  // derive a short single-line `preview` for the collapsed card row.
+  const fullOutput = ev.output ?? ''
+  const PREVIEW_MAX = 80
+  const flat = fullOutput.replace(/\s+/g, ' ').trim()
+  const preview = flat.length > PREVIEW_MAX ? flat.slice(0, PREVIEW_MAX) + '…' : flat
+
   const msg: ChatMsg = {
     role: 'tool',
-    content: ev.output.slice(0, 500) + (ev.output.length > 500 ? '…' : ''),
+    content: fullOutput,
+    preview,
     ts: new Date(),
     toolSuccess: ev.success,
     toolDuration: ev.duration_ms,
-    toolName: pending?.call.name,
+    toolName: pending?.call.function?.name,
   }
 
-  if (pending && WRITE_TOOLS.has(pending.call.name) && !IDE_REVIEWED_TOOLS.has(pending.call.name) && ev.success) {
+  // B202: same nested-shape fix here.
+  const pendingName = pending?.call.function?.name
+  if (pending && pendingName && WRITE_TOOLS.has(pendingName) && !IDE_REVIEWED_TOOLS.has(pendingName) && ev.success) {
     try {
-      const args = JSON.parse(pending.call.arguments || '{}')
+      const args = JSON.parse(pending.call.function?.arguments || '{}')
       const path = args.path || args.file_path || args.filename
       if (path) {
         msg.filePath = path
@@ -257,6 +347,12 @@ function handleToolResult(ev: Extract<EngineEvent, { kind: 'tool_result' }>): vo
   }
 
   S.messages.push(msg)
+  // B205: render now so _renderedCount stays in sync with S.messages.length.
+  // Without this, the count fell behind by one after each tool_result, then
+  // commitStreamingBubble's `_renderedCount++` would claim the wrong slot —
+  // finalizeStreaming's renderMessages loop then re-rendered the assistant
+  // message a second time, producing the visible "reply printed twice" bug.
+  renderMessages()
 
   if (S.planSteps.length > 0 && S.planStepIndex < S.planSteps.length) {
     S.planStepIndex++
@@ -305,7 +401,7 @@ function handleSurfaced(ev: Extract<EngineEvent, { kind: 'surfaced' }>): void {
   S.streamAccum = ''
   S.surfacedRound = ev.round
   S.surfacedSummary = ev.summary
-  if (S.runId) S.completedRunIds.add(S.runId)
+  if (S.runId) markRunCompleted(S.runId)
   S.runId = null
   hideToolIndicator()
   updateStatus('Surfaced — discuss then resume')
@@ -331,7 +427,7 @@ function finalizeStreaming(ev: Extract<EngineEvent, { kind: 'complete' }>): void
   S.streamAccum = ''
   // Mark this run as completed before clearing — so any delayed events arriving
   // after S.runId is null are still correctly identified and dropped.
-  if (S.runId) S.completedRunIds.add(S.runId)
+  if (S.runId) markRunCompleted(S.runId)
   S.runId = null
   S.completedRounds++
   hideToolIndicator()
@@ -376,7 +472,7 @@ function finalizeStreaming(ev: Extract<EngineEvent, { kind: 'complete' }>): void
           await invoke('git_checkpoint_restore', {
             repoPath: ws2,
             headSha: cp.head_sha,
-            stashIndex: cp.stash_index ?? undefined,
+            stashOid: cp.stash_oid ?? undefined,
           })
           revertBar.innerHTML = '<span class="codicon codicon-check" style="font-size:12px;color:#89d185"></span><span style="font-size:11px;color:var(--vscode-descriptionForeground)">Reverted to pre-agent state</span>'
           S.checkpoint = null

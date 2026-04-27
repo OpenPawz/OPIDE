@@ -17,9 +17,26 @@ import { getService, ICodeEditorService } from '@codingame/monaco-vscode-api/ser
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const DEBOUNCE_MS = 800      // Wait 800ms after typing stops
 const MAX_CONTEXT_LINES = 50 // Send at most 50 lines of context
-const ENABLED = true          // Can be toggled via settings
+
+// Hidden persistent session id used for completion requests so we don't create
+// an orphan session per keystroke. Filtered out of the session selector (B49).
+const COMPLETION_SESSION_ID = '__opide_completions__'
+
+/** Read enable state from VS Code config. Default: enabled. */
+async function isCompletionsEnabled(): Promise<boolean> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IConfigurationService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration'
+    )
+    const cfg = StandaloneServices.get(IConfigurationService) as any
+    const v = cfg?.getValue?.('opide.completions.enabled')
+    return v !== false
+  } catch {
+    return true
+  }
+}
 
 const COMPLETION_SYSTEM_PROMPT = `You are a code completion engine. Given code context up to the cursor position, output ONLY the next 1-5 lines of code that should follow. Rules:
 - Output raw code only — no markdown, no explanations, no fences.
@@ -29,22 +46,47 @@ const COMPLETION_SYSTEM_PROMPT = `You are a code completion engine. Given code c
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
-let _debounceTimer: ReturnType<typeof setTimeout> | null = null
-let _currentRunId: string | null = null
-let _unlisten: UnlistenFn | null = null
 let _lastSuggestion: string | null = null
 let _providerDisposable: any = null
 
+// Single shared listener for all completion runs. Each in-flight request
+// registers itself in `_completionResolvers` keyed by run_id, so events route
+// to the right caller without stacking listeners (B50).
+let _completionListener: UnlistenFn | null = null
+const _completionResolvers = new Map<string, (suggestion: string | null) => void>()
+const _completionAccum = new Map<string, string>()
+
+async function ensureCompletionListener(): Promise<void> {
+  if (_completionListener) return
+  _completionListener = await listen<any>('engine-event', ({ payload }) => {
+    if (!payload?.run_id) return
+    const resolve = _completionResolvers.get(payload.run_id)
+    if (!resolve) return
+    if (payload.kind === 'delta') {
+      const cur = _completionAccum.get(payload.run_id) ?? ''
+      _completionAccum.set(payload.run_id, cur + payload.text)
+    } else if (payload.kind === 'complete') {
+      const text = (payload.text || _completionAccum.get(payload.run_id) || '').trim()
+      _completionAccum.delete(payload.run_id)
+      _completionResolvers.delete(payload.run_id)
+      _lastSuggestion = text || null
+      resolve(_lastSuggestion)
+    }
+  })
+}
+
 // ─── Registration ─────────────────────────────────────────────────────────────
 
-export function registerGhostCompletions(): void {
-  if (!ENABLED) return
+export async function registerGhostCompletions(): Promise<void> {
+  if (!await isCompletionsEnabled()) {
+    console.log('[opide-completions] disabled via opide.completions.enabled — not registering')
+    return
+  }
 
   // We need to wait for the editor service to be available, then register
   // our inline completion provider on all languages.
   registerInlineProvider().catch((e) => {
     console.warn('[opide-completions] initial registration deferred, retrying in 3s:', e)
-    // Retry once after workbench is more likely ready
     setTimeout(() => registerInlineProvider().catch(console.warn), 3000)
   })
 
@@ -58,48 +100,31 @@ async function registerInlineProvider(): Promise<void> {
   // Dispose previous registration if re-registering
   _providerDisposable?.dispose()
 
-  // Register for all languages (wildcard)
+  // Register for all languages (wildcard).
+  // Monaco already debounces provideInlineCompletions and supplies a
+  // CancellationToken — drop the in-handler debounce (B51).
   _providerDisposable = monaco.languages.registerInlineCompletionsProvider(
     { pattern: '**' },
     {
       provideInlineCompletions: async (model: any, position: any, _context: any, token: any) => {
-        // Only trigger if the active editor matches this model
         const activeEditor = (editorService as any).getActiveCodeEditor?.()
         if (!activeEditor || activeEditor.getModel?.() !== model) {
           return { items: [] }
         }
-
-        // Don't trigger inside comments or strings if position is at start of line
-        // (simple heuristic — let the LLM decide for more complex cases)
-
-        // Get code before cursor
-        const range = new (monaco as any).Range(1, 1, position.lineNumber, position.column)
-        const codeBeforeCursor = model.getValueInRange(range)
-
-        // Debounce: cancel previous pending request
-        cancelCompletion()
-
-        // Check cancellation
         if (token.isCancellationRequested) return { items: [] }
 
-        // Wait for debounce
-        const shouldProceed = await new Promise<boolean>((resolve) => {
-          if (_debounceTimer) clearTimeout(_debounceTimer)
-          _debounceTimer = setTimeout(() => resolve(true), DEBOUNCE_MS)
-          token.onCancellationRequested(() => {
-            if (_debounceTimer) clearTimeout(_debounceTimer)
-            resolve(false)
-          })
-        })
-
-        if (!shouldProceed || token.isCancellationRequested) return { items: [] }
-
-        // Request completion from engine
+        const range = new (monaco as any).Range(1, 1, position.lineNumber, position.column)
+        const codeBeforeCursor = model.getValueInRange(range)
         const language = model.getLanguageId()
         const filePath = model.uri.fsPath || model.uri.path
-        const suggestion = await requestCompletion(codeBeforeCursor, filePath, language)
 
-        if (!suggestion || token.isCancellationRequested) return { items: [] }
+        // Note: cancellation propagates by abandoning the result if the token
+        // fires before requestCompletion resolves.
+        let cancelled = false
+        token.onCancellationRequested?.(() => { cancelled = true })
+
+        const suggestion = await requestCompletion(codeBeforeCursor, filePath, language)
+        if (cancelled || !suggestion) return { items: [] }
 
         return {
           items: [{
@@ -136,46 +161,27 @@ export async function requestCompletion(
   filePath: string,
   language: string,
 ): Promise<string | null> {
-  // Cancel any in-flight request
-  cancelCompletion()
-
   // Trim context to last N lines
   const lines = codeBeforeCursor.split('\n')
   const context = lines.slice(-MAX_CONTEXT_LINES).join('\n')
 
+  await ensureCompletionListener()
+
   return new Promise((resolve) => {
-    let accum = ''
-
-    // Listen for response
-    listen<any>('engine-event', ({ payload }) => {
-      if (_currentRunId && payload.run_id !== _currentRunId) return
-
-      if (payload.kind === 'delta') {
-        accum += payload.text
-      } else if (payload.kind === 'complete') {
-        _currentRunId = null
-        const suggestion = (payload.text || accum).trim()
-        _lastSuggestion = suggestion || null
-        resolve(_lastSuggestion)
-        _unlisten?.()
-        _unlisten = null
-      }
-    }).then((ul) => {
-      _unlisten = ul
-    })
-
-    // Send the completion request
+    // Pin to a hidden persistent session so we don't create an orphan session
+    // per keystroke (B49).
     invoke<{ run_id: string; session_id: string }>('engine_chat_send', {
       request: {
+        session_id: COMPLETION_SESSION_ID,
         message: `[File: ${filePath}] [Language: ${language}]\n\n${context}`,
         system_prompt: COMPLETION_SYSTEM_PROMPT,
         tools_enabled: false,
         auto_approve_all: true,
-        temperature: 0.2, // Low temperature for predictable completions
+        temperature: 0.2,
       },
     })
       .then((response) => {
-        _currentRunId = response.run_id
+        _completionResolvers.set(response.run_id, resolve)
       })
       .catch(() => {
         resolve(null)
@@ -187,14 +193,13 @@ export async function requestCompletion(
  * Cancel any in-flight completion request.
  */
 export function cancelCompletion(): void {
-  _currentRunId = null
   _lastSuggestion = null
-  _unlisten?.()
-  _unlisten = null
-  if (_debounceTimer) {
-    clearTimeout(_debounceTimer)
-    _debounceTimer = null
+  // Resolve all pending resolvers as null and drop their accumulators.
+  for (const [, resolve] of _completionResolvers) {
+    try { resolve(null) } catch {}
   }
+  _completionResolvers.clear()
+  _completionAccum.clear()
 }
 
 /**
@@ -204,20 +209,6 @@ export function getLastSuggestion(): string | null {
   return _lastSuggestion
 }
 
-/**
- * Create a debounced completion trigger.
- * Call this on every keystroke — it only fires after DEBOUNCE_MS of silence.
- */
-export function debouncedCompletion(
-  codeBeforeCursor: string,
-  filePath: string,
-  language: string,
-  onSuggestion: (suggestion: string | null) => void,
-): void {
-  if (_debounceTimer) clearTimeout(_debounceTimer)
-
-  _debounceTimer = setTimeout(async () => {
-    const suggestion = await requestCompletion(codeBeforeCursor, filePath, language)
-    onSuggestion(suggestion)
-  }, DEBOUNCE_MS)
-}
+// (was: debouncedCompletion + module-level _debounceTimer / DEBOUNCE_MS — dead
+// in OSS, replaced by Monaco's built-in inline-completion debounce + the
+// CancellationToken-aware path in registerInlineProvider.)

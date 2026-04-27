@@ -18,6 +18,7 @@ import {
   parsePlanSteps,
   attachPlanProgress,
 } from './render.ts'
+import { markRunCompleted } from './streaming.ts'
 import { gatherIdeContext as _gatherIdeContext, getWorkspace } from '../ide-context.ts'
 import { buildSystemPrompt } from './system-prompt.ts'
 
@@ -25,6 +26,9 @@ export { buildSystemPrompt }
 
 // ─── Built-in Agent Definitions ──────────────────────────────────────────────
 
+// Populated in the V2 build. Empty in OSS — the dropdown shows DB agents only.
+// Keep this constant in place; do not delete the call sites that consume it
+// (index.ts, render.ts) — V2 reactivates them by populating this array.
 export const BUILTIN_AGENTS = [] as const
 
 // ─── Send Message ────────────────────────────────────────────────────────────
@@ -34,11 +38,17 @@ export async function doSend(): Promise<void> {
   const content = S.textarea.value.trim()
   if (!content) return
 
-  // Deep session: after 3+ completed runs the agent has strong task momentum.
-  // Treat every new message as a redirect so it gets the STOP wrapper and
-  // history pruning — the user's message needs that weight to compete.
+  // Two related concepts that USED to share one flag:
+  //   - mid-stream redirect: the agent is currently running and the user typed
+  //     something new — they want it to stop. Loud `⚡ REDIRECT` wrapper helps
+  //     the model notice against 60+ rounds of history.
+  //   - deep session: after 3+ completed runs, history is dense and the
+  //     backend should still prune to make space — but the user is NOT
+  //     interrupting. Don't shout at them; just signal `is_redirect` to the
+  //     backend so the pruning policy kicks in.
   const DEEP_SESSION_THRESHOLD = 3
-  const isRedirect = S.streaming || S.completedRounds >= DEEP_SESSION_THRESHOLD
+  const isMidStreamRedirect = S.streaming
+  const isDeepSession = !S.streaming && S.completedRounds >= DEEP_SESSION_THRESHOLD
 
   S.textarea.value = ''
   S.textarea.style.height = 'auto'
@@ -67,6 +77,12 @@ export async function doSend(): Promise<void> {
       S.messages.push({ role: 'assistant', content: S.streamAccum + '\n\n*(redirected)*', ts: new Date() })
       S.streamAccum = ''
     }
+    // Pre-emptively mark the current runId as completed so any terminal events
+    // from the OLD run that arrive during the redirect's network round-trip are
+    // filtered out by the engine-event listener (streaming.ts:70). Without this,
+    // the old run's Complete can sneak through and append a duplicate assistant
+    // message after the partial-streamed-text + (redirected) marker.
+    if (S.runId) markRunCompleted(S.runId)
     updateStatus('Redirecting after current tools…')
   } else {
     // Normal send or deep-session redirect (agent not currently running):
@@ -84,8 +100,11 @@ export async function doSend(): Promise<void> {
     }
   }
 
-  // On redirect: wrap the message so the model can't miss it against 60+ rounds of history
-  const messageContent = isRedirect
+  // Only mid-stream redirects get the loud STOP wrapper. Deep-session sends
+  // pass through plain — the backend still gets `is_redirect: true` below for
+  // history-pruning, but the model doesn't see shouty all-caps when the agent
+  // wasn't actually running.
+  const messageContent = isMidStreamRedirect
     ? `⚡ REDIRECT — STOP YOUR CURRENT TASK ⚡\n\nThe user is redirecting you. Read this carefully and respond to it directly before doing anything else. Do not continue your previous task unless the user's message explicitly asks you to.\n\nUser message:\n${content}`
     : content
 
@@ -98,10 +117,26 @@ export async function doSend(): Promise<void> {
     : baseSystemPrompt
   S.lastSendWasPlan = S.planMode
 
+  // B200: generate the session id BEFORE invoke so the engine-event listener
+  // has a non-null S.sessionId when tool_request / delta / etc. start arriving.
+  // Previously we set S.sessionId only AFTER invoke resolved — but invoke
+  // awaits the entire chat turn (tool approvals included). During the turn
+  // the listener saw `!S.sessionId` and silently dropped every event,
+  // including tool_request, so the approval UI never rendered. This was
+  // *the* reason "zero permission requests EVER" surfaced after the
+  // engine-side B196/B197/B198 fixes — the engine asked, the listener
+  // dropped the question.
+  //
+  // The backend uses request.session_id when provided, falling back to its
+  // own UUID otherwise (commands/chat.rs::engine_chat_send), so a frontend-
+  // generated id round-trips correctly.
+  const sessionId = S.sessionId ?? `eng-${crypto.randomUUID()}`
+  S.sessionId = sessionId
+
   try {
     const response = await invoke<ChatResponse>('engine_chat_send', {
       request: {
-        session_id: S.sessionId ?? undefined,
+        session_id: sessionId,
         message: fullMessage,
         system_prompt: systemPrompt,
         agent_id: S.selectedAgent?.agent_id ?? undefined,
@@ -110,9 +145,11 @@ export async function doSend(): Promise<void> {
         auto_approve_all: S.approvalMode === 'yolo',
         thinking_level: S.thinkingLevel,
         workspace_path: getWorkspace() ?? undefined,
-        is_redirect: isRedirect,
+        is_redirect: isMidStreamRedirect || isDeepSession,
       },
     })
+    // Engine echoes back the same session_id; reassigning is a no-op but
+    // keeps us aligned if the backend ever decides to migrate sessions.
     S.sessionId = response.session_id
     // Always update runId — on redirect, old complete events won't match new runId
     // so they'll be filtered, and the existing streaming bubble continues for the new run
@@ -142,10 +179,15 @@ export async function executeApprovedPlan(): Promise<void> {
   setStreaming(true)
   showStreamingBubble()
   if (S.planSteps.length > 0) attachPlanProgress()
+  // B200: same upfront-id pattern as sendChat — keeps the listener filter
+  // happy while the engine is mid-turn.
+  const sessionId = S.sessionId ?? `eng-${crypto.randomUUID()}`
+  S.sessionId = sessionId
+
   try {
     const response = await invoke<ChatResponse>('engine_chat_send', {
       request: {
-        session_id: S.sessionId ?? undefined,
+        session_id: sessionId,
         message: execMsg,
         system_prompt: S.selectedAgent?.system_prompt || buildSystemPrompt(getWorkspace()),
         agent_id: S.selectedAgent?.agent_id ?? undefined,

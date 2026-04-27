@@ -382,8 +382,10 @@ pub async fn run_agent_turn(
         }
 
         // ── 1. Call the AI model (with retry on transient errors) ─────
-        // Phase 4: Force tool use on round 0 when tools are available
-        let tc_override: Option<&str> = if round == 0 && !tools.is_empty() {
+        // Phase 4: Force tool use on the first round when tools are available.
+        // Note: `round` is incremented to 1 at the top of this loop iteration,
+        // so the first model call happens with round == 1.
+        let tc_override: Option<&str> = if round == 1 && !tools.is_empty() {
             Some("required")
         } else {
             None
@@ -439,7 +441,6 @@ pub async fn run_agent_turn(
         > = std::collections::HashMap::new();
         // (id, name, arguments, thought_signature, thought_parts)
         let mut has_tool_calls = false;
-        let mut _finished = false;
 
         // Extract the confirmed model name from the API response
         let confirmed_model: Option<String> = chunks.iter().find_map(|c| c.model.clone());
@@ -528,12 +529,6 @@ pub async fn run_agent_turn(
                 entry.4.extend(chunk.thought_parts.clone());
             }
 
-            if let Some(reason) = &chunk.finish_reason {
-                if reason == "stop" || reason == "end_turn" || reason == "STOP" {
-                    _finished = true;
-                }
-            }
-
             // Track token usage — input tokens reflect the full context sent
             // each round, so we keep only the LAST round's input tokens (not a sum).
             // Output tokens are truly incremental, so we sum those across rounds.
@@ -586,6 +581,25 @@ pub async fn run_agent_turn(
                     let msg = format!(
                         "Budget warning: {}% of daily budget used (${:.2} of ${:.2})",
                         pct, est_usd, daily_budget_usd
+                    );
+                    warn!("[engine] {}", msg);
+                    fire(
+                        app_handle,
+                        EngineEvent::Error {
+                            session_id: session_id.to_string(),
+                            run_id: run_id.to_string(),
+                            message: msg,
+                        },
+                    );
+                }
+                // B173: separate runaway-spend alarm at 2x budget. Fires
+                // every round once the threshold is crossed, since the
+                // standard 50/75/90 thresholds are one-shot per session
+                // and silent past 90%.
+                if let Some(ratio) = tracker.check_runaway(daily_budget_usd) {
+                    let msg = format!(
+                        "Runaway spend: {:.1}x daily budget (${:.2} of ${:.2}) — review or stop the agent",
+                        ratio, est_usd, daily_budget_usd
                     );
                     warn!("[engine] {}", msg);
                     fire(
@@ -740,8 +754,8 @@ pub async fn run_agent_turn(
                     input_tokens: last_input_tokens,
                     output_tokens: total_output_tokens,
                     total_tokens: last_input_tokens + total_output_tokens,
-                    cache_creation_tokens: round_cache_create,
-                    cache_read_tokens: round_cache_read,
+                    cache_creation_tokens: total_cache_create,
+                    cache_read_tokens: total_cache_read,
                 })
             } else {
                 None
@@ -1123,32 +1137,74 @@ pub async fn run_agent_turn(
             )
             .await;
 
-            // Assistant message with tool_calls was already pushed at line ~599.
-            // Do NOT push again — Kimi and other OpenAI-compatible APIs require
-            // exactly one assistant message per set of tool_call_ids, immediately
-            // followed by matching tool result messages.
+            // The assistant message with tool_calls was already pushed earlier in this
+            // iteration (in the tool-call collection block above). Do NOT push it again —
+            // Kimi and other OpenAI-compatible APIs require exactly one assistant message
+            // per set of tool_call_ids, immediately followed by matching tool result messages.
 
-            // Cap batch result size to prevent context blowouts
+            // Cap batch result size to prevent context blowouts.
+            // UTF-8 safe truncation: floor to a char boundary before slicing.
             const MAX_BATCH_RESULT_BYTES: usize = 100_000;
             let mut batch_output = result.output.clone();
             if batch_output.len() > MAX_BATCH_RESULT_BYTES {
                 let original_len = batch_output.len();
+                let mut cut = MAX_BATCH_RESULT_BYTES;
+                while cut > 0 && !batch_output.is_char_boundary(cut) { cut -= 1; }
                 batch_output = format!(
                     "{}...\n\n[TRUNCATED: batch result was {} bytes, capped at {}]",
-                    &batch_output[..MAX_BATCH_RESULT_BYTES],
+                    &batch_output[..cut],
                     original_len,
                     MAX_BATCH_RESULT_BYTES
                 );
                 warn!("[engine] Batch result truncated: {} → {} bytes", original_len, MAX_BATCH_RESULT_BYTES);
             }
 
-            // Add all original tool call results
+            // Parse the sandbox batch envelope so per-tool results land on their
+            // matching tool_call_id. Envelope shape (see sandbox_enforcement::build_batch_sandbox_code):
+            //   { batch: true, count: N, results: [{ tool: "name", result: <any> }, ...] }
+            // On any parse failure we fall back to the legacy "first-tool-gets-everything"
+            // behaviour so a malformed sandbox response still satisfies the OpenAI
+            // "every tool_call_id needs a result" contract.
+            #[derive(serde::Deserialize)]
+            struct BatchEntry {
+                #[allow(dead_code)]
+                tool: Option<String>,
+                result: serde_json::Value,
+            }
+            #[derive(serde::Deserialize)]
+            struct BatchEnvelope {
+                #[serde(default)]
+                results: Vec<BatchEntry>,
+            }
+            let entries: Vec<BatchEntry> = serde_json::from_str::<BatchEnvelope>(&batch_output)
+                .map(|e| e.results)
+                .unwrap_or_default();
+
             for (i, tc) in tool_calls.iter().enumerate() {
-                let tc_output = if i == 0 {
+                let tc_output = if let Some(entry) = entries.get(i) {
+                    let mut body = serde_json::to_string_pretty(&entry.result)
+                        .unwrap_or_else(|_| entry.result.to_string());
+                    // Per-tool cap — combined cap above already applied; this
+                    // protects against a single large entry within the envelope.
+                    if body.len() > MAX_BATCH_RESULT_BYTES {
+                        let body_len = body.len();
+                        let mut cut = MAX_BATCH_RESULT_BYTES;
+                        while cut > 0 && !body.is_char_boundary(cut) { cut -= 1; }
+                        body = format!(
+                            "{}...\n\n[TRUNCATED: per-tool result was {} bytes]",
+                            &body[..cut], body_len
+                        );
+                    }
+                    body
+                } else if i == 0 {
+                    // Fallback: parsing failed. Put the whole sandbox output on the first
+                    // tool so the agent still sees something useful.
                     batch_output.clone()
                 } else {
-                    format!("(batched with {})", tool_calls[0].function.name)
+                    format!("(batched with {} — sandbox output couldn't be split)",
+                        tool_calls[0].function.name)
                 };
+
                 messages.push(Message {
                     role: Role::Tool,
                     content: MessageContent::Text(tc_output),
@@ -1160,8 +1216,9 @@ pub async fn run_agent_turn(
             }
 
             info!(
-                "[engine] Batch execution complete: {} tool calls in one sandbox run",
-                tool_calls.len()
+                "[engine] Batch execution complete: {} tool calls in one sandbox run (parsed_entries={})",
+                tool_calls.len(),
+                entries.len()
             );
             continue;
         }
@@ -1242,6 +1299,17 @@ pub async fn run_agent_turn(
             ];
 
             // ─── T2: Reversible — local writes, can be undone (auto-approve) ───
+            //
+            // B198: `execute_code` USED to live here on the theory that the
+            // sandbox makes it equivalent to individual tool calls. That
+            // reasoning was wrong: the sandbox isolates JS from native code
+            // but the JS body can call `ctx.tool('ide_run_command', …)` /
+            // `ctx.exec(…)` to reach the host shell with full user privilege.
+            // A `execute_code` auto-approve at this layer let an agent
+            // sneak a `printf 'KEY=…' > /Users/…/Desktop/x` past every other
+            // gate in the system. Removed from auto-approve so the user
+            // sees and reviews the JS body before it runs (B196 made the
+            // sandbox-enforcement layer agree; this completes the fix).
             let tier2_reversible: &[&str] = &[
                 "soul_write",
                 "memory_store",
@@ -1256,8 +1324,6 @@ pub async fn run_agent_turn(
                 "create_squad",
                 "manage_squad",
                 "squad_broadcast",
-                // OPIDE execution engine — sandboxed, same security as individual tool calls
-                "execute_code",
             ];
 
             // ─── T3: External — irreversible outbound actions (prompt, offer Always Allow) ───
@@ -1291,9 +1357,15 @@ pub async fn run_agent_turn(
             ];
 
             // ─── T4: Dangerous — financial / destructive (always prompt) ───
+            // B136: classify file deletion alongside exec/run_command. Without
+            // this, `delete_file` / `ide_delete_file` fall through to the
+            // default tier and are auto-approved on agents that haven't opted
+            // out, which can wipe user files unrecoverably.
             let tier4_dangerous: &[&str] = &[
                 "exec",
                 "run_command",
+                "delete_file",
+                "ide_delete_file",
                 "sol_swap",
                 "sol_transfer",
                 "sol_wallet_create",
@@ -1398,7 +1470,7 @@ pub async fn run_agent_turn(
                         run_id: run_id.to_string(),
                         tool_call: tc.clone(),
                         tool_tier: Some(_tool_tier.to_string()),
-                        round_number: Some(round + 1),
+                        round_number: Some(round),
                         loaded_tools: None,
                         context_tokens: None,
                     },
@@ -1421,7 +1493,7 @@ pub async fn run_agent_turn(
                         run_id: run_id.to_string(),
                         tool_call: tc.clone(),
                         tool_tier: Some(_tool_tier.to_string()),
-                        round_number: Some(round + 1),
+                        round_number: Some(round),
                         loaded_tools: None,
                         context_tokens: None,
                     },
@@ -1691,18 +1763,22 @@ pub async fn run_agent_turn(
                     timestamp: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
                 })
                 .collect();
-            let empty_wm = crate::atoms::engram_types::WorkingMemorySnapshot {
-                agent_id: agent_id.to_string(),
-                slots: vec![],
-                momentum_embeddings: vec![],
-                saved_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            // Capture the live working-memory snapshot. context_continuity's
+            // restore path (line 202+) actually reads `working_memory.slots` —
+            // passing an empty snapshot here defeats the recovery feature.
+            let wm_snapshot = {
+                let cognitive_lock = es.get_cognitive_state(agent_id);
+                let cognitive = cognitive_lock.lock().await;
+                cognitive.working_memory.snapshot()
             };
+            // file_hashes is reserved for a future workspace-integrity check.
+            // No reader consumes it today; pass empty until the feature lands.
             let empty_hashes = std::collections::HashMap::new();
             let req = crate::engine::engram::context_continuity::CaptureCheckpointRequest {
                 agent_id,
                 session_id,
                 messages: &checkpoint_msgs,
-                working_memory: &empty_wm,
+                working_memory: &wm_snapshot,
                 file_hashes: &empty_hashes,
                 tasks: &[],
                 key_decisions: &[],

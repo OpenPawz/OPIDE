@@ -308,6 +308,7 @@ You are the **Boss Agent** orchestrating project "{}".
         tool_call_id: None,
         name: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        tool_success: None,
     };
     state.store.add_message(&user_msg)?;
 
@@ -315,7 +316,10 @@ You are the **Boss Agent** orchestrating project "{}".
         state
             .store
             .load_conversation(&session_id, Some(&boss_system_prompt), None, None)?;
-    let provider = AnyProvider::from_config(&provider_config);
+    // B74: use the factory-aware constructor so OPIDE's ProviderFactory
+    // (handling ClaudeCode and any future host-specific providers) is
+    // consulted. The bare `from_config` skips the factory entirely.
+    let provider = AnyProvider::from_config_auto(&provider_config, app_handle);
     let pending = state.pending_approvals.clone();
     let pid = project_id.to_string();
 
@@ -350,6 +354,7 @@ You are the **Boss Agent** orchestrating project "{}".
                 tool_call_id: None,
                 name: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
+                tool_success: None,
             };
             state.store.add_message(&stored).ok();
 

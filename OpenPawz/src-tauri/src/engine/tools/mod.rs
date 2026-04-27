@@ -250,10 +250,13 @@ pub async fn execute_tool(
     let args_str = &tool_call.function.arguments;
 
     // ── OPIDE tool execution guard ─────────────────────────────────
-    // Block removed OpenPawz tools from executing even if the model
-    // calls them from conversation memory. These tools are not in the
-    // IDE allowlist and should never run in OPIDE.
-    {
+    // B73: only apply this block list when running INSIDE OPIDE (i.e. when an
+    // ExternalToolExecutor has been registered). Standalone OpenPawz needs
+    // these tools available — gating unconditionally was a layering violation.
+    let is_opide_host = app_handle
+        .try_state::<Box<dyn ExternalToolExecutor>>()
+        .is_some();
+    if is_opide_host {
         const BLOCKED_TOOLS: &[&str] = &[
             "request_tools",
             "coinbase_trade", "coinbase_transfer", "coinbase_wallet_create",
@@ -379,48 +382,60 @@ pub async fn execute_tool(
     }
 
     // Try each module in order — first Some(result) wins.
-    let result = None
-        .or(exec::execute(name, &args, app_handle, agent_id).await)
-        .or(fetch::execute(name, &args, app_handle).await)
-        .or(filesystem::execute(name, &args, agent_id).await)
-        .or(soul::execute(name, &args, app_handle, agent_id).await)
-        .or(memory::execute(name, &args, app_handle, agent_id).await);
-    #[cfg(feature = "browser")]
-    let result = result.or(web::execute(name, &args, app_handle).await);
-    let result = result
-        .or(tasks::execute(name, &args, app_handle, agent_id).await)
-        .or(agents::execute(name, &args, app_handle, agent_id).await)
-        .or(skills_tools::execute(name, &args, app_handle, agent_id).await)
-        .or(skill_output::execute(name, &args, app_handle, agent_id).await)
-        .or(skill_storage::execute(name, &args, app_handle, agent_id).await)
-        .or(canvas::execute(name, &args, app_handle, agent_id).await)
-        .or(canvas_dashboards::execute(name, &args, app_handle, agent_id).await)
-        .or(canvas_templates::execute(name, &args, app_handle, agent_id).await)
-        .or(agent_comms::execute(name, &args, app_handle, agent_id).await)
-        .or(squads::execute(name, &args, app_handle, agent_id).await)
-        .or(request_tools::execute(name, &args, app_handle, agent_id).await);
-    #[cfg(feature = "channels")]
-    let result = result
-        .or(telegram::execute(name, &args, app_handle).await);
-    let result = result
-        .or(integrations::execute(name, &args, app_handle).await);
-    #[cfg(feature = "docker")]
-    let result = result
-        .or(n8n::execute(name, &args, app_handle).await);
-    let result = result
-        .or(coinbase::execute(name, &args, app_handle).await);
-    #[cfg(feature = "dex")]
-    let result = result
-        .or(solana::execute(name, &args, app_handle).await)
-        .or(dex::execute(name, &args, app_handle).await);
-    #[cfg(feature = "channels")]
-    let result = result
-        .or(discord::execute(name, &args, app_handle).await);
-    let result = result
-        .or(discourse::execute(name, &args, app_handle).await)
-        .or(google::execute(name, &args, app_handle).await)
-        .or(microsoft::execute(name, &args, app_handle).await)
-        .or(service_api::execute(name, &args, app_handle).await);
+    // B72: Use short-circuit `if let` chains so we stop awaiting once a module
+    // claims the tool name. The previous `Option::or(...)` form was eager — it
+    // awaited every module's `execute()` future on every tool call regardless
+    // of which one owned the name. Each module's execute already does an
+    // early-return on name mismatch, so the work was wasted but not
+    // incorrect; this still saves ~20 future polls per tool invocation.
+    let result: Option<Result<String, String>> =
+        if let Some(r) = exec::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = fetch::execute(name, &args, app_handle).await { Some(r) }
+        else if let Some(r) = filesystem::execute(name, &args, agent_id).await { Some(r) }
+        else if let Some(r) = soul::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = memory::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = {
+            #[cfg(feature = "browser")] { web::execute(name, &args, app_handle).await }
+            #[cfg(not(feature = "browser"))] { Option::<Result<String, String>>::None }
+        } { Some(r) }
+        else if let Some(r) = tasks::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = agents::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = skills_tools::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = skill_output::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = skill_storage::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = canvas::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = canvas_dashboards::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = canvas_templates::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = agent_comms::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = squads::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = request_tools::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = {
+            #[cfg(feature = "channels")] { telegram::execute(name, &args, app_handle).await }
+            #[cfg(not(feature = "channels"))] { Option::<Result<String, String>>::None }
+        } { Some(r) }
+        else if let Some(r) = integrations::execute(name, &args, app_handle).await { Some(r) }
+        else if let Some(r) = {
+            #[cfg(feature = "docker")] { n8n::execute(name, &args, app_handle).await }
+            #[cfg(not(feature = "docker"))] { Option::<Result<String, String>>::None }
+        } { Some(r) }
+        else if let Some(r) = coinbase::execute(name, &args, app_handle).await { Some(r) }
+        else if let Some(r) = {
+            #[cfg(feature = "dex")] { solana::execute(name, &args, app_handle).await }
+            #[cfg(not(feature = "dex"))] { Option::<Result<String, String>>::None }
+        } { Some(r) }
+        else if let Some(r) = {
+            #[cfg(feature = "dex")] { dex::execute(name, &args, app_handle).await }
+            #[cfg(not(feature = "dex"))] { Option::<Result<String, String>>::None }
+        } { Some(r) }
+        else if let Some(r) = {
+            #[cfg(feature = "channels")] { discord::execute(name, &args, app_handle).await }
+            #[cfg(not(feature = "channels"))] { Option::<Result<String, String>>::None }
+        } { Some(r) }
+        else if let Some(r) = discourse::execute(name, &args, app_handle).await { Some(r) }
+        else if let Some(r) = google::execute(name, &args, app_handle).await { Some(r) }
+        else if let Some(r) = microsoft::execute(name, &args, app_handle).await { Some(r) }
+        else if let Some(r) = service_api::execute(name, &args, app_handle).await { Some(r) }
+        else { None };
 
     // Try MCP tools (prefixed with `mcp_`) if no built-in handled it.
     // When a worker_model is configured, delegate MCP calls to the local

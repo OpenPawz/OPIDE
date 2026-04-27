@@ -213,6 +213,24 @@ pub(crate) fn run_migrations(conn: &Connection) -> EngineResult<()> {
     )
     .ok();
 
+    // B190: persist tool-result success/failure on the messages row instead of
+    // scraping the content for "ERROR" prefixes during compression.
+    conn.execute(
+        "ALTER TABLE messages ADD COLUMN tool_success INTEGER",
+        [],
+    )
+    .ok();
+
+    // B189: reconcile session.message_count once at startup so any drift from
+    // earlier paths (or this migration) is corrected before the cached
+    // increment in `add_message` becomes authoritative.
+    conn.execute(
+        "UPDATE sessions
+            SET message_count = (SELECT COUNT(*) FROM messages WHERE messages.session_id = sessions.id)",
+        [],
+    )
+    .ok();
+
     // ── Positions table: stop-loss / take-profit tracking ────────────
     conn.execute_batch(
         "

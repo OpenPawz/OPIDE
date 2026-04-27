@@ -17,6 +17,26 @@ pub struct CodeChunk {
     pub name: String,          // e.g. "Button", "fetchUsers", "ButtonProps"
     pub text: String,          // the actual code
     pub embedding: Option<Vec<f32>>,
+    /// B177: stable hash of `text`. The indexer skips embedding when a
+    /// chunk's hash matches an entry in the persisted cache.
+    #[serde(default)]
+    pub content_hash: u64,
+    /// B182: when the source file was over EMBED_CAP, the embedding
+    /// step skips this chunk; AST/symbol queries still work.
+    #[serde(default)]
+    pub skip_embedding: bool,
+}
+
+/// Compute a stable 64-bit hash of chunk content for incremental
+/// re-embedding (B177). DefaultHasher is good enough for this — we only
+/// need stability across runs of the same binary, not collision
+/// resistance against adversaries.
+pub fn chunk_content_hash(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +95,7 @@ pub fn chunk_file(file: &FileIndex, content: &str) -> Vec<CodeChunk> {
         // Prefix with file path for context when embedded
         let prefixed_text = format!("// {}\n{}", file.path, chunk_text);
 
+        let hash = chunk_content_hash(&prefixed_text);
         chunks.push(CodeChunk {
             file_path: file.path.clone(),
             language: file.language,
@@ -84,6 +105,8 @@ pub fn chunk_file(file: &FileIndex, content: &str) -> Vec<CodeChunk> {
             name: symbol.name.clone(),
             text: prefixed_text,
             embedding: None,
+            content_hash: hash,
+            skip_embedding: file.skip_embedding,
         });
 
         // Mark lines as covered
@@ -104,6 +127,8 @@ pub fn chunk_file(file: &FileIndex, content: &str) -> Vec<CodeChunk> {
             }
         }).collect();
 
+        let imports_text = format!("// {} imports\n{}", file.path, import_lines.join("\n"));
+        let imports_hash = chunk_content_hash(&imports_text);
         chunks.push(CodeChunk {
             file_path: file.path.clone(),
             language: file.language,
@@ -111,8 +136,10 @@ pub fn chunk_file(file: &FileIndex, content: &str) -> Vec<CodeChunk> {
             end_line: file.imports.last().map_or(1, |i| i.line),
             kind: ChunkKind::Imports,
             name: format!("{} imports", file.path),
-            text: format!("// {} imports\n{}", file.path, import_lines.join("\n")),
+            text: imports_text,
             embedding: None,
+            content_hash: imports_hash,
+            skip_embedding: file.skip_embedding,
         });
     }
 
@@ -137,6 +164,7 @@ pub fn chunk_file(file: &FileIndex, content: &str) -> Vec<CodeChunk> {
 
     if remainder_lines.len() >= 3 {
         let text = format!("// {} (file-level code)\n{}", file.path, remainder_lines.join("\n"));
+        let hash = chunk_content_hash(&text);
         chunks.push(CodeChunk {
             file_path: file.path.clone(),
             language: file.language,
@@ -146,6 +174,8 @@ pub fn chunk_file(file: &FileIndex, content: &str) -> Vec<CodeChunk> {
             name: format!("{} (file-level)", file.path),
             text,
             embedding: None,
+            content_hash: hash,
+            skip_embedding: file.skip_embedding,
         });
     }
 

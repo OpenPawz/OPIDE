@@ -28,6 +28,12 @@ pub async fn embed_chunks(
         let batch_end = (batch_start + batch_size).min(total);
 
         for i in batch_start..batch_end {
+            // B177: skip chunks that already have an embedding attached
+            // (cache hit propagated by run_full_index) and B182 chunks
+            // marked skip_embedding (file was over EMBED_CAP).
+            if chunks[i].embedding.is_some() || chunks[i].skip_embedding {
+                continue;
+            }
             let text = &chunks[i].text;
 
             match embed_client.embed(text).await {

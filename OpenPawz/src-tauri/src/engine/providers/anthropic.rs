@@ -4,7 +4,7 @@
 
 use crate::atoms::traits::{AiProvider, ProviderError};
 use crate::engine::http::{
-    pinned_client, sign_and_log_request, update_last_audit_status, CircuitBreaker,
+    pinned_client, sign_and_log_request, update_last_audit_status, CircuitBreaker, LineBuffer,
 };
 use crate::engine::providers::openai::{
     is_retryable_status, parse_retry_after, retry_delay, MAX_RETRIES,
@@ -21,8 +21,25 @@ use zeroize::Zeroizing;
 // Import constrained decoding for explicit tool_choice
 use crate::engine::constrained;
 
-/// Circuit breaker shared across all Anthropic requests.
-static ANTHROPIC_CIRCUIT: LazyLock<CircuitBreaker> = LazyLock::new(|| CircuitBreaker::new(5, 60));
+/// B107: per-base-url circuit breakers, mirroring the OpenAI provider. A single
+/// global circuit caused failures from one Anthropic-compatible endpoint
+/// (e.g. an Azure /anthropic proxy) to trip the breaker for unrelated direct
+/// api.anthropic.com calls.
+static ANTHROPIC_CIRCUITS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CircuitBreaker>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn get_circuit(base_url: &str) -> std::sync::Arc<CircuitBreaker> {
+    const MAX_CIRCUITS: usize = 32;
+    let mut map = ANTHROPIC_CIRCUITS.lock().unwrap();
+    if map.len() >= MAX_CIRCUITS && !map.contains_key(base_url) {
+        if let Some(k) = map.keys().next().cloned() {
+            map.remove(&k);
+        }
+    }
+    map.entry(base_url.to_string())
+        .or_insert_with(|| std::sync::Arc::new(CircuitBreaker::new(5, 60)))
+        .clone()
+}
 
 // ── Struct ────────────────────────────────────────────────────────────────────
 
@@ -37,6 +54,8 @@ pub struct AnthropicProvider {
     /// Classic Azure OpenAI (*.openai.azure.com / *.cognitiveservices.azure.com)
     /// uses a different api-version than Azure AI Foundry.
     is_azure_openai: bool,
+    /// B107: per-base-url circuit breaker, scoped to this provider instance.
+    circuit: std::sync::Arc<CircuitBreaker>,
 }
 
 impl AnthropicProvider {
@@ -45,17 +64,31 @@ impl AnthropicProvider {
             .base_url
             .clone()
             .unwrap_or_else(|| config.kind.default_base_url().to_string());
-        // All Azure endpoints use `api-key` header.
-        let is_azure = base_url.contains(".azure.com");
+        // B105: parse the URL and match host suffixes instead of substring.
+        let host = url::Url::parse(&base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_lowercase()));
+        let is_azure = host
+            .as_deref()
+            .map(|h| {
+                h.ends_with(".azure.com")
+                    || h.ends_with(".cognitiveservices.azure.com")
+                    || h.ends_with(".services.ai.azure.com")
+            })
+            .unwrap_or(false);
         // Classic Azure OpenAI additionally requires ?api-version= on the URL.
-        let is_azure_openai = base_url.contains(".openai.azure.com")
-            || base_url.contains(".cognitiveservices.azure.com");
+        let is_azure_openai = host
+            .as_deref()
+            .map(|h| h.ends_with(".openai.azure.com") || h.ends_with(".cognitiveservices.azure.com"))
+            .unwrap_or(false);
+        let circuit = get_circuit(&base_url);
         AnthropicProvider {
             client: pinned_client(),
             base_url,
             api_key: Zeroizing::new(config.api_key.clone()),
             is_azure,
             is_azure_openai,
+            circuit,
         }
     }
 
@@ -106,14 +139,35 @@ impl AnthropicProvider {
                         content_blocks.push(json!({"type": "text", "text": text}));
                     }
                     for tc in tool_calls {
-                        let input: Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                        // B104: if the model emitted malformed JSON args, drop
+                        // this tool_use block entirely instead of replaying
+                        // `{}`. The orphan tool_call_id will be picked up by
+                        // sanitize_tool_pairs and the model retries with valid
+                        // arguments — far safer than executing the wrong call.
+                        let input: Value = match serde_json::from_str(&tc.function.arguments) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!(
+                                    "[engine] Anthropic format: dropping tool_use — args parse failed: {} (id={}, name={})",
+                                    e, tc.id, tc.function.name
+                                );
+                                continue;
+                            }
+                        };
                         content_blocks.push(json!({
                             "type": "tool_use",
                             "id": tc.id,
                             "name": tc.function.name,
                             "input": input,
                         }));
+                    }
+                    // Anthropic rejects assistant messages with empty content;
+                    // if every tool_use was dropped and there was no text,
+                    // skip the message entirely (orphan tool_call_ids will be
+                    // synthesized into tool_results by sanitize_tool_pairs).
+                    if content_blocks.is_empty() {
+                        idx += 1;
+                        continue;
                     }
                     formatted.push(json!({
                         "role": "assistant",
@@ -219,6 +273,23 @@ impl AnthropicProvider {
             return;
         }
         let breakpoint_idx = user_indices[user_indices.len() - 2];
+
+        // B103: Anthropic prompt caching has a minimum cacheable size — under
+        // ~1024 tokens the breakpoint is rejected silently and we waste a slot.
+        // Estimate via serialized-byte length (≈4 chars/token) and skip if too
+        // short. Conservative: under-caches slightly rather than tripping the API.
+        const MIN_CACHEABLE_BYTES: usize = 4096; // ~1024 tokens
+        let prefix_bytes: usize = messages[..=breakpoint_idx]
+            .iter()
+            .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+            .sum();
+        if prefix_bytes < MIN_CACHEABLE_BYTES {
+            log::debug!(
+                "[engine] Anthropic: skipping cache breakpoint — prefix too short ({} bytes)",
+                prefix_bytes
+            );
+            return;
+        }
 
         // Add cache_control to the last content block of the breakpoint message
         if let Some(msg) = messages.get_mut(breakpoint_idx) {
@@ -513,7 +584,7 @@ impl AnthropicProvider {
         // Anthropic extended thinking — requires setting a budget and increasing max_tokens
         if let Some(level) = thinking_level {
             if level != "none" {
-                let budget = match level {
+                let budget: i64 = match level {
                     "low" => 4096,
                     "high" => 32768,
                     _ => 16384, // medium
@@ -522,12 +593,17 @@ impl AnthropicProvider {
                     "type": "enabled",
                     "budget_tokens": budget,
                 });
-                // Extended thinking requires higher max_tokens to include both
-                // thinking + response tokens. Override the model-aware max_tokens.
-                body["max_tokens"] = json!(budget + max_tokens as i64);
+                // B101: clamp combined budget+reply to the per-model output ceiling
+                // so we don't ship a request that the API will 400 with
+                // "max_tokens too high". `resolve_max_output_tokens` encodes the
+                // tier ceiling.
+                let api_max =
+                    crate::engine::engram::model_caps::resolve_max_output_tokens(model) as i64;
+                let combined = (budget + max_tokens as i64).min(api_max);
+                body["max_tokens"] = json!(combined);
                 info!(
-                    "[engine] Anthropic: extended thinking enabled (budget={})",
-                    budget
+                    "[engine] Anthropic: extended thinking enabled (budget={}, max_tokens={})",
+                    budget, combined
                 );
             }
         }
@@ -538,7 +614,7 @@ impl AnthropicProvider {
         );
 
         // Circuit breaker: reject immediately if too many recent failures
-        if let Err(msg) = ANTHROPIC_CIRCUIT.check() {
+        if let Err(msg) = self.circuit.check() {
             return Err(ProviderError::Transport(msg));
         }
 
@@ -588,7 +664,7 @@ impl AnthropicProvider {
                     r
                 }
                 Err(e) => {
-                    ANTHROPIC_CIRCUIT.record_failure();
+                    self.circuit.record_failure();
                     last_error = format!("HTTP request failed: {}", e);
                     last_status = 0;
                     if attempt < MAX_RETRIES {
@@ -618,7 +694,7 @@ impl AnthropicProvider {
                     crate::engine::types::truncate_utf8(&body_text, 500)
                 );
 
-                ANTHROPIC_CIRCUIT.record_failure();
+                self.circuit.record_failure();
 
                 // Auth errors are never retried
                 if status == 401 || status == 403 {
@@ -643,17 +719,16 @@ impl AnthropicProvider {
 
             let mut chunks = Vec::new();
             let mut byte_stream = response.bytes_stream();
-            let mut buffer = String::new();
+            // B97: defer UTF-8 decoding to line boundaries so multi-byte
+            // characters split across chunks don't get corrupted into U+FFFD.
+            let mut line_buf = LineBuffer::new();
 
             while let Some(result) = byte_stream.next().await {
                 let bytes = result
                     .map_err(|e| ProviderError::Transport(format!("Stream read error: {}", e)))?;
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim().to_string();
-                    buffer = buffer[line_end + 1..].to_string();
-
+                line_buf.extend(&bytes);
+                for line in line_buf.drain_lines() {
+                    let line = line.trim();
                     if let Some(data) = line.strip_prefix("data: ") {
                         if let Some(chunk) = Self::parse_sse_event(data) {
                             chunks.push(chunk);
@@ -662,7 +737,7 @@ impl AnthropicProvider {
                 }
             }
 
-            ANTHROPIC_CIRCUIT.record_success();
+            self.circuit.record_success();
             return Ok(chunks);
         }
 

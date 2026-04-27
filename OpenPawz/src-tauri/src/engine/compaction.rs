@@ -257,6 +257,7 @@ pub async fn compact_session(
         tool_call_id: None,
         name: Some("session_compaction".to_string()),
         created_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        tool_success: None,
     };
     store.add_message(&summary_msg)?;
 
@@ -368,6 +369,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             created_at: "2025-01-01".into(),
+            tool_success: None,
         };
         let tokens = estimate_message_tokens(&msg);
         assert!(tokens > 0);
@@ -386,6 +388,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 created_at: "2025-01-01".into(),
+                tool_success: None,
             })
             .collect();
 
@@ -407,6 +410,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 created_at: "2025-01-01".into(),
+                tool_success: None,
             })
             .collect();
 
@@ -425,6 +429,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             created_at: "2025-01-01".into(),
+            tool_success: None,
         };
         let tokens = estimate_message_tokens(&msg);
         // (12 + 33) / 4 + 4 = 11 + 4 = 15
@@ -442,6 +447,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             created_at: "2025-01-01".into(),
+            tool_success: None,
         };
         let tokens = estimate_message_tokens(&msg);
         assert_eq!(tokens, 4); // 0/4 + 4 = 4 (overhead)
@@ -460,6 +466,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 created_at: "2025-01-01".into(),
+                tool_success: None,
             })
             .collect();
 
@@ -482,6 +489,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 created_at: "2025-01-01".into(),
+                tool_success: None,
             })
             .collect();
 
@@ -517,6 +525,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             created_at: "2025-01-01".into(),
+            tool_success: None,
         };
         let tokens = estimate_message_tokens(&msg);
         assert_eq!(tokens, (20 + 4000) / 4 + 4); // 1005 + 4 = 1009

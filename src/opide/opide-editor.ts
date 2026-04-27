@@ -30,6 +30,10 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _editorService: any = null
 
+// All disposables registered during initEditorIntegration so a future hot-reload
+// can call disposeEditorIntegration() to unwind without leaks (B34).
+let _disposables: Array<{ dispose(): void }> = []
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -67,6 +71,9 @@ function updateFromEditor(editor: any): void {
       anchor: { line: sel.startLineNumber - 1, character: sel.startColumn - 1 },
       active: { line: sel.endLineNumber - 1, character: sel.endColumn - 1 },
     } : undefined
+    // Monaco's EditorOption enum isn't statically importable in this build —
+    // use the documented numeric values. Source-of-truth: Monaco's
+    // standaloneEnums.ts. Updated when bumping monaco-editor.
     const opts = editor.getOptions?.()
     const tabSize = opts?.get?.(/* EditorOption.tabSize */ 51) ?? 2
     const insertSpaces = opts?.get?.(/* EditorOption.insertSpaces */ 56) ?? true
@@ -119,8 +126,14 @@ export async function initEditorIntegration(): Promise<void> {
     updateFromEditor(_editorService.getActiveCodeEditor())
     refreshOpenTabs()
 
-    // Wire events on editors that already exist (created before our listener)
+    // Track wired editors so we never double-wire if onCodeEditorAdd fires for
+    // an editor we already saw via listCodeEditors() (B30).
+    const wiredEditors = new WeakSet<any>()
+
     function wireEditorEvents(editor: any): void {
+      if (wiredEditors.has(editor)) return
+      wiredEditors.add(editor)
+
       editor.onDidChangeModel?.((e: any) => {
         if (editor === _editorService.getActiveCodeEditor()) {
           updateFromEditor(editor)
@@ -145,10 +158,18 @@ export async function initEditorIntegration(): Promise<void> {
         }
       })
 
+      // B24: subscribe to selection-change once per focus, dispose on blur.
+      // The previous code stacked a fresh blur subscription inside every focus
+      // event — every focus/blur cycle leaked one blur subscription.
+      let activeSelDisp: { dispose(): void } | null = null
       editor.onDidFocusEditorWidget?.(() => {
         updateFromEditor(editor)
-        const selDisp = editor.onDidChangeCursorSelection?.(() => syncSelection(editor))
-        editor.onDidBlurEditorWidget?.(() => selDisp?.dispose())
+        activeSelDisp?.dispose()
+        activeSelDisp = editor.onDidChangeCursorSelection?.(() => syncSelection(editor)) ?? null
+      })
+      editor.onDidBlurEditorWidget?.(() => {
+        activeSelDisp?.dispose()
+        activeSelDisp = null
       })
     }
 
@@ -159,20 +180,31 @@ export async function initEditorIntegration(): Promise<void> {
     }
 
     // Track each new editor that gets created (file opened in a new tab/pane)
-    _editorService.onCodeEditorAdd((editor: any) => {
+    const addDisp = _editorService.onCodeEditorAdd((editor: any) => {
       refreshOpenTabs()
       wireEditorEvents(editor)
     })
+    if (addDisp) _disposables.push(addDisp)
 
     // When an editor tab is closed
-    _editorService.onCodeEditorRemove(() => {
+    const removeDisp = _editorService.onCodeEditorRemove(() => {
       refreshOpenTabs()
     })
+    if (removeDisp) _disposables.push(removeDisp)
 
     console.log('[opide-editor] editor integration active')
   } catch (e) {
     console.warn('[opide-editor] init failed:', e)
   }
+}
+
+/** Dispose all editor integration listeners (for hot-reload / re-init). */
+export function disposeEditorIntegration(): void {
+  for (const d of _disposables) {
+    try { d.dispose() } catch {}
+  }
+  _disposables = []
+  _editorService = null
 }
 
 // ─── Apply Code to Editor ─────────────────────────────────────────────────────

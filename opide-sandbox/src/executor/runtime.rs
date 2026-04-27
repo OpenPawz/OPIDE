@@ -19,6 +19,8 @@ use super::helpers::{js_value_to_json, extract_logs};
 use rquickjs::{Context, Function, Runtime, Value as JsValue};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(test))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 /// Callback invoked each time ctx.log() is called from JS.
@@ -29,8 +31,44 @@ use std::time::{Duration, Instant};
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const MEMORY_LIMIT: usize = 128 * 1024 * 1024; // 128 MB — bumped from 10MB to handle large file reads and search results in audit workloads
-const STACK_SIZE: usize = 1024 * 1024; // 1 MB
+// B149: 1 MB was too tight for AST traversal in TypeScript / large recursive
+// queries; bump to 4 MB. Still well below typical OS thread defaults.
+const STACK_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// B142: cap concurrent sandbox executions so N parallel agent calls don't
+/// each pin a 128 MB QuickJS heap and OOM the host. Counter-based "semaphore"
+/// keeps the sync execution path simple — callers that hit the cap fail fast.
+#[cfg(not(test))]
+const MAX_CONCURRENT_SANDBOXES: usize = 4;
+#[cfg(not(test))]
+static SANDBOX_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(not(test))]
+struct SandboxPermit;
+#[cfg(not(test))]
+impl SandboxPermit {
+    fn try_acquire() -> Option<Self> {
+        loop {
+            let cur = SANDBOX_INFLIGHT.load(Ordering::Acquire);
+            if cur >= MAX_CONCURRENT_SANDBOXES {
+                return None;
+            }
+            if SANDBOX_INFLIGHT
+                .compare_exchange(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(SandboxPermit);
+            }
+        }
+    }
+}
+#[cfg(not(test))]
+impl Drop for SandboxPermit {
+    fn drop(&mut self) {
+        SANDBOX_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 // ─── Result Type ────────────────────────────────────────────────────────────
 
@@ -81,6 +119,28 @@ fn execute_internal(
     log_callback: Option<LogCallback>,
 ) -> SandboxResult {
     let start = Instant::now();
+
+    // B142: refuse to spin up another runtime past MAX_CONCURRENT_SANDBOXES.
+    // Each runtime can pin MEMORY_LIMIT bytes; uncapped concurrency lets a
+    // batch of parallel agent calls OOM the host. Disabled under cfg(test)
+    // because the test harness runs many sandbox tests in parallel and isn't
+    // exercising the resource-pressure case the cap protects against.
+    #[cfg(not(test))]
+    let _permit = match SandboxPermit::try_acquire() {
+        Some(p) => p,
+        None => {
+            return SandboxResult {
+                value: serde_json::Value::Null,
+                logs: vec![],
+                elapsed_ms: 0,
+                success: false,
+                error: Some(format!(
+                    "Sandbox: too many concurrent executions ({} max), retry shortly",
+                    MAX_CONCURRENT_SANDBOXES
+                )),
+            };
+        }
+    };
 
     // ── Create runtime with limits ──────────────────────────────────
     let runtime = match Runtime::new() {
@@ -174,12 +234,36 @@ fn execute_internal(
                     };
                 }
             }
-            // JS wrapper that stores + calls Rust
+            // B147: rate-limit the FFI hop. The previous wrapper called
+            // `ctx.__log_rust` on every log line, which is fine for occasional
+            // ctx.log() calls but expensive when JS code emits hundreds of
+            // logs in a tight loop. Stream every 10th line OR after 100ms
+            // since the last stream — bulk extract still picks up everything
+            // at the end of run() so no logs are lost.
             let _ = ctx.eval::<(), &str>(r#"
+                ctx.__log_pending = [];
+                ctx.__log_last_stream = 0;
                 ctx.log = function(msg) {
                     var s = String(msg);
                     __logs.push(s);
-                    ctx.__log_rust(s);
+                    ctx.__log_pending.push(s);
+                    var now = Date.now();
+                    var should_flush =
+                        ctx.__log_pending.length >= 10 ||
+                        (now - ctx.__log_last_stream) >= 100;
+                    if (should_flush) {
+                        ctx.__log_last_stream = now;
+                        for (var i = 0; i < ctx.__log_pending.length; i++) {
+                            ctx.__log_rust(ctx.__log_pending[i]);
+                        }
+                        ctx.__log_pending = [];
+                    }
+                };
+                ctx.__flush_logs = function() {
+                    for (var i = 0; i < ctx.__log_pending.length; i++) {
+                        ctx.__log_rust(ctx.__log_pending[i]);
+                    }
+                    ctx.__log_pending = [];
                 };
             "#);
         } else {
@@ -202,18 +286,29 @@ fn execute_internal(
             }
         }
 
-        // Wrap the user code: define the function, then call run(ctx)
+        // B148: wrap user code in a strict-mode IIFE that takes `ctx` as a
+        // parameter. This means a top-level `var ctx = ...` in user code only
+        // shadows within the IIFE scope, not the host-injected ctx, and
+        // strict mode catches more errors at parse time. After run()
+        // returns, flush any pending batched logs (B147).
         let wrapped = format!(
             r#"
-            {code}
+            (function(__ctx__) {{
+                'use strict';
+                var ctx = __ctx__;
+                {code}
 
-            (function() {{
+                var __result__;
                 if (typeof run === 'function') {{
-                    return run(ctx);
+                    __result__ = run(ctx);
                 }} else {{
-                    return {{ error: "No run(ctx) function defined" }};
+                    __result__ = {{ error: "No run(ctx) function defined" }};
                 }}
-            }})()
+                if (typeof ctx.__flush_logs === 'function') {{
+                    ctx.__flush_logs();
+                }}
+                return __result__;
+            }})(ctx)
             "#,
             code = code
         );

@@ -467,6 +467,11 @@ pub struct StoredMessage {
     pub tool_call_id: Option<String>,
     pub name: Option<String>,
     pub created_at: String,
+    /// B190: persisted success flag for tool-result messages.
+    /// `Some(true)` = succeeded, `Some(false)` = failed, `None` = not a
+    /// tool message (or unknown / pre-migration row).
+    #[serde(default)]
+    pub tool_success: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

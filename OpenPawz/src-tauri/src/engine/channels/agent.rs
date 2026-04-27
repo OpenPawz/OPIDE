@@ -171,6 +171,7 @@ pub async fn run_channel_agent(
         tool_call_id: None,
         name: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        tool_success: None,
     };
     engine_state.store.add_message(&user_msg)?;
 
@@ -638,6 +639,7 @@ pub async fn run_channel_agent(
                 tool_call_id: msg.tool_call_id.clone(),
                 name: msg.name.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
+                tool_success: None,
             };
             if let Err(e) = engine_state.store.add_message(&stored) {
                 error!("[{}] Failed to store message: {}", channel_prefix, e);

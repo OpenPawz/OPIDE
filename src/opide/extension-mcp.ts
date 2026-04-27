@@ -243,34 +243,55 @@ export async function registerFormatCommand(): Promise<void> {
  * Extracts to ~/.opide/extensions/{publisher}.{name}/
  * Then checks for a matching MCP adapter and registers it.
  */
+/**
+ * Validate an extension id (`publisher.name`) before letting it anywhere
+ * near a URL or filesystem path. Refuses anything outside the canonical
+ * shape — including `..`, slashes, and empty segments — which closes the
+ * shell-injection vector that B63 documented.
+ */
+function validateExtensionId(id: string): { publisher: string; name: string } {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\.[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(id)) {
+    throw new Error(`Invalid extension id: '${id}' (expected publisher.name with [A-Za-z0-9_.-])`)
+  }
+  if (id.includes('..') || id.includes('/') || id.includes('\\')) {
+    throw new Error(`Invalid extension id: '${id}' (path-like characters refused)`)
+  }
+  const dot = id.indexOf('.')
+  return { publisher: id.slice(0, dot), name: id.slice(dot + 1) }
+}
+
 export async function installExtensionFromOpenVsx(extensionId: string): Promise<boolean> {
   const log = (msg: string) => invoke('ext_host_log', { message: `[install] ${msg}` }).catch(() => {})
 
   try {
     await log(`Installing ${extensionId}...`)
 
-    // Parse publisher.name
-    const parts = extensionId.split('.')
-    if (parts.length < 2) {
-      await log(`Invalid extension ID: ${extensionId} (expected publisher.name)`)
+    // B63: validate id BEFORE we use it in any URL or file path.
+    let publisher: string, name: string
+    try {
+      ({ publisher, name } = validateExtensionId(extensionId))
+    } catch (e) {
+      await log(String(e))
       return false
     }
-    const publisher = parts[0]
-    const name = parts.slice(1).join('.')
 
     // Get the home dir for extensions path
     const extBase = await getExtensionsBase()
     const extDir = `${extBase}/${extensionId}`
 
-    // Download .vsix from Open VSX
-    // API: https://open-vsx.org/api/{publisher}/{name}
-    // Download: https://open-vsx.org/api/{publisher}/{name}/latest/file/{publisher}.{name}-{version}.vsix
+    // B63: fetch metadata via the native ext_fetch_url_text command, which
+    // validates the host against an Open VSX/Marketplace allowlist and
+    // refuses non-https URLs. No more curl-in-shell with interpolated
+    // server data.
     await log(`Fetching metadata from Open VSX...`)
-    const metadataResult = await invoke('ide_run_command', {
-      command: `curl -sL "https://open-vsx.org/api/${publisher}/${name}"`,
-      cwd: '/tmp',
-    }) as any
-    const stdout = metadataResult?.stdout || ''
+    let stdout = ''
+    try {
+      stdout = await invoke('ext_fetch_url_text', {
+        url: `https://open-vsx.org/api/${publisher}/${name}`,
+      }) as string
+    } catch (e) {
+      await log(`Metadata fetch failed: ${e}`)
+    }
 
     let version = 'latest'
     let downloadUrl = ''
@@ -285,37 +306,34 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
       await log(`Metadata parse failed, trying direct download`)
     }
 
-    // Download the .vsix
+    // B63: download via native command (also allowlisted).
     const vsixPath = `/tmp/opide-${extensionId}.vsix`
     await log(`Downloading .vsix...`)
-    await invoke('ide_run_command', {
-      command: `curl -sL "${downloadUrl}" -o "${vsixPath}"`,
-      cwd: '/tmp',
-    })
-
-    // Verify download
-    const checkResult = await invoke('ide_run_command', {
-      command: `file "${vsixPath}"`,
-      cwd: '/tmp',
-    }) as any
-    if (!(checkResult?.stdout || '').includes('Zip')) {
-      await log(`Download failed — not a valid .vsix (zip) file`)
+    try {
+      await invoke('ext_download_url_to_path', { url: downloadUrl, destPath: vsixPath })
+    } catch (e) {
+      await log(`Download failed: ${e}`)
       return false
     }
 
-    // Extract to extensions directory
+    // B64: extract via native zip command. Skips entries whose names
+    // contain `..` or absolute paths and confines extraction to extDir.
     await log(`Extracting to ${extDir}...`)
-    await invoke('ide_run_command', {
-      command: `mkdir -p "${extDir}" && cd "${extDir}" && unzip -o "${vsixPath}" -d . > /dev/null 2>&1 && if [ -d extension ]; then mv extension/* . 2>/dev/null; mv extension/.* . 2>/dev/null; rmdir extension 2>/dev/null; fi && rm -f "${vsixPath}"`,
-      cwd: '/tmp',
-    })
+    try {
+      await invoke('ext_extract_vsix', { vsixPath, targetDir: extDir })
+    } catch (e) {
+      await log(`Extraction failed: ${e}`)
+      return false
+    }
 
-    // Verify package.json exists
-    const verifyResult = await invoke('ide_run_command', {
-      command: `cat "${extDir}/package.json" | head -5`,
-      cwd: '/',
-    }) as any
-    if (!(verifyResult?.stdout || '').includes('"name"')) {
+    // Verify package.json exists via the existing read_file tool.
+    let pkgContent = ''
+    try {
+      pkgContent = await invoke('ide_read_file', { path: `${extDir}/package.json` }) as string
+    } catch {
+      // ignore — handled by the `includes` check below
+    }
+    if (!pkgContent.includes('"name"')) {
       await log(`Install failed — no valid package.json in extracted extension`)
       return false
     }
@@ -422,8 +440,11 @@ async function registerAdapterForExtension(extensionId: string, extDir: string):
       const generatorPath = await resolveAdapterPath('extension-adapters/generate-adapter.cjs')
       const wsPath = await getWorkspacePath()
 
-      // Get user's API config for cloud AI fallback
-      let apiArgs = ''
+      // Get user's API config for cloud AI fallback. Pass via env vars (B65)
+      // instead of argv so the API key doesn't appear in the host's process
+      // table. The adapter generator must read OPIDE_API_KEY/OPIDE_API_URL/
+      // OPIDE_MODEL from process.env.
+      const env: Record<string, string> = {}
       try {
         const config = await invoke('engine_get_config') as any
         await log(`Config: ${JSON.stringify({ providers: (config?.providers || []).map((p: any) => ({ id: p.id, has_key: !!p.api_key, base_url: p.base_url })), default_model: config?.default_model }).slice(0, 500)}`)
@@ -431,23 +452,24 @@ async function registerAdapterForExtension(extensionId: string, extDir: string):
         const defaultProvider = config?.default_provider || ''
         const defaultModel = config?.default_model || ''
 
-        // Find the matching provider: prefer default_provider, then any with a key
         let provider = providers.find((p: any) => p.id === defaultProvider && p.api_key)
         if (!provider) provider = providers.find((p: any) => p.api_key && p.id !== 'ollama')
 
         if (provider) {
-          const url = provider.base_url || 'https://api.openai.com/v1/chat/completions'
-          const mdl = defaultModel || 'gpt-4o-mini'
-          apiArgs = ` --api-key "${provider.api_key}" --api-url "${url}" --model "${mdl}"`
-          await log(`Using provider ${provider.id} for adapter generation (model: ${mdl}, url: ${url})`)
+          env.OPIDE_API_KEY = provider.api_key
+          env.OPIDE_API_URL = provider.base_url || 'https://api.openai.com/v1/chat/completions'
+          env.OPIDE_MODEL = defaultModel || 'gpt-4o-mini'
+          await log(`Using provider ${provider.id} for adapter generation (model: ${env.OPIDE_MODEL}, url: ${env.OPIDE_API_URL})`)
+        } else {
+          await log('No provider with API key found — Ollama only')
         }
-        if (!apiArgs) await log('No provider with API key found — Ollama only')
       } catch (e) {
         await log(`Config read failed: ${e}`)
       }
 
       const genResult = await invoke('ide_run_command', {
-        command: `node "${generatorPath}" "${extDir}" --workspace "${wsPath || '/tmp'}"${apiArgs}`,
+        command: `node "${generatorPath}" "${extDir}" --workspace "${wsPath || '/tmp'}"`,
+        env,
         cwd: '/',
       }) as any
 

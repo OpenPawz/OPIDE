@@ -8,21 +8,29 @@ use tauri::Manager;
 
 pub(crate) struct OpideHostApi {
     app_handle: tauri::AppHandle,
-    rt: tokio::runtime::Handle,
 }
 
 impl OpideHostApi {
     pub(crate) fn new(app_handle: tauri::AppHandle) -> Self {
-        Self {
-            app_handle,
-            rt: tokio::runtime::Handle::current(),
-        }
+        Self { app_handle }
     }
 
     /// Run an async future from sync context without panicking.
-    /// Uses block_in_place to avoid "Cannot start a runtime from within a runtime".
+    ///
+    /// B83: look up the tokio runtime at call time rather than caching at
+    /// construction. Tauri's main runtime is multi-threaded so the primary
+    /// path uses `block_in_place`. If we're somehow called outside a tokio
+    /// runtime (panic unwind, sync helper), we spin up a temporary
+    /// current-thread runtime instead of panicking.
     fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-        tokio::task::block_in_place(|| self.rt.block_on(future))
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => tokio::task::block_in_place(|| rt.block_on(future)),
+            Err(_) => tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build temporary tokio runtime")
+                .block_on(future),
+        }
     }
 }
 
@@ -50,17 +58,96 @@ impl opide_sandbox::HostApi for OpideHostApi {
         let path = path.to_string();
         let content = content.to_string();
 
-        let original = self.block_on(async {
-            tokio::fs::read_to_string(&path).await.unwrap_or_default()
-        });
+        // B194 (1): refuse credential-shaped content unconditionally,
+        // regardless of file existence or auto-approve eligibility.
+        // The OPIDE sandbox path was the only file-write surface that
+        // never ran this check; without it, a single execute_code call
+        // could plant an OPENAI_API_KEY=sk-… file on the user's
+        // Desktop with zero prompt. Reproduced by Kimi 2026-04-26.
+        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&content) {
+            log::warn!(
+                "[host-api] B194: refusing write to '{}' — content contains {} (auto-approve bypassed regardless)",
+                path, kind
+            );
+            return Err(format!(
+                "Refusing to write '{}': content contains what looks like a {}. \
+                 Credentials should be stored via the engine's skill vault, not on disk.",
+                path, kind
+            ));
+        }
 
-        // New files are auto-approved — no diff to show, no review needed.
-        // Writes to /tmp/ are always auto-approved — they're outside the project,
-        // no user files are at risk (pipeline output, build artifacts, etc).
-        // Only modifications to existing project files require user review.
-        let is_tmp = path.starts_with("/tmp/") || path.starts_with("/var/folders/");
-        if original.is_empty() || is_tmp {
-            log::info!("[host-api] file_write: '{}' — auto-approved", path);
+        // B194 (2): refuse paths that hit the engine's sensitive-path
+        // blocklist (~/.ssh, .aws/credentials, /etc/passwd, engine
+        // source, etc.). The blocklist is defined once in engine::util
+        // and shared with the standalone filesystem tool.
+        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+            log::warn!("[host-api] B194: {}", reason);
+            return Err(reason);
+        }
+
+        // B80 (1): distinguish "file genuinely doesn't exist" from "read
+        // failed for some other reason." The previous unwrap_or_default
+        // treated permission errors as "new file" → auto-approve bypass.
+        let read_outcome: Result<Option<String>, String> = self.block_on(async {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(s) => Ok(Some(s)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(format!("Read failed: {e}")),
+            }
+        });
+        let (original, file_existed) = match read_outcome {
+            Ok(Some(s)) => (s, true),
+            Ok(None) => (String::new(), false),
+            Err(e) => return Err(format!(
+                "Cannot determine current contents of '{}': {} — refusing to bypass review.",
+                path, e
+            )),
+        };
+
+        // B80 (2): canonicalize before trusting any prefix-based auto-approve
+        // — defeats `..` traversal and symlink tricks. Use the parent dir if
+        // the file doesn't exist yet so canonicalization can still succeed.
+        let canonical = if file_existed {
+            std::path::Path::new(&path).canonicalize().ok()
+        } else if let Some(parent) = std::path::Path::new(&path).parent() {
+            if parent.as_os_str().is_empty() {
+                std::env::current_dir().ok()
+            } else {
+                parent.canonicalize().ok().and_then(|p| {
+                    Some(p.join(std::path::Path::new(&path).file_name()?))
+                })
+            }
+        } else {
+            None
+        };
+        let is_tmp = canonical.as_ref().map(|p| {
+            let s = p.to_string_lossy();
+            // Include macOS canonical /tmp aliases.
+            s.starts_with("/tmp/") || s.starts_with("/private/tmp/") || s.starts_with("/var/folders/")
+        }).unwrap_or(false);
+
+        // B203: drop the previous workspace-bound force_review. The user
+        // already approved the parent execute_code call at the agent-loop
+        // tier (B198) and saw the path in the JS args before clicking
+        // Approve. Asking again at this layer was a redundant second gate
+        // that opened a Monaco diff editor most users never noticed —
+        // resulting in a 600s timeout and a cryptic "write blocked"
+        // error. Behavior now:
+        //
+        //   - new file anywhere → auto-approve (single approval upstream)
+        //   - existing file in /tmp / allowlisted → auto-approve
+        //   - existing file elsewhere → diff-editor review (visual diff
+        //     for the actual changes — different value-add than tier
+        //     approval)
+        //
+        // B194/B195 still refuse credential content + sensitive paths
+        // unconditionally above, so the safety net for yolo-mode (where
+        // the engine-tier prompt doesn't fire) is intact.
+        if !file_existed || is_tmp {
+            log::info!(
+                "[host-api] file_write: '{}' — auto-approved (new={}, tmp={})",
+                path, !file_existed, is_tmp
+            );
             return self.block_on(opide_shell::ide_mcp::ide_write_file(path, content));
         }
 
@@ -83,13 +170,37 @@ impl opide_sandbox::HostApi for OpideHostApi {
     fn file_append(&self, path: &str, content: &str) -> Result<(), String> {
         let path = path.to_string();
         let content = content.to_string();
+
+        // B194: same gates as file_write. The new content alone gets the
+        // credential check (we don't punish the user for credentials
+        // already in the existing file — those landed via some other
+        // path). The path itself is checked against the sensitive list.
+        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&content) {
+            log::warn!(
+                "[host-api] B194: refusing append to '{}' — content contains {}",
+                path, kind
+            );
+            return Err(format!(
+                "Refusing to append to '{}': content contains what looks like a {}. \
+                 Credentials should be stored via the engine's skill vault, not on disk.",
+                path, kind
+            ));
+        }
+        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+            log::warn!("[host-api] B194: {}", reason);
+            return Err(reason);
+        }
+
+        // B203: drop the workspace-bound second gate (see file_write
+        // above for rationale). Single-approval flow:
+        //   - new file (no existing content) → auto-approve
+        //   - existing file → diff-editor review for visual diff
         let existing = match self.block_on(opide_shell::ide_mcp::ide_read_file(path.clone())) {
             Ok(fc) => fc.content,
             Err(_) => String::new(),
         };
         let combined = format!("{}{}", existing, content);
 
-        // Appending to a new file (no existing content) is auto-approved.
         if existing.is_empty() {
             log::info!("[host-api] file_append: new file '{}' — auto-approved", path);
             return match self.block_on(opide_shell::ide_mcp::ide_write_file(path.clone(), combined)) {
@@ -122,15 +233,34 @@ impl opide_sandbox::HostApi for OpideHostApi {
 
     fn file_delete(&self, path: &str) -> Result<(), String> {
         let path = path.to_string();
+
+        // B194: refuse deletes against the sensitive-path blocklist
+        // even before we ask for review. This stops an agent that's
+        // been auto-approved-everything from rm -rf'ing the user's
+        // .ssh tree just because the user clicked "yes" once on a
+        // delete prompt for a benign file.
+        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+            log::warn!("[host-api] B194: {}", reason);
+            return Err(reason);
+        }
+
         let desc = format!("Delete {}", path);
         match self.block_on(crate::engine::frontend_bridge::request_edit_review(
             &self.app_handle, &path, &path, "", "ide_delete_file", &desc,
         )) {
             Ok(true) => match self.block_on(async {
-                match tokio::fs::remove_file(&path).await {
-                    Ok(()) => Ok(()),
-                    Err(_) => tokio::fs::remove_dir(&path).await
-                        .map_err(|e| format!("Delete failed: {e}")),
+                // B81: stat first; branch on actual file kind. The previous
+                // code fell back to remove_dir on ANY remove_file failure
+                // (permissions, busy, etc.), which could clobber the wrong
+                // entity if the path resolved to a directory unexpectedly.
+                let meta = tokio::fs::metadata(&path).await
+                    .map_err(|e| format!("Cannot stat '{}': {}", path, e))?;
+                if meta.is_dir() {
+                    tokio::fs::remove_dir_all(&path).await
+                        .map_err(|e| format!("Failed to delete directory '{}': {}", path, e))
+                } else {
+                    tokio::fs::remove_file(&path).await
+                        .map_err(|e| format!("Failed to delete file '{}': {}", path, e))
                 }
             }) {
                 Ok(()) => Ok(()),
@@ -168,6 +298,25 @@ impl opide_sandbox::HostApi for OpideHostApi {
     fn apply_edit(&self, path: &str, start_line: usize, end_line: usize, new_content: &str) -> Result<(), String> {
         let path = path.to_string();
         let new_content = new_content.to_string();
+
+        // B194: same gates as file_write — apply_edit is just a
+        // structured write. Run them BEFORE reading the original so we
+        // don't disclose its contents in any error path.
+        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&new_content) {
+            log::warn!(
+                "[host-api] B194: refusing edit to '{}' — new content contains {}",
+                path, kind
+            );
+            return Err(format!(
+                "Refusing to edit '{}': new content contains what looks like a {}. \
+                 Credentials should be stored via the engine's skill vault, not on disk.",
+                path, kind
+            ));
+        }
+        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+            log::warn!("[host-api] B194: {}", reason);
+            return Err(reason);
+        }
 
         // Gate through edit review if frontend is available
         let original = match self.block_on(async {
@@ -207,6 +356,59 @@ impl opide_sandbox::HostApi for OpideHostApi {
     fn exec(&self, command: &str, cwd: Option<&str>) -> Result<opide_sandbox::ExecResult, String> {
         let command = command.to_string();
         let cwd = cwd.map(|s| s.to_string());
+
+        // B195: same gates as `tool_executor::ide_run_command`. The
+        // sandbox `ctx.exec` is the second shell entry point — without
+        // this check, `ctx.exec("printf 'KEY=sk-...' > file")` bypasses
+        // the file-write credential heuristic the same way the direct
+        // tool dispatch did.
+        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&command) {
+            log::warn!(
+                "[host-api] B195: refusing exec — command contains {}",
+                kind
+            );
+            return Err(format!(
+                "Refusing to run command: it contains what looks like a {}. \
+                 Use the engine's skill vault for credentials, or pass them \
+                 via environment variables instead of literal values.",
+                kind
+            ));
+        }
+        if let Some(target) = super::tool_executor::sensitive_redirect_target(&command) {
+            log::warn!(
+                "[host-api] B195: refusing exec — redirects to sensitive path '{}'",
+                target
+            );
+            return Err(format!(
+                "Refusing to run command: redirects to '{}', which is blocked by \
+                 the sensitive-path policy.",
+                target
+            ));
+        }
+
+        // B198: workspace boundary on the redirect target. Same logic as
+        // tool_executor's ide_run_command path so `ctx.exec("echo > x")`
+        // and `ctx.tool('ide_run_command', …)` are gated identically.
+        let active_workspace: Option<String> = self
+            .app_handle
+            .try_state::<paw_temp_lib::engine::state::EngineState>()
+            .and_then(|st| st.active_workspace.lock().clone());
+        if let Some(target) = super::tool_executor::off_workspace_redirect_target(
+            &command,
+            active_workspace.as_deref(),
+        ) {
+            log::warn!(
+                "[host-api] B198: refusing exec — redirect target '{}' is outside the active workspace",
+                target
+            );
+            return Err(format!(
+                "Refusing to run command: it redirects to '{}', which is outside the \
+                 active workspace. Use `ctx.file_write` for that path so the user gets \
+                 a review prompt, or open that folder as the workspace first.",
+                target
+            ));
+        }
+
         match self.block_on(opide_shell::ide_mcp::ide_run_command(command.clone(), cwd)) {
             Ok(result) => Ok(opide_sandbox::ExecResult {
                 stdout: result.stdout,
@@ -531,10 +733,13 @@ impl opide_sandbox::HostApi for OpideHostApi {
     }
 
     fn tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
-        // Gate through IDE tool filter — sandbox cannot call tools outside the allowlist.
+        // Gate through IDE tool filter — sandbox cannot call tools outside the
+        // allowlist. B86: return Err so the sandbox sees a thrown JS exception
+        // (clean failure) instead of an Ok with an "error" payload (which the
+        // sandbox JS could ignore and keep retrying).
         if !crate::engine::tool_filter::IDE_ALLOWED_TOOLS.contains(&name) {
             log::warn!("[host-api] ctx.tool('{}') blocked — not in IDE_ALLOWED_TOOLS", name);
-            return Ok(json!({"error": format!("Tool '{}' is not available in this context", name)}));
+            return Err(format!("Tool '{}' is not available in this context", name));
         }
 
         // Emit sandbox-subtool-start so the activity feed can show this sub-tool in real time.

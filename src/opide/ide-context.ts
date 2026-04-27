@@ -29,7 +29,6 @@ let _selection: string | null = null
 let _selectionRange: { startLine: number; endLine: number } | null = null
 let _openTabs: string[] = []
 let _workspacePath: string | null = null
-let _recentTerminalOutput: string | null = null
 
 // ─── Public Setters (called by editor integration) ────────────────────────────
 
@@ -53,10 +52,6 @@ export function setWorkspacePath(path: string | null): void {
   _workspacePath = path
 }
 
-export function setRecentTerminalOutput(output: string | null): void {
-  _recentTerminalOutput = output
-}
-
 // ─── Context Builder ──────────────────────────────────────────────────────────
 
 /**
@@ -75,16 +70,28 @@ export async function gatherIdeContext(): Promise<string> {
   if (_activeFilePath) {
     parts.push(`Active file: ${_activeFilePath} (${_activeFileLanguage || 'unknown'})`)
 
-    // Include first 100 lines of the active file so the agent sees what the user sees
+    // Prefer the in-memory Monaco model over a disk read — same value, no IPC,
+    // and reflects unsaved edits the user is currently looking at (B43).
     try {
-      const fileResult = await invoke<{ content: string }>('ide_read_file', { path: _activeFilePath })
-      if (fileResult?.content) {
-        const lines = fileResult.content.split('\n')
+      let content: string | null = null
+      try {
+        const monaco = await import('monaco-editor')
+        const model = monaco.editor.getModel(monaco.Uri.file(_activeFilePath))
+        if (model) content = model.getValue()
+      } catch { /* monaco not ready — fall through to disk */ }
+
+      if (content == null) {
+        const fileResult = await invoke<{ content: string }>('ide_read_file', { path: _activeFilePath })
+        content = fileResult?.content ?? null
+      }
+
+      if (content) {
+        const lines = content.split('\n')
         const snippet = lines.slice(0, 100).join('\n')
         const truncated = lines.length > 100 ? `\n... (${lines.length - 100} more lines)` : ''
         parts.push(`File content (first 100 lines):\n\`\`\`${_activeFileLanguage || ''}\n${snippet}${truncated}\n\`\`\``)
       }
-    } catch { /* file read failed, skip content */ }
+    } catch { /* skip content */ }
   }
 
   // Selection
@@ -143,11 +150,10 @@ export async function gatherIdeContext(): Promise<string> {
     } catch { /* not a git repo */ }
   }
 
-  // Recent terminal output
-  if (_recentTerminalOutput) {
-    const trimmed = _recentTerminalOutput.slice(-500)
-    parts.push(`Recent terminal:\n\`\`\`\n${trimmed}\n\`\`\``)
-  }
+  // (B39/B40 cluster: the "recent terminal output" plumbing was dead — the
+  // setter was never called and the getter destructured a non-exported name.
+  // Removed entirely; if we need this feature later, wire it from
+  // terminal-backend.ts and re-export a getter.)
 
   // Codebase index context (project overview + symbol table)
   try {

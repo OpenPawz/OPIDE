@@ -63,10 +63,11 @@ async function registerKeybinding(): Promise<void> {
   try {
     const editorService = await getService(ICodeEditorService)
 
-    // Wire keybinding on each editor that gets created
+    // Wire keybinding on each editor that gets created.
+    // Monaco's KeyMod/KeyCode enums aren't statically importable in this
+    // build; documented values from Monaco's standaloneKeybindingService.
     const wireEditor = (editor: any) => {
-      // Monaco KeyMod.CtrlCmd | KeyCode.KeyK
-      editor.addCommand?.(2048 /* CtrlCmd */ | 41 /* KeyK */, () => {
+      editor.addCommand?.(2048 /* KeyMod.CtrlCmd */ | 41 /* KeyCode.KeyK */, () => {
         showInlinePrompt()
       })
     }

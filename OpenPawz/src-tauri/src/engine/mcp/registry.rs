@@ -103,6 +103,13 @@ impl McpRegistry {
 
         // §Security: scan MCP results for prompt injection before returning to agent.
         // Both Ok and Err paths are scanned — rogue servers can embed payloads in errors too.
+        //
+        // B154: always sanitize on any injection match. Previously only
+        // Medium+ severities were sanitized, leaving Low-severity prompt
+        // hijacks (e.g. embedded `Ignore previous instructions...` lines
+        // that don't trip the high-confidence patterns) to flow through
+        // unmodified. The cost of sanitization is small; the cost of a
+        // missed injection is large.
         Some(match result {
             Ok(text) => {
                 let scan = scan_for_injection(&text);
@@ -112,11 +119,7 @@ impl McpRegistry {
                         "[mcp] Injection detected in result from server '{}' tool '{}' (severity={:?})",
                         server_id, tool_name, sev
                     );
-                    if sev >= InjectionSeverity::Medium {
-                        Ok(sanitize_recalled_memory(&text))
-                    } else {
-                        Ok(text)
-                    }
+                    Ok(sanitize_recalled_memory(&text))
                 } else {
                     Ok(text)
                 }
@@ -129,11 +132,7 @@ impl McpRegistry {
                         "[mcp] Injection detected in error from server '{}' tool '{}' (severity={:?})",
                         server_id, tool_name, sev
                     );
-                    if sev >= InjectionSeverity::Medium {
-                        Err(sanitize_recalled_memory(&err))
-                    } else {
-                        Err(err)
-                    }
+                    Err(sanitize_recalled_memory(&err))
                 } else {
                     Err(err)
                 }
@@ -142,17 +141,22 @@ impl McpRegistry {
     }
 
     /// Status of all configured servers.
-    pub fn status_list(&self) -> Vec<McpServerStatus> {
-        self.clients
-            .values()
-            .map(|c| McpServerStatus {
+    /// B150: actually probe each transport instead of returning `true`. The
+    /// previous behavior reported dead servers as connected because the
+    /// client was still in the map even after the child process exited.
+    pub async fn status_list(&self) -> Vec<McpServerStatus> {
+        let mut out = Vec::with_capacity(self.clients.len());
+        for c in self.clients.values() {
+            let connected = c.is_alive().await;
+            out.push(McpServerStatus {
                 id: c.config.id.clone(),
                 name: c.config.name.clone(),
-                connected: true, // if it's in the map, it's considered connected
+                connected,
                 error: None,
                 tool_count: c.tools.len(),
-            })
-            .collect()
+            });
+        }
+        out
     }
 
     /// Get the list of connected server IDs.
@@ -230,6 +234,9 @@ impl McpRegistry {
                     }
                     Err(e) => {
                         info!("[mcp] MCP token auth failed: {}", e);
+                        // B156: ensure no half-initialised client lingers in
+                        // the registry before the next strategy retries.
+                        self.disconnect(N8N_MCP_SERVER_ID).await;
                     }
                 }
             }
@@ -268,6 +275,8 @@ impl McpRegistry {
                 }
                 Err(e) => {
                     info!("[mcp] API key auth at /mcp-server/http failed: {}", e);
+                    // B156: same cleanup as strategy 1 before falling back to SSE.
+                    self.disconnect(N8N_MCP_SERVER_ID).await;
                 }
             }
         }
@@ -363,12 +372,26 @@ fn mcp_tool_to_paw_def(server_id: &str, tool: &McpToolDef) -> ToolDefinition {
     // - Replace hyphens and dots with underscores (some APIs reject them)
     // - Strip any char that isn't alphanumeric or underscore
     // - Truncate to 64 chars (OpenAI/Azure limit)
-    let sanitized_name: String = clean_name
+    let raw_sanitized: String = clean_name
         .replace(['-', '.'], "_")
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .take(64)
         .collect();
+
+    // B151: when truncation kicks in, append a stable hash suffix so two
+    // long tool names that share a 64-char prefix don't collide into the
+    // same OpenAI tool name. Total length stays ≤64 (56 + 1 + 6 = 63).
+    let sanitized_name = if raw_sanitized.len() > 64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        raw_sanitized.hash(&mut hasher);
+        let hash_hex = format!("{:x}", hasher.finish());
+        let head: String = raw_sanitized.chars().take(56).collect();
+        format!("{}_{}", head, &hash_hex[..6])
+    } else {
+        raw_sanitized
+    };
 
     ToolDefinition {
         tool_type: "function".into(),
@@ -427,30 +450,43 @@ fn pascal_to_snake(name: &str) -> String {
 /// find the matching server and original tool name.
 /// We need this because server IDs themselves may contain underscores.
 /// Also handles sanitized names where hyphens/dots were replaced with underscores.
+///
+/// B152: when multiple server-id prefixes match the stripped name (e.g.
+/// `mcp_db_read` could split as `db / read` or `d / b_read` if both
+/// servers exist), verify the candidate tool is actually exposed by the
+/// server. Without that check, the longest-prefix heuristic could route
+/// to the wrong server when the second-longest match happened to have a
+/// real tool by that name.
 fn find_server_and_tool<'a>(
     stripped: &'a str,
     clients: &'a HashMap<String, McpClient>,
 ) -> Option<(&'a str, &'a str)> {
-    // Try matching against known server IDs (longest match first for safety)
     let mut ids: Vec<&String> = clients.keys().collect();
     ids.sort_by_key(|b| std::cmp::Reverse(b.len())); // longest first
 
+    let mut fallback: Option<(&str, &str)> = None;
+
     for id in ids {
-        // Try exact match first
-        if let Some(rest) = stripped.strip_prefix(id.as_str()) {
-            if let Some(tool_name) = rest.strip_prefix('_') {
-                return Some((id.as_str(), tool_name));
-            }
-        }
-        // Try sanitized match (hyphens/dots → underscores)
-        let sanitized_id = id.replace(['-', '.'], "_");
-        if let Some(rest) = stripped.strip_prefix(sanitized_id.as_str()) {
-            if let Some(tool_name) = rest.strip_prefix('_') {
-                return Some((id.as_str(), tool_name));
+        for candidate in [id.clone(), id.replace(['-', '.'], "_")] {
+            if let Some(rest) = stripped.strip_prefix(candidate.as_str()) {
+                if let Some(tool_name) = rest.strip_prefix('_') {
+                    if let Some(client) = clients.get(id.as_str()) {
+                        if client.tools.iter().any(|t| t.name == tool_name) {
+                            return Some((id.as_str(), tool_name));
+                        }
+                    }
+                    // Remember the longest-prefix match even if the tool
+                    // isn't found, so a freshly-connected server whose
+                    // tool list hasn't refreshed yet still routes plausibly.
+                    if fallback.is_none() {
+                        let split = stripped.split_at(candidate.len());
+                        fallback = Some((id.as_str(), &split.1[1..]));
+                    }
+                }
             }
         }
     }
-    None
+    fallback
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -528,11 +564,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_registry_new_is_empty() {
+    #[tokio::test]
+    async fn test_registry_new_is_empty() {
         let reg = McpRegistry::new();
         assert!(reg.all_tool_definitions().is_empty());
-        assert!(reg.status_list().is_empty());
+        assert!(reg.status_list().await.is_empty());
         assert!(reg.connected_ids().is_empty());
     }
 }

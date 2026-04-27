@@ -7,21 +7,46 @@
  */
 
 import { open } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { initScmProvider } from './scm-provider.ts'
 import { registerSearchProviders } from './search-provider.ts'
+
+/**
+ * B197: tell the engine which folder is now active so its host_api.rs and
+ * system-prompt builder can scope agent operations accordingly. Best-effort
+ * — failure to update the engine shouldn't block opening the folder.
+ */
+async function notifyEngineWorkspace(path: string | null): Promise<void> {
+  try {
+    await invoke('engine_set_active_workspace', { path })
+  } catch (e) {
+    console.warn('[opide-workspace] engine_set_active_workspace failed:', e)
+  }
+}
 
 // ─── Deduplication guards ───────────────────────────────────────────────────
 
 const _initializedPaths = new Set<string>()
 const _openWorkspaceEmitted = new Set<string>()
+const MAX_TRACKED_PATHS = 32
+
+/** Add to a tracking set, evicting the oldest entry if we exceed the cap. */
+function trackPath(s: Set<string>, path: string): void {
+  if (s.has(path)) return
+  s.add(path)
+  if (s.size > MAX_TRACKED_PATHS) {
+    const first = s.values().next().value
+    if (first) s.delete(first)
+  }
+}
 
 async function ensureServicesForPath(path: string): Promise<void> {
   if (_initializedPaths.has(path)) {
     console.log('[opide-workspace] services already initialized for', path, '— skipping')
     return
   }
-  _initializedPaths.add(path)
+  trackPath(_initializedPaths, path)
   console.log('[opide-workspace] initializing SCM + search for', path)
   try { await initScmProvider(path) } catch (e) {
     console.warn('[opide-workspace] SCM init failed:', e)
@@ -32,11 +57,17 @@ async function ensureServicesForPath(path: string): Promise<void> {
 }
 
 async function emitOpenWorkspaceOnce(path: string): Promise<void> {
+  // B197: always tell the engine, even if the indexer event was already
+  // emitted earlier in this session. The engine state is process-local
+  // (vs. the indexer's per-file caching) and missing it here means
+  // host_api treats every write as off-workspace.
+  await notifyEngineWorkspace(path)
+
   if (_openWorkspaceEmitted.has(path)) {
     console.log('[opide-workspace] open-workspace already emitted for', path, '— skipping')
     return
   }
-  _openWorkspaceEmitted.add(path)
+  trackPath(_openWorkspaceEmitted, path)
   const { emit } = await import('@tauri-apps/api/event')
   await emit('open-workspace', { path })
   console.log('[opide-workspace] emitted open-workspace for:', path)
@@ -46,13 +77,17 @@ async function emitOpenWorkspaceOnce(path: string): Promise<void> {
 
 /**
  * Read the current workspace path from the URL hash.
- * Format: #/path/to/folder
+ * Format: #/path/to/folder (Unix) or #C:/path or #C:\path (Windows) or #\\\\server\share (UNC).
  */
 export function getWorkspacePath(): string | null {
   const hash = window.location.hash.slice(1)
   if (!hash) return null
   const decoded = decodeURIComponent(hash)
-  return decoded.startsWith('/') ? decoded : null
+  // Accept Unix-style /…, UNC \\…, and Windows drive letters X:\… or X:/… (B58).
+  if (decoded.startsWith('/') || decoded.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(decoded)) {
+    return decoded
+  }
+  return null
 }
 
 /**
@@ -208,11 +243,36 @@ export async function listenForWorkspaceOpen(): Promise<void> {
 
         await editingService.addFolders([{ uri: URI.file(path) }])
 
-        // Verify addFolders actually worked — give the context service a tick to sync,
-        // then check if the folder appears in the workspace
-        await new Promise((r) => setTimeout(r, 100))
-        const folders = ctxService?.getWorkspace?.()?.folders ?? []
-        const folderAdded = folders.some((f: any) => f.uri?.path === path)
+        // Wait for the folder change to propagate via the workspace event
+        // rather than guessing with setTimeout(100) (B62). Bail out after 2s
+        // as a safety net; falls through to the next addFolders strategy.
+        const folderAdded: boolean = await new Promise<boolean>((resolve) => {
+          const safety = setTimeout(() => { try { sub?.dispose?.() } catch {}; resolve(false) }, 2000)
+          // If it's already there (synchronous addFolders), resolve immediately.
+          const initial = ctxService?.getWorkspace?.()?.folders ?? []
+          if (initial.some((f: any) => f.uri?.path === path || f.uri?.fsPath === path)) {
+            clearTimeout(safety)
+            resolve(true)
+            return
+          }
+          let sub: { dispose(): void } | null = null
+          sub = ctxService?.onDidChangeWorkspaceFolders?.((e: any) => {
+            const added: any[] = e?.added ?? []
+            if (added.some((f: any) => f?.uri?.path === path || f?.uri?.fsPath === path)) {
+              clearTimeout(safety)
+              try { sub?.dispose?.() } catch {}
+              resolve(true)
+            }
+          }) ?? null
+          if (!sub) {
+            // No event API — best-effort short wait + recheck.
+            setTimeout(() => {
+              const folders = ctxService?.getWorkspace?.()?.folders ?? []
+              clearTimeout(safety)
+              resolve(folders.some((f: any) => f.uri?.path === path))
+            }, 200)
+          }
+        })
 
         if (folderAdded) {
           console.log('[opide-workspace] Workspace replaced with:', path)

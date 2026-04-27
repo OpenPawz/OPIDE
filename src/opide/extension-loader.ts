@@ -214,29 +214,20 @@ export async function loadAllInstalledExtensions(): Promise<void> {
   try {
     const extBase = await getExtensionsBase()
 
-    // Single shell command: list dirs AND read all package.jsons at once
-    // Output format: DIR_NAME\t{json content}\n===\n
-    const result = await invoke('ide_run_command', {
-      command: `for d in "${extBase}"/*/; do [ -f "$d/package.json" ] && echo "$(basename "$d")\t$(cat "$d/package.json")" && echo "===OPIDE_SEP==="; done 2>/dev/null`,
-      cwd: '/',
-    }) as any
-    const output = (result?.stdout || '').trim()
-    if (!output) return
+    // List dirs via the typed IPC and read package.json per directory in
+    // parallel. Avoids the previous shell glob (B48) which would inject if
+    // extBase ever contained shell metacharacters.
+    const list = await invoke<{ entries: { name: string; is_dir: boolean }[] }>('ide_list_dir', {
+      path: extBase,
+    }).catch(() => null)
+    const dirs = (list?.entries ?? []).filter(e => e.is_dir).map(e => e.name)
 
-    // Parse all extensions from the single command output
-    const entries = output.split('===OPIDE_SEP===').filter((s: string) => s.trim())
-
-    for (const entry of entries) {
-      const tabIdx = entry.indexOf('\t')
-      if (tabIdx === -1) continue
-      const extId = entry.substring(0, tabIdx).trim()
-      const jsonStr = entry.substring(tabIdx + 1).trim()
-      if (!extId || !jsonStr) continue
-
+    await Promise.all(dirs.map(async (extId) => {
       try {
-        await loadExtensionWithManifest(`${extBase}/${extId}`, extId, JSON.parse(jsonStr))
+        const fc = await invoke<FileContent>('ide_read_file', { path: `${extBase}/${extId}/package.json` })
+        await loadExtensionWithManifest(`${extBase}/${extId}`, extId, JSON.parse(fc.content))
       } catch { /* skip broken extensions */ }
-    }
+    }))
   } catch { /* fail silently */ }
 }
 
@@ -263,14 +254,11 @@ export function isExtensionLoaded(extensionId: string): boolean {
 
 async function getExtensionsBase(): Promise<string> {
   if (_cachedExtBase) return _cachedExtBase
-  try {
-    const result = await invoke('ide_run_command', { command: 'echo $HOME', cwd: '/' }) as any
-    const home = (result?.stdout || '').trim()
-    if (home && home.length > 1) {
-      _cachedExtBase = `${home}/.opide/extensions`
-      return _cachedExtBase
-    }
-  } catch {}
-  _cachedExtBase = '/Users/elibury/.opide/extensions'
+  // Use Tauri's homeDir() — works cross-platform without shelling out (B36/B47).
+  // Previously fell back to a hardcoded developer path that shipped to all users.
+  const { homeDir } = await import('@tauri-apps/api/path')
+  const home = (await homeDir()).replace(/[\\/]+$/, '')
+  if (!home) throw new Error('Could not determine home directory for extensions base')
+  _cachedExtBase = `${home}/.opide/extensions`
   return _cachedExtBase
 }

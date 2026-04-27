@@ -9,26 +9,65 @@ use tauri::Manager;
 
 /// §Security: SSRF protection — block access to internal/private network addresses
 /// and cloud metadata endpoints. Applied unconditionally before any network policy.
+///
+/// B166: parse the URL and route IP literals through `is_private_ip` (so
+/// IPv6-mapped IPv4 like `::ffff:127.0.0.1` and shorthand are handled by
+/// the canonical-form check) plus an explicit cloud-metadata hostname
+/// suffix list. Substring fallback retained for malformed URLs the parser
+/// can't pull a host out of.
 fn is_ssrf_target(url: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url) {
+        if let Some(host) = parsed.host_str() {
+            // IP literal? Use canonical-form check.
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                return is_private_ip(&ip);
+            }
+            // Hostname — match cloud-metadata names by host suffix.
+            let host_l = host.to_lowercase();
+            const META_HOSTS: &[&str] = &[
+                "localhost",
+                "metadata.google.internal",
+                "metadata.gce",
+                "metadata.azure.com",
+                "metadata",
+            ];
+            for h in META_HOSTS {
+                if host_l == *h || host_l.ends_with(&format!(".{}", h)) {
+                    return true;
+                }
+            }
+            // Reject hostnames that look like non-canonical IP encodings
+            // the URL parser left as-is (`0x7f000001`, decimal `2130706433`,
+            // shorthand `127.1`). Pure-digit-and-dot host strings whose
+            // IpAddr parse failed indicate one of these forms.
+            let looks_ipy = !host_l.is_empty()
+                && host_l
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == 'x');
+            if looks_ipy {
+                return true;
+            }
+        }
+    }
+
+    // Substring fallback for URLs that didn't parse cleanly.
     let url_lower = url.to_lowercase();
-    // Loopback and special addresses
     const BLOCKED_PREFIXES: &[&str] = &[
         "://localhost",
         "://127.",
         "://0.0.0.0",
         "://[::1]",
         "://[::]",
-        "://0x7f",  // Hex-encoded 127.x
-        "://0177.", // Octal-encoded 127.x
+        "://0x7f",
+        "://0177.",
     ];
-    // Private RFC-1918, link-local, and cloud metadata ranges
     const BLOCKED_RANGES: &[&str] = &[
         "://10.",
         "://192.168.",
-        "://169.254.",        // Link-local + AWS metadata
-        "://metadata.google", // GCP metadata
+        "://169.254.",
+        "://metadata.google",
         "://metadata.gce",
-        "://100.100.100.200", // Alibaba Cloud metadata
+        "://100.100.100.200",
     ];
     for prefix in BLOCKED_PREFIXES {
         if url_lower.contains(prefix) {
@@ -40,7 +79,6 @@ fn is_ssrf_target(url: &str) -> bool {
             return true;
         }
     }
-    // Check 172.16.0.0/12 (172.16–172.31)
     if let Some(idx) = url_lower.find("://172.") {
         let after = &url_lower[idx + 7..];
         if let Some(dot) = after.find('.') {
@@ -216,7 +254,25 @@ async fn execute_fetch(
         .map(|h| h.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
         .unwrap_or(false);
 
-    if !has_auth_header && url.contains("discord.com/api") {
+    // B169: match Discord API hosts by canonical hostname so canary/ptb/staging
+    // subdomains (canary.discord.com, ptb.discord.com) also get the bot token
+    // injected. The substring `discord.com/api` excluded those.
+    let parsed_url_for_inject = url::Url::parse(url).ok();
+    let host_lower = parsed_url_for_inject
+        .as_ref()
+        .and_then(|u| u.host_str())
+        .map(|h| h.to_lowercase())
+        .unwrap_or_default();
+    let path_lower = parsed_url_for_inject
+        .as_ref()
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
+    let is_discord_api = matches!(
+        host_lower.as_str(),
+        "discord.com" | "canary.discord.com" | "ptb.discord.com" | "staging.discord.com"
+    ) && path_lower.starts_with("/api");
+
+    if !has_auth_header && is_discord_api {
         if let Some(state) = app_handle.try_state::<crate::engine::state::EngineState>() {
             if let Ok(creds) = crate::engine::skills::get_skill_credentials(&state.store, "discord")
             {
@@ -231,7 +287,7 @@ async fn execute_fetch(
     }
 
     // Auto-inject Content-Type for Discord API mutations when body is present
-    if url.contains("discord.com/api") && args["body"].is_string() {
+    if is_discord_api && args["body"].is_string() {
         let has_ct = args["headers"]
             .as_object()
             .map(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type")))
@@ -241,9 +297,18 @@ async fn execute_fetch(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    // B168: lazy-static client so we keep a connection pool across calls.
+    // Building a fresh reqwest::Client per fetch threw away connection reuse
+    // and re-resolved DNS on every call.
+    use std::sync::LazyLock;
+    static FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("Failed to build fetch client")
+    });
+    let client = &*FETCH_CLIENT;
 
     // ── Retry loop for transient errors ──────────────────────────────
     use crate::engine::http::{is_retryable_status, parse_retry_after, retry_delay, MAX_RETRIES};
@@ -335,13 +400,19 @@ async fn execute_fetch(
         }
     };
 
+    // B167: floor to a UTF-8 char boundary before slicing — non-ASCII response
+    // bodies (international API responses, JSON with non-ASCII strings)
+    // panicked when MAX_BODY landed mid-codepoint. Reuses S9's helper.
     const MAX_BODY: usize = 50_000;
-    let truncated = if body.len() > MAX_BODY {
-        format!(
-            "{}...\n[truncated, {} total bytes]",
-            &body[..MAX_BODY],
-            body.len()
-        )
+    let body_len = body.len();
+    let truncated = if body_len > MAX_BODY {
+        let mut head = body;
+        crate::engine::util::safe_truncate_in_place(
+            &mut head,
+            MAX_BODY,
+            &format!("...\n[truncated, {} total bytes]", body_len),
+        );
+        head
     } else {
         body
     };

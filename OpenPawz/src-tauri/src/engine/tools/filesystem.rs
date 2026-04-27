@@ -5,61 +5,12 @@ use crate::atoms::error::EngineResult;
 use crate::atoms::types::*;
 use log::{info, warn};
 
-/// Sensitive paths that agents must never read or write.
-/// Checked against the canonicalized path (lowercased on case-insensitive OS).
-const SENSITIVE_PATHS: &[&str] = &[
-    // Credentials & secrets
-    ".ssh",
-    ".gnupg",
-    ".gnome-keyring",
-    ".password-store",
-    ".aws/credentials",
-    ".aws/config",
-    ".config/gcloud",
-    ".azure",
-    ".npmrc",
-    ".pypirc",
-    ".docker/config.json",
-    ".kube/config",
-    ".local/share/keyrings",
-    // Password managers
-    ".config/1password",
-    ".config/op",
-    "Library/Group Containers/2BUA8C4S2C.com.1password",
-    ".local/share/bitwarden",
-    ".config/Bitwarden",
-    ".local/share/keepassxc",
-    ".lastpass",
-    // macOS Keychain
-    "Library/Keychains",
-    // Shell config & history (credential/token leakage)
-    ".bashrc",
-    ".bash_profile",
-    ".bash_history",
-    ".zshrc",
-    ".zsh_history",
-    ".profile",
-    ".gitconfig",
-    // Browser profiles (cookies, tokens, saved passwords)
-    ".mozilla",
-    ".config/google-chrome",
-    ".config/chromium",
-    "Library/Application Support/Google/Chrome",
-    "Library/Application Support/Firefox",
-    "Library/Application Support/Microsoft Edge",
-    "Library/Application Support/Arc",
-    "Library/Application Support/BraveSoftware",
-    ".config/microsoft-edge",
-    ".config/BraveSoftware",
-    // System
-    "/etc/shadow",
-    "/etc/passwd",
-    "/etc/sudoers",
-    // Paw engine internals
-    ".paw/db",
-    ".paw/keys",
-    "src-tauri/src/engine",
-];
+// B194: credential heuristic + sensitive-path blocklist now live in
+// `engine::util` so both this standalone tool and the OPIDE sandbox path
+// (`crates/opide-ai/src/engine/tools/host_api.rs`) can call the same gates.
+// The previous local copies were duplicating policy and meant fixes here
+// silently skipped the path OPIDE actually uses.
+use crate::engine::util::{looks_like_credential_value, SENSITIVE_PATHS};
 
 /// Resolve a raw path (absolute or relative to agent workspace) into a
 /// canonicalized `PathBuf`.  Returns `Err` if the path escapes the agent
@@ -104,20 +55,55 @@ fn resolve_and_validate(
         resolved.clone()
     };
 
-    // Block `..` in the raw path to prevent traversal even when canonicalize isn't decisive
-    if raw_path.contains("..") {
-        let ws = super::agent_workspace(agent_id);
-        if let Ok(canon_ws) = ws.canonicalize() {
-            if !canonical.starts_with(&canon_ws) {
-                warn!(
-                    "[engine] {} blocked path traversal: {} (agent={})",
-                    operation, raw_path, agent_id
-                );
-                return Err(format!(
-                    "{}: path '{}' escapes the agent workspace. Use paths within your workspace or absolute paths to allowed locations.",
-                    operation, raw_path
-                ).into());
-            }
+    // B132: enforce workspace confinement on every call, not only when the
+    // raw path contains `..`. The previous gate let absolute paths walk
+    // straight to system locations as long as the literal raw string didn't
+    // contain dot-dot. Now an absolute path that resolves outside the
+    // agent's workspace must match an explicit allowlist.
+    //
+    // Make sure the workspace exists before canonicalizing — on a fresh
+    // agent the dir might not be created yet, and on macOS the data root
+    // can pass through a symlink chain (`/tmp` → `/private/tmp`,
+    // `/Users/.../Library/...`). Without canonicalize, `canonical.starts_with(ws_root)`
+    // returns false for legitimate workspace paths and refuses real reads.
+    let ws_root = super::ensure_workspace(agent_id)?;
+    let canon_ws = ws_root.canonicalize().unwrap_or_else(|_| ws_root.clone());
+    let in_workspace = canonical.starts_with(&canon_ws);
+    if !in_workspace {
+        // Allowlisted prefixes outside the workspace — temp dirs and the
+        // agent's own data root. Adjust here if policy needs to widen.
+        const ALLOWED_OUTSIDE_WORKSPACE: &[&str] = &[
+            "/tmp/",
+            "/private/tmp/",
+            "/var/folders/",
+            "/var/tmp/",
+            "/private/var/tmp/",
+        ];
+        let path_str_l = canonical.to_string_lossy().to_lowercase();
+        let allowed_temp = ALLOWED_OUTSIDE_WORKSPACE
+            .iter()
+            .any(|p| path_str_l.starts_with(p));
+        // Also allow read-only access to the user's home directory for
+        // operations that genuinely need it (config files, project search
+        // outside the workspace). The sensitive-path blocklist below still
+        // gates dangerous targets like ~/.ssh and ~/.aws.
+        let in_home = dirs::home_dir()
+            .and_then(|h| h.canonicalize().ok())
+            .map(|h| canonical.starts_with(&h))
+            .unwrap_or(false);
+        if !allowed_temp && !in_home {
+            warn!(
+                "[engine] {} blocked: {} resolved to {} (outside workspace, not allowlisted) (agent={})",
+                operation,
+                raw_path,
+                canonical.display(),
+                agent_id
+            );
+            return Err(format!(
+                "{}: path '{}' is outside the agent's workspace and not in the access allowlist.",
+                operation, raw_path
+            )
+            .into());
         }
     }
 
@@ -129,6 +115,17 @@ fn resolve_and_validate(
     #[cfg(not(target_os = "macos"))]
     let path_str = canonical.to_string_lossy().to_string();
     for sensitive in SENSITIVE_PATHS {
+        // B138: the `src-tauri/src/engine` entry blocked legitimate engine
+        // forks from editing their own source. Skip it when the
+        // `engine-fork-mode` feature is enabled at compile time so a fork
+        // can opt out without removing the rest of the blocklist.
+        #[cfg(feature = "engine-fork-mode")]
+        {
+            if *sensitive == "src-tauri/src/engine" {
+                continue;
+            }
+        }
+
         if sensitive.starts_with('/') {
             // Absolute sensitive path
             if path_str.starts_with(sensitive) {
@@ -284,16 +281,20 @@ async fn execute_read_file(args: &serde_json::Value, agent_id: &str) -> EngineRe
 
     info!("[engine] read_file: {} (agent={})", path, agent_id);
 
+    // B131: previously this also blocked any `.rs` file from reads while
+    // write_file happily allowed `.rs` writes — an asymmetric posture that
+    // protected nothing while breaking Rust development workflows. The
+    // engine-source carve-out is enforced symmetrically inside
+    // `resolve_and_validate` (B138 / B73 BLOCKED_TOOLS handle the
+    // `is_opide_host` case); blocking by extension here is dead policy.
     let normalized = path.replace('\\', "/").to_lowercase();
-    if normalized.contains("src-tauri/src/engine/")
-        || normalized.contains("src/engine/")
-        || normalized.ends_with(".rs")
-    {
+    if normalized.contains("src-tauri/src/engine/") || normalized.contains("src/engine/") {
         return Err(format!(
             "Cannot read engine source file '{}'. \
              Use your available tools directly — credentials and authentication are handled automatically.",
             path
-        ).into());
+        )
+        .into());
     }
 
     let content = std::fs::read_to_string(&resolved)
@@ -332,39 +333,19 @@ async fn execute_write_file(args: &serde_json::Value, agent_id: &str) -> EngineR
         agent_id
     );
 
-    let content_lower = content.to_lowercase();
-    let has_private_key = content.contains("-----BEGIN") && content.contains("PRIVATE KEY");
-    let has_api_secret =
-        content_lower.contains("api_key_secret") || content_lower.contains("cdp_api_key");
-    let has_raw_b64_key = content.len() > 40
-        && content.contains("==")
-        && (content_lower.contains("secret") || content_lower.contains("private"));
-    // §Security: Expanded credential pattern detection
-    let has_known_token_prefix = content.contains("ghp_")    // GitHub PAT
-        || content.contains("gho_")    // GitHub OAuth
-        || content.contains("github_pat_")  // GitHub fine-grained PAT
-        || content.starts_with("sk-")   // OpenAI API key
-        || content.contains("\"sk-")   // OpenAI key in JSON
-        || content.contains("xoxb-")   // Slack bot token
-        || content.contains("xoxp-")   // Slack user token
-        || content.contains("AKIA"); // AWS access key ID prefix
-    let has_env_secrets = content_lower.contains("aws_secret_access_key")
-        || content_lower.contains("openai_api_key")
-        || content_lower.contains("discord_bot_token")
-        || content_lower.contains("github_token")
-        || content_lower.contains("database_url")
-        || (content_lower.contains("password") && content_lower.contains("="));
-    if has_private_key
-        || has_api_secret
-        || has_raw_b64_key
-        || has_known_token_prefix
-        || has_env_secrets
-    {
-        return Err(
-            "Cannot write files containing API secrets or private keys. \
-             Credentials are managed securely by the engine — use built-in skill tools directly."
-                .into(),
-        );
+    // B133: structured credential detection. The previous bag-of-substrings
+    // (`AKIA` anywhere, `secret` anywhere with `==`) tripped on legitimate
+    // documentation (README mentioning AWS variables, code comments
+    // describing tokens, .env.example templates, base64-encoded binaries
+    // that happen to end with `==`). High-FP credential blocks made
+    // write_file unusable for ordinary .md / .ts source.
+    if let Some(kind) = looks_like_credential_value(content) {
+        return Err(format!(
+            "Cannot write file: detected what looks like a {}. \
+             Credentials should be managed by the engine's skill vault, not written to disk.",
+            kind
+        )
+        .into());
     }
 
     if let Some(parent) = resolved.parent() {
@@ -402,6 +383,7 @@ async fn execute_list_directory(args: &serde_json::Value, agent_id: &str) -> Eng
     }
 
     let mut entries = Vec::new();
+    let mut truncated_at_depth = false;
 
     fn walk_dir(
         dir: &std::path::Path,
@@ -409,8 +391,10 @@ async fn execute_list_directory(args: &serde_json::Value, agent_id: &str) -> Eng
         depth: usize,
         max_depth: usize,
         entries: &mut Vec<String>,
+        truncated: &mut bool,
     ) -> std::io::Result<()> {
         if depth > max_depth {
+            *truncated = true;
             return Ok(());
         }
         let mut items: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
@@ -436,15 +420,27 @@ async fn execute_list_directory(args: &serde_json::Value, agent_id: &str) -> Eng
                     depth + 1,
                     max_depth,
                     entries,
+                    truncated,
                 )?;
+            } else if is_dir {
+                // Reached max_depth — there are subdirs we won't descend into.
+                *truncated = true;
             }
         }
         Ok(())
     }
 
     if recursive {
-        walk_dir(&resolved, "", 0, max_depth, &mut entries)
+        walk_dir(&resolved, "", 0, max_depth, &mut entries, &mut truncated_at_depth)
             .map_err(|e| format!("Failed to list directory '{}': {}", path, e))?;
+        // B137: surface the depth truncation so the agent knows the listing is
+        // incomplete instead of treating it as exhaustive.
+        if truncated_at_depth {
+            entries.push(format!(
+                "[note: deeper paths truncated at max_depth={}]",
+                max_depth
+            ));
+        }
     } else {
         let mut items: Vec<_> = std::fs::read_dir(&resolved)
             .map_err(|e| format!("Failed to list directory '{}': {}", path, e))?

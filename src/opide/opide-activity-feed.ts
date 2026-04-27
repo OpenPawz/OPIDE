@@ -44,8 +44,18 @@ let sandboxSubtoolUnlistenEnd: (() => void) | null = null
 // Round and run tracking
 let currentRound: number | null = null
 let currentRunId: string | null = null
-// Run IDs that have fully completed — drop any delayed events carrying these
+// Run IDs that have fully completed — drop any delayed events carrying these.
+// Capped at 64 entries (B66) so a long session doesn't grow the set without bound.
 const completedRunIds = new Set<string>()
+const MAX_COMPLETED_RUN_IDS = 64
+function trackCompletedRun(runId: string): void {
+  if (!runId || completedRunIds.has(runId)) return
+  completedRunIds.add(runId)
+  if (completedRunIds.size > MAX_COMPLETED_RUN_IDS) {
+    const first = completedRunIds.values().next().value
+    if (first) completedRunIds.delete(first)
+  }
+}
 
 // ─── Tool Name Translation ──────────────────────────────────────────────────
 
@@ -83,12 +93,17 @@ const TOOL_LABELS: Record<string, string> = {
 }
 
 function describeToolCall(call: ToolCall): string {
-  const label = TOOL_LABELS[call.name] || call.name.replace(/^ide_/, '').replace(/_/g, ' ')
+  // B202: ToolCall has nested function: { name, arguments } — match the
+  // Rust serialization. Old flat-shape reads returned undefined and
+  // tripped silently inside try/catch.
+  const name = call.function?.name ?? ''
+  const argStr = call.function?.arguments ?? ''
+  const label = TOOL_LABELS[name] || name.replace(/^ide_/, '').replace(/_/g, ' ')
   try {
-    const args = JSON.parse(call.arguments || '{}')
+    const args = JSON.parse(argStr || '{}')
 
     // For execute_code: extract a meaningful hint from the JS source
-    if (call.name === 'execute_code' && args.code) {
+    if (name === 'execute_code' && args.code) {
       const code: string = args.code
 
       // 1. Leading single-line comment — most reliable when the model adds one
@@ -367,7 +382,8 @@ async function startListening(): Promise<void> {
         })
 
         // Track active exec element so sandbox-progress and sub-tool events can update it
-        if (ev.tool_call.name === 'execute_code') {
+        // B202: nested ToolCall shape, not flat.
+        if (ev.tool_call.function?.name === 'execute_code') {
           activeExecElement = lastEl
           activeExecCallId = ev.tool_call.id
         }
@@ -445,9 +461,18 @@ async function startListening(): Promise<void> {
           summary: parts.join(' '),
         })
 
-        // Mark this run as completed so any delayed events arriving after this
-        // are correctly identified as stale and dropped at the top of the listener.
-        if (currentRunId) completedRunIds.add(currentRunId)
+        // B66: clear any still-running tool timers from this run before we
+        // mark the run completed. Without this, a tool that never received
+        // its tool_result (run aborted, panel mid-restart) keeps firing its
+        // 1-second update interval forever.
+        for (const [, info] of activeTools) {
+          if (info.timer) {
+            clearInterval(info.timer)
+            info.timer = null
+          }
+        }
+        activeTools.clear()
+        if (currentRunId) trackCompletedRun(currentRunId)
         break
       }
       case 'tool_auto_approved': {
@@ -940,6 +965,14 @@ export function registerActivityFeed(): void {
             if (info.timer) clearInterval(info.timer)
           }
           activeSubTools.clear()
+          // B67: dispose all four module-level engine-event listeners. Without
+          // this, hot-reload or workbench layout changes that re-mount the
+          // panel stack additional listeners on top of the existing ones.
+          if (unlistenFn) { unlistenFn(); unlistenFn = null }
+          if (sandboxProgressUnlisten) { sandboxProgressUnlisten(); sandboxProgressUnlisten = null }
+          if (sandboxSubtoolUnlistenStart) { sandboxSubtoolUnlistenStart(); sandboxSubtoolUnlistenStart = null }
+          if (sandboxSubtoolUnlistenEnd) { sandboxSubtoolUnlistenEnd(); sandboxSubtoolUnlistenEnd = null }
+          if (indexerUnlisten) { indexerUnlisten(); indexerUnlisten = null }
           listEl = null
           statusBarEl = null
         }

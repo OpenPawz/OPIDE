@@ -156,13 +156,22 @@ impl HnswIndex {
     }
 
     /// Number of indexed vectors.
+    /// B94: `id_to_idx` tracks active nodes only (tombstones are removed from
+    /// the map). Returning `nodes.len()` here would inflate the count by every
+    /// removed node since `nodes` is grow-only to keep indices stable.
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.id_to_idx.len()
     }
 
     /// Whether the index is empty.
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.id_to_idx.is_empty()
+    }
+
+    /// Total slot count including tombstones (debugging only).
+    #[allow(dead_code)]
+    pub fn capacity_with_tombstones(&self) -> usize {
+        self.nodes.len()
     }
 
     /// Assign a random level for a new node using exponential decay.
@@ -192,10 +201,12 @@ impl HnswIndex {
             return;
         }
 
-        // If ID exists, update its vector (don't rebuild connections — incremental update)
-        if let Some(&idx) = self.id_to_idx.get(id) {
-            self.nodes[idx].vector = vector;
-            return;
+        // B87: if ID exists, treat re-insert as remove+insert so neighbor
+        // edges are recomputed against the new vector. Previously we silently
+        // overwrote the vector while leaving stale neighbor links pointing
+        // away from the new position — search recall degraded over time.
+        if self.id_to_idx.contains_key(id) {
+            self.remove(id);
         }
 
         let new_level = self.random_level();
@@ -301,9 +312,29 @@ impl HnswIndex {
         self.nodes[idx].neighbors.clear();
         self.id_to_idx.remove(id);
 
-        // Update entry point if needed
+        // B88: if we removed the entry point, scan the active set for the
+        // highest-level remaining node and use it as the new entry. The old
+        // code picked an arbitrary HashMap value, which broke the level
+        // invariant (entry must be at `max_level`) and could route the
+        // greedy-descent phase through a layer-0-only node.
         if self.entry_point == Some(idx) {
-            self.entry_point = self.id_to_idx.values().copied().next();
+            let mut best: Option<(usize, usize)> = None; // (level, node_idx)
+            for &active_idx in self.id_to_idx.values() {
+                let lvl = self.nodes[active_idx].level;
+                if best.map_or(true, |(b, _)| lvl > b) {
+                    best = Some((lvl, active_idx));
+                }
+            }
+            match best {
+                Some((lvl, new_ep)) => {
+                    self.entry_point = Some(new_ep);
+                    self.max_level = lvl;
+                }
+                None => {
+                    self.entry_point = None;
+                    self.max_level = 0;
+                }
+            }
         }
 
         true
@@ -502,20 +533,34 @@ impl Ord for OrderedFloat {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Build the HNSW index from all episodic memories that have embeddings.
+/// B93: paginate so deployments with >100k memories don't silently lose the
+/// older portion. Each page is a separate query to avoid pinning a huge
+/// result set in memory.
 pub fn build_from_store(store: &SessionStore) -> EngineResult<HnswIndex> {
+    const PAGE_SIZE: usize = 10_000;
     let scope = crate::atoms::engram_types::MemoryScope {
         global: true,
         ..Default::default()
     };
-    let all_memories = store.engram_list_episodic(&scope, None, 100_000)?;
 
     let mut index = HnswIndex::new();
     let mut inserted = 0usize;
-
-    for mem in all_memories {
-        if let Some(embedding) = mem.embedding {
-            index.insert(&mem.id, embedding);
-            inserted += 1;
+    let mut offset = 0usize;
+    loop {
+        let page = store.engram_list_episodic_page(&scope, PAGE_SIZE, offset)?;
+        if page.is_empty() {
+            break;
+        }
+        let n = page.len();
+        for mem in page {
+            if let Some(embedding) = mem.embedding {
+                index.insert(&mem.id, embedding);
+                inserted += 1;
+            }
+        }
+        offset += n;
+        if n < PAGE_SIZE {
+            break;
         }
     }
 

@@ -381,7 +381,24 @@ function getInput(): MemoryPalaceInput {
 
 // ─── Registration ────────────────────────────────────────────────────────────
 
-export function registerMemoryPalace(): void {
+/** Returns true iff the V2 Memory Palace runtime is available in this build (B68). */
+async function isMemoryPalaceAvailable(): Promise<boolean> {
+  try {
+    const mod: any = await import('@openpawz/engine')
+    return typeof mod?.pawEngine?.startListening === 'function'
+  } catch {
+    return false
+  }
+}
+
+export async function registerMemoryPalace(): Promise<void> {
+  // OSS strips the V2 engine; silently no-op so the activity-bar icon and
+  // EditorPane don't appear when the feature can't actually run.
+  if (!await isMemoryPalaceAvailable()) {
+    console.log('[opide] Memory Palace not available in this build (V2 feature)')
+    return
+  }
+
   // Register the EditorPane (opens as a center tab)
   registerEditorPane(
     'opide.memoryPalace',
@@ -391,12 +408,17 @@ export function registerMemoryPalace(): void {
   )
 
   // Inject a custom icon into the activity bar — no sidebar, just opens center tab
-  function injectActivityBarIcon(): void {
+  function injectActivityBarIcon(retriesLeft = 20): void {
     const activityBar = document.querySelector('.part.activitybar .content .composite-bar')
       || document.querySelector('.activitybar .actions-container')
     if (!activityBar) {
-      // Retry until activity bar renders
-      setTimeout(injectActivityBarIcon, 500)
+      // B69: cap retries (~10s @ 500ms) so we don't spin forever when the
+      // activity bar is permanently hidden.
+      if (retriesLeft <= 0) {
+        console.warn('[opide] Memory Palace activity-bar icon: activity bar not found, giving up')
+        return
+      }
+      setTimeout(() => injectActivityBarIcon(retriesLeft - 1), 500)
       return
     }
 

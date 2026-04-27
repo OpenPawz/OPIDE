@@ -2,6 +2,7 @@ use super::SessionStore;
 use crate::atoms::error::EngineResult;
 use crate::engine::types::{ContentBlock, Message, MessageContent, Role, StoredMessage, ToolCall};
 use rusqlite::params;
+use std::collections::HashMap;
 
 impl SessionStore {
     // ── Message CRUD ───────────────────────────────────────────────────
@@ -9,9 +10,12 @@ impl SessionStore {
     pub fn add_message(&self, msg: &StoredMessage) -> EngineResult<()> {
         let conn = self.conn.lock();
 
+        // B190: persist tool_success alongside the message so the compression
+        // heuristic and post-mortem inspection don't have to scrape content
+        // for "ERROR" prefixes.
         conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, tool_calls_json, tool_call_id, name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages (id, session_id, role, content, tool_calls_json, tool_call_id, name, tool_success)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 msg.id,
                 msg.session_id,
@@ -20,13 +24,18 @@ impl SessionStore {
                 msg.tool_calls_json,
                 msg.tool_call_id,
                 msg.name,
+                msg.tool_success.map(|b| if b { 1i64 } else { 0i64 }),
             ],
         )?;
 
-        // Update session stats
+        // B189: increment the cached counter instead of re-running COUNT(*)
+        // on every insert. The seed migration in schema.rs reconciles any
+        // pre-existing drift; if a callsite ever inserts/deletes outside
+        // this function the counter can drift, so we still expose
+        // `count_messages` for the truncation-detection path.
         conn.execute(
             "UPDATE sessions SET
-                message_count = (SELECT COUNT(*) FROM messages WHERE session_id = ?1),
+                message_count = COALESCE(message_count, 0) + 1,
                 updated_at = datetime('now')
              WHERE id = ?1",
             params![msg.session_id],
@@ -45,16 +54,29 @@ impl SessionStore {
         self.get_messages(session_id, 50)
     }
 
+    /// Total message count for a session — used to detect truncation in
+    /// `load_conversation` (B187).
+    pub fn count_messages(&self, session_id: &str) -> EngineResult<i64> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
     pub fn get_messages(&self, session_id: &str, limit: i64) -> EngineResult<Vec<StoredMessage>> {
         let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, tool_calls_json, tool_call_id, name, created_at
+            "SELECT id, session_id, role, content, tool_calls_json, tool_call_id, name, created_at, tool_success
              FROM messages WHERE session_id = ?1 ORDER BY created_at ASC LIMIT ?2",
         )?;
 
         let messages = stmt
             .query_map(params![session_id, limit], |row| {
+                let tool_success: Option<i64> = row.get(8).ok();
                 Ok(StoredMessage {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
@@ -64,6 +86,7 @@ impl SessionStore {
                     tool_call_id: row.get(5)?,
                     name: row.get(6)?,
                     created_at: row.get(7)?,
+                    tool_success: tool_success.map(|n| n != 0),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -87,16 +110,30 @@ impl SessionStore {
         max_context_tokens: Option<usize>,
         agent_id: Option<&str>,
     ) -> EngineResult<Vec<Message>> {
-        // Load recent messages only — lean sessions rely on memory_search for
-        // historical context rather than carrying the full conversation.
-        let stored = self.get_messages(session_id, 50)?;
+        // B187: load 200 recent messages instead of 50 (mid-loop truncation
+        // already trims back to context_window when needed) and tell the
+        // model when older history was dropped, so it can reach for
+        // memory_search instead of assuming it has the full transcript.
+        const DEFAULT_LOAD_LIMIT: i64 = 200;
+        let total_count = self.count_messages(session_id)?;
+        let stored = self.get_messages(session_id, DEFAULT_LOAD_LIMIT)?;
+        let was_truncated = (stored.len() as i64) < total_count;
         let mut messages = Vec::new();
 
         // Add system prompt if provided
         if let Some(prompt) = system_prompt {
+            let mut prompt_text = prompt.to_string();
+            if was_truncated {
+                prompt_text.push_str(&format!(
+                    "\n\n[Note: only the most recent {} of {} messages from this session are loaded. \
+                     Use memory_search if you need older context.]",
+                    stored.len(),
+                    total_count
+                ));
+            }
             messages.push(Message {
                 role: Role::System,
-                content: MessageContent::Text(prompt.to_string()),
+                content: MessageContent::Text(prompt_text),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -113,10 +150,22 @@ impl SessionStore {
                 _ => Role::User,
             };
 
-            let tool_calls: Option<Vec<ToolCall>> = sm
-                .tool_calls_json
-                .as_ref()
-                .and_then(|json| serde_json::from_str(json).ok());
+            // B186: log when tool_calls JSON fails to parse instead of
+            // silently dropping the field. Without this, a corrupted
+            // assistant message looks fine on load and only manifests as
+            // mysterious tool_call_id-without-parent warnings later.
+            let tool_calls: Option<Vec<ToolCall>> = sm.tool_calls_json.as_ref().and_then(|json| {
+                match serde_json::from_str::<Vec<ToolCall>>(json) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::warn!(
+                            "[engine] load_conversation: dropping tool_calls for message {} — JSON parse failed: {}",
+                            sm.id, e
+                        );
+                        None
+                    }
+                }
+            });
 
             messages.push(Message {
                 role,
@@ -165,9 +214,18 @@ impl SessionStore {
         // Compress tool results older than the last 5 by replacing their content
         // with a one-line summary. Keeps conversation flow intact.
         const KEEP_RECENT_TOOL_RESULTS: usize = 5;
+
+        // B190: pull persisted success/failure from the stored rows so the
+        // compression hint reflects the real ToolResult outcome instead of
+        // scraping content for "ERROR" prefixes (which fails the moment a
+        // legitimate output happens to start with that string).
+        let success_by_id: HashMap<String, Option<bool>> = stored
+            .iter()
+            .filter(|sm| sm.role == "tool")
+            .filter_map(|sm| sm.tool_call_id.clone().map(|id| (id, sm.tool_success)))
+            .collect();
+
         let mut tool_result_count = 0;
-        let _total_messages = messages.len();
-        // Count tool results from the end to find which ones are "recent"
         let mut recent_tool_indices: Vec<usize> = Vec::new();
         for (i, m) in messages.iter().enumerate().rev() {
             if m.role == Role::Tool && m.tool_call_id.is_some() {
@@ -177,7 +235,6 @@ impl SessionStore {
                 }
             }
         }
-        // Compress old tool results (not in the recent set)
         for (i, m) in messages.iter_mut().enumerate() {
             if m.role == Role::Tool && m.tool_call_id.is_some() && !recent_tool_indices.contains(&i) {
                 let name = m.name.as_deref().unwrap_or("unknown");
@@ -187,9 +244,17 @@ impl SessionStore {
                 };
                 if content_len > 500 {
                     tool_result_count += 1;
-                    let success_hint = match &m.content {
-                        MessageContent::Text(t) => if t.starts_with("ERROR") { "failed" } else { "succeeded" },
-                        _ => "completed",
+                    let stored_success = m
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|id| success_by_id.get(id).copied())
+                        .flatten();
+                    let success_hint = match (stored_success, &m.content) {
+                        (Some(true), _) => "succeeded",
+                        (Some(false), _) => "failed",
+                        // Fallback for pre-migration rows where tool_success is NULL.
+                        (None, MessageContent::Text(t)) if t.starts_with("ERROR") => "failed",
+                        (None, _) => "completed",
                     };
                     m.content = MessageContent::Text(format!(
                         "[Previous tool result: {} — {} — {} bytes. Use tools to re-read if needed.]",

@@ -740,6 +740,51 @@ impl SessionStore {
         Ok(rows)
     }
 
+    /// B93: paginated variant of `engram_list_episodic` for full-table walks
+    /// (HNSW rebuild). The non-paginated version capped at 100k and silently
+    /// dropped older memories beyond that.
+    pub fn engram_list_episodic_page(
+        &self,
+        scope: &MemoryScope,
+        limit: usize,
+        offset: usize,
+    ) -> EngineResult<Vec<EpisodicMemory>> {
+        let conn = self.conn.lock();
+        let agent_filter = scope.agent_id.as_deref().unwrap_or("");
+
+        let mut sql = String::from(
+            "SELECT id, content_full, content_summary, content_key_fact, content_tags,
+                    category, importance, agent_id, session_id, source,
+                    consolidation_state,
+                    scope_global, scope_project_id, scope_squad_id, scope_agent_id,
+                    scope_channel, scope_channel_user_id,
+                    embedding, embedding_model,
+                    created_at, last_accessed_at, access_count
+             FROM episodic_memories WHERE 1=1",
+        );
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if !agent_filter.is_empty() && !scope.global {
+            sql.push_str(" AND (scope_agent_id = ? OR scope_global = 1 OR scope_agent_id = '')");
+            param_values.push(Box::new(agent_filter.to_string()));
+        }
+
+        sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
+        param_values.push(Box::new(limit as i64));
+        param_values.push(Box::new(offset as i64));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), Self::episodic_from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
     // ── Episodic row mapper (column order must match SELECTs above) ──
 
     fn episodic_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EpisodicMemory> {

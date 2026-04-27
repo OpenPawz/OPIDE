@@ -121,6 +121,11 @@ impl CodeIndex {
         self.chunks.len()
     }
 
+    /// Read-only iterator over chunks (B177 cache lookup).
+    pub fn chunks(&self) -> &[CodeChunk] {
+        &self.chunks
+    }
+
     /// Get the number of chunks with embeddings.
     pub fn embedded_count(&self) -> usize {
         self.chunks.iter().filter(|c| c.embedding.is_some()).count()
@@ -166,9 +171,12 @@ impl CodeIndex {
         // Format per chunk: [path_len: u32][path][name_len: u32][name]
         //                   [start_line: u32][end_line: u32][kind: u8][lang: u8]
         //                   [text_len: u32][text]
+        // B177: bump chunk binary format from v1 to v2. v2 appends a
+        // u64 content_hash and a u8 skip_embedding flag per chunk so
+        // the next index run can reuse embeddings keyed by hash.
         let chunks_path = index_dir.join("chunks.bin");
         let mut chunks_buf: Vec<u8> = Vec::new();
-        chunks_buf.push(1); // version
+        chunks_buf.push(2); // version
         chunks_buf.extend_from_slice(&(self.chunks.len() as u32).to_le_bytes());
         for chunk in &self.chunks {
             write_len_prefixed_str(&mut chunks_buf, &chunk.file_path);
@@ -178,6 +186,8 @@ impl CodeIndex {
             chunks_buf.push(chunk_kind_to_u8(&chunk.kind));
             chunks_buf.push(language_to_u8(&chunk.language));
             write_len_prefixed_str(&mut chunks_buf, &chunk.text);
+            chunks_buf.extend_from_slice(&chunk.content_hash.to_le_bytes());
+            chunks_buf.push(if chunk.skip_embedding { 1 } else { 0 });
         }
         std::fs::write(&chunks_path, &chunks_buf)
             .map_err(|e| format!("Failed to write chunks: {e}"))?;
@@ -428,8 +438,14 @@ fn u8_to_language(val: u8) -> super::types::Language {
 
 fn read_chunks_binary(buf: &[u8]) -> Option<Vec<CodeChunk>> {
     let mut offset = 0;
-    if buf.is_empty() || buf[0] != 1 { return None; }
-    offset += 1; // version
+    if buf.is_empty() {
+        return None;
+    }
+    let version = buf[0];
+    if version != 1 && version != 2 {
+        return None;
+    }
+    offset += 1;
 
     let count = read_u32(buf, &mut offset)? as usize;
     let mut chunks = Vec::with_capacity(count);
@@ -447,6 +463,26 @@ fn read_chunks_binary(buf: &[u8]) -> Option<Vec<CodeChunk>> {
         offset += 1;
         let text = read_len_prefixed_str(buf, &mut offset)?;
 
+        // B177: v2 appends content_hash + skip_embedding. v1 chunks
+        // get hash=0 (cache lookup will skip them) and skip_embedding=false.
+        let (content_hash, skip_embedding) = if version >= 2 {
+            if offset + 8 > buf.len() {
+                return None;
+            }
+            let mut hash_bytes = [0u8; 8];
+            hash_bytes.copy_from_slice(&buf[offset..offset + 8]);
+            offset += 8;
+            let hash = u64::from_le_bytes(hash_bytes);
+            if offset >= buf.len() {
+                return None;
+            }
+            let skip = buf[offset] != 0;
+            offset += 1;
+            (hash, skip)
+        } else {
+            (0u64, false)
+        };
+
         chunks.push(CodeChunk {
             file_path,
             language,
@@ -456,6 +492,8 @@ fn read_chunks_binary(buf: &[u8]) -> Option<Vec<CodeChunk>> {
             name,
             text,
             embedding: None, // loaded separately from vectors.bin
+            content_hash,
+            skip_embedding,
         });
     }
 

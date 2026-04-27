@@ -19,6 +19,61 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+// ── LineBuffer (S7 shared helper, also used by S10 MCP SSE) ───────────────
+
+/// Carry buffer for byte-streamed SSE/NDJSON whose UTF-8 sequences may be
+/// split across chunk boundaries. Push raw bytes via `extend`, drain with
+/// `drain_lines`. Trailing partial bytes (incomplete UTF-8 + everything
+/// after the last `\n`) are kept for the next chunk.
+///
+/// `from_utf8_lossy` is only invoked on a *complete* line — any partial
+/// multi-byte sequence is held in the buffer until extended, so non-ASCII
+/// content (B97/B143) doesn't get corrupted into U+FFFD.
+pub struct LineBuffer {
+    buf: Vec<u8>,
+}
+
+impl Default for LineBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LineBuffer {
+    pub fn new() -> Self {
+        Self {
+            buf: Vec::with_capacity(8192),
+        }
+    }
+
+    pub fn extend(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    /// Drain complete lines (terminated by `\n`). The trailing newline is
+    /// stripped; a leading `\r` from `\r\n` is also stripped so callers
+    /// don't have to special-case CRLF.
+    pub fn drain_lines(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        loop {
+            let Some(pos) = self.buf.iter().position(|&b| b == b'\n') else {
+                break;
+            };
+            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+            // Trim trailing '\n' and optional '\r'.
+            let end = if line_bytes.len() >= 2
+                && line_bytes[line_bytes.len() - 2] == b'\r'
+            {
+                line_bytes.len() - 2
+            } else {
+                line_bytes.len() - 1
+            };
+            out.push(String::from_utf8_lossy(&line_bytes[..end]).into_owned());
+        }
+        out
+    }
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Default maximum number of retry attempts per request.
@@ -483,6 +538,24 @@ mod tests {
         let hash = sign_and_log_request("openai", "gpt-4", b"{\"test\":true}");
         assert_eq!(hash.len(), 64); // SHA-256 = 32 bytes = 64 hex chars
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn line_buffer_handles_split_utf8() {
+        let mut buf = LineBuffer::new();
+        // "héllo\n" split mid-multibyte: 'é' is 0xC3 0xA9.
+        buf.extend(&[b'h', 0xC3]);
+        assert!(buf.drain_lines().is_empty());
+        buf.extend(&[0xA9, b'l', b'l', b'o', b'\n']);
+        let lines = buf.drain_lines();
+        assert_eq!(lines, vec!["héllo".to_string()]);
+    }
+
+    #[test]
+    fn line_buffer_strips_crlf() {
+        let mut buf = LineBuffer::new();
+        buf.extend(b"a\r\nb\n");
+        assert_eq!(buf.drain_lines(), vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

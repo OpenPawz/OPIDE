@@ -419,6 +419,7 @@ async fn run_swarm_turn(
         tool_call_id: None,
         name: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        tool_success: None,
     };
     state.store.add_message(&user_msg)?;
 
@@ -520,6 +521,7 @@ async fn run_swarm_turn(
                 tool_call_id: msg.tool_call_id.clone(),
                 name: msg.name.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
+                tool_success: None,
             };
             let _ = state.store.add_message(&stored);
         }

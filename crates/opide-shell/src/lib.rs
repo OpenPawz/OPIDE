@@ -6,8 +6,10 @@
 // Every module is self-contained — no cross-dependencies between them.
 // All expose Tauri commands via #[tauri::command].
 
+pub mod utf8;
 pub mod terminal;
 pub mod git;
+pub mod extensions;
 pub mod lsp;
 pub mod dap;
 pub mod watcher;

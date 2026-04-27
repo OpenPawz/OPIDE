@@ -263,6 +263,10 @@ pub fn run() {
             opide_shell::extension_host::ext_host_stop,
             opide_shell::extension_host::ext_host_status,
             opide_shell::extension_host::ext_host_log,
+            // B63/B64: Open VSX installer pipeline replaces curl/unzip shell.
+            opide_shell::extensions::ext_fetch_url_text,
+            opide_shell::extensions::ext_download_url_to_path,
+            opide_shell::extensions::ext_extract_vsix,
             opide_ai::engine::frontend_bridge::ide_tool_response,
             opide_ai::engine::frontend_bridge::ide_edit_review_response,
             open_new_window,

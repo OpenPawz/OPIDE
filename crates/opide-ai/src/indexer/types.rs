@@ -187,6 +187,10 @@ pub struct FileIndex {
     pub type_refs: Vec<TypeReference>,
     pub scopes: Vec<ScopeInfo>,
     pub line_count: usize,
+    /// B182: propagated from the scanner's per-file decision so the
+    /// chunker can mark all chunks of huge files as skip_embedding.
+    #[serde(default)]
+    pub skip_embedding: bool,
 }
 
 // ─── Project Index ──────────────────────────────────────────────────────────
