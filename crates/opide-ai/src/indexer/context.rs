@@ -256,10 +256,10 @@ pub async fn ide_search_semantic(
     // Embed the query
     let embed_client = {
         let engine_state = app_handle
-            .try_state::<paw_temp_lib::engine::state::EngineState>()
+            .try_state::<opide_engine::engine::state::EngineState>()
             .ok_or("EngineState not available")?;
         let memory_config = engine_state.memory_config.lock();
-        paw_temp_lib::engine::memory::embedding::EmbeddingClient::new(&memory_config)
+        opide_engine::engine::memory::embedding::EmbeddingClient::new(&memory_config)
     };
 
     let query_embedding = embed_client.embed(&query).await

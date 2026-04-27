@@ -64,7 +64,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
         // never ran this check; without it, a single execute_code call
         // could plant an OPENAI_API_KEY=sk-… file on the user's
         // Desktop with zero prompt. Reproduced by Kimi 2026-04-26.
-        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&content) {
+        if let Some(kind) = opide_engine::engine::util::looks_like_credential_value(&content) {
             log::warn!(
                 "[host-api] B194: refusing write to '{}' — content contains {} (auto-approve bypassed regardless)",
                 path, kind
@@ -80,7 +80,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
         // blocklist (~/.ssh, .aws/credentials, /etc/passwd, engine
         // source, etc.). The blocklist is defined once in engine::util
         // and shared with the standalone filesystem tool.
-        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+        if let Err(reason) = opide_engine::engine::util::check_sensitive_path(&path) {
             log::warn!("[host-api] B194: {}", reason);
             return Err(reason);
         }
@@ -175,7 +175,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
         // credential check (we don't punish the user for credentials
         // already in the existing file — those landed via some other
         // path). The path itself is checked against the sensitive list.
-        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&content) {
+        if let Some(kind) = opide_engine::engine::util::looks_like_credential_value(&content) {
             log::warn!(
                 "[host-api] B194: refusing append to '{}' — content contains {}",
                 path, kind
@@ -186,7 +186,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
                 path, kind
             ));
         }
-        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+        if let Err(reason) = opide_engine::engine::util::check_sensitive_path(&path) {
             log::warn!("[host-api] B194: {}", reason);
             return Err(reason);
         }
@@ -239,7 +239,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
         // been auto-approved-everything from rm -rf'ing the user's
         // .ssh tree just because the user clicked "yes" once on a
         // delete prompt for a benign file.
-        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+        if let Err(reason) = opide_engine::engine::util::check_sensitive_path(&path) {
             log::warn!("[host-api] B194: {}", reason);
             return Err(reason);
         }
@@ -302,7 +302,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
         // B194: same gates as file_write — apply_edit is just a
         // structured write. Run them BEFORE reading the original so we
         // don't disclose its contents in any error path.
-        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&new_content) {
+        if let Some(kind) = opide_engine::engine::util::looks_like_credential_value(&new_content) {
             log::warn!(
                 "[host-api] B194: refusing edit to '{}' — new content contains {}",
                 path, kind
@@ -313,7 +313,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
                 path, kind
             ));
         }
-        if let Err(reason) = paw_temp_lib::engine::util::check_sensitive_path(&path) {
+        if let Err(reason) = opide_engine::engine::util::check_sensitive_path(&path) {
             log::warn!("[host-api] B194: {}", reason);
             return Err(reason);
         }
@@ -362,7 +362,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
         // this check, `ctx.exec("printf 'KEY=sk-...' > file")` bypasses
         // the file-write credential heuristic the same way the direct
         // tool dispatch did.
-        if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&command) {
+        if let Some(kind) = opide_engine::engine::util::looks_like_credential_value(&command) {
             log::warn!(
                 "[host-api] B195: refusing exec — command contains {}",
                 kind
@@ -391,7 +391,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
         // and `ctx.tool('ide_run_command', …)` are gated identically.
         let active_workspace: Option<String> = self
             .app_handle
-            .try_state::<paw_temp_lib::engine::state::EngineState>()
+            .try_state::<opide_engine::engine::state::EngineState>()
             .and_then(|st| st.active_workspace.lock().clone());
         if let Some(target) = super::tool_executor::off_workspace_redirect_target(
             &command,
@@ -774,11 +774,11 @@ impl opide_sandbox::HostApi for OpideHostApi {
             }
 
             // Fall back to OpenPawz tool chain
-            use paw_temp_lib::engine::tools::execute_tool;
-            let tc = paw_temp_lib::atoms::types::ToolCall {
+            use opide_engine::engine::tools::execute_tool;
+            let tc = opide_engine::atoms::types::ToolCall {
                 id: format!("sandbox_{}", uuid::Uuid::new_v4()),
                 call_type: "function".to_string(),
-                function: paw_temp_lib::atoms::types::FunctionCall {
+                function: opide_engine::atoms::types::FunctionCall {
                     name: name.clone(),
                     arguments: serde_json::to_string(&args).unwrap_or_default(),
                 },

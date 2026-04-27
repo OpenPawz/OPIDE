@@ -5,7 +5,7 @@
 // Depends on:
 //   - opide-shell (for ide_mcp, git — shell operations)
 //   - opide-sandbox (for WASM + JS execution engines)
-//   - paw_temp_lib (for EngineState, types, traits)
+//   - opide_engine (for EngineState, types, traits)
 
 pub mod engine;
 pub mod indexer;

@@ -61,7 +61,7 @@ export interface ChatResponse { run_id: string; session_id: string }
 
 /**
  * Wire shape of an engine tool call, matching the Rust `ToolCall`
- * struct in OpenPawz/src-tauri/src/atoms/types.rs (which is what the
+ * struct in crates/opide-engine/src/atoms/types.rs (which is what the
  * `engine-event` Tauri event actually sends). The previous flat form
  * `{ id, name, arguments }` did not match the JSON the engine emits —
  * `name` and `arguments` are nested under `function`. The mismatch

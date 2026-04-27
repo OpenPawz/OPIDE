@@ -105,7 +105,6 @@ export default defineConfig({
     alias: {
       path: 'path-browserify',
       'monaco-editor': '@codingame/monaco-vscode-api/monaco',
-      '@openpawz': path.resolve(__dirname, 'OpenPawz/src'),
     },
     dedupe: ['@codingame/monaco-vscode-api'],
   },

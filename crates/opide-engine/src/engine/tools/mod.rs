@@ -1,0 +1,461 @@
+// Paw Agent Engine — Tool Registry & Dispatcher
+// Each tool group is a self-contained module with definitions + executor.
+// This replaces both the old tools.rs builtins()/skill_tools()
+// AND the old tool_executor.rs execute_tool() match.
+
+#![allow(clippy::too_many_lines)]
+
+use crate::atoms::error::EngineResult;
+use crate::atoms::types::*;
+use crate::engine::state::EngineState;
+use crate::engine::util::safe_truncate;
+use log::{debug, info};
+use tauri::Manager;
+
+/// External tool executor — allows host apps (OPIDE) to inject their own tools
+/// without modifying the engine's built-in tool chain.
+#[async_trait::async_trait]
+pub trait ExternalToolExecutor: Send + Sync {
+    async fn try_execute(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        agent_id: &str,
+        app_handle: &tauri::AppHandle,
+    ) -> Option<Result<String, String>>;
+    fn tool_definitions(&self) -> Vec<ToolDefinition>;
+    /// Tool definitions that need app context (e.g. WASM skills from registry).
+    /// Default returns the same as tool_definitions().
+    fn tool_definitions_dynamic(&self, _app_handle: &tauri::AppHandle) -> Vec<ToolDefinition> {
+        self.tool_definitions()
+    }
+}
+
+pub mod agent_comms;
+pub mod agents;
+pub mod canvas;
+pub mod canvas_dashboards;
+pub mod canvas_templates;
+pub mod exec;
+pub mod fetch;
+pub mod filesystem;
+pub mod memory;
+pub mod request_tools;
+pub mod skill_output;
+pub mod skill_storage;
+pub mod soul;
+pub mod squads;
+pub mod tasks;
+pub mod worker_delegate;
+
+/// Build the `execute_plan` tool definition (Action DAG pseudo-tool).
+/// This is not backed by a tool module — the agent loop intercepts
+/// it and hands off to the plan executor.
+pub fn plan_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: FunctionDefinition {
+            name: "execute_plan".into(),
+            description: "Execute a multi-step action plan as a DAG. Use this when a task \
+                requires multiple tool calls that can be planned upfront. The engine will \
+                validate the plan, execute independent steps in parallel, and return all \
+                results. Each node specifies a tool and its arguments, with optional \
+                dependencies on other nodes. Prefer this over sequential tool calls when \
+                you can determine all steps in advance."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "Human-readable description of what this plan accomplishes"
+                    },
+                    "nodes": {
+                        "type": "array",
+                        "description": "The nodes (tool calls) to execute. Nodes without dependencies run in parallel.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Unique identifier for this node (e.g., 'a', 'b', 'step_1')"
+                                },
+                                "tool": {
+                                    "type": "string",
+                                    "description": "Name of the tool to execute"
+                                },
+                                "args": {
+                                    "type": "object",
+                                    "description": "Arguments to pass to the tool"
+                                },
+                                "depends_on": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "IDs of nodes that must complete before this node runs. Empty = no dependencies."
+                                }
+                            },
+                            "required": ["id", "tool", "args"]
+                        }
+                    }
+                },
+                "required": ["nodes"]
+            }),
+        },
+    }
+}
+
+// ── ToolDefinition helpers (keep backward-compatible API for all callers) ───
+
+impl ToolDefinition {
+    /// Return the default set of built-in tools.
+    pub fn builtins() -> Vec<Self> {
+        let mut tools = Vec::new();
+        tools.extend(exec::definitions());
+        tools.extend(fetch::definitions());
+        tools.extend(filesystem::definitions());
+        tools.extend(soul::definitions());
+        tools.extend(memory::definitions());
+        tools.extend(tasks::definitions());
+        tools.extend(agents::definitions());
+        tools.extend(skill_output::definitions());
+        tools.extend(skill_storage::definitions());
+        tools.extend(canvas::definitions());
+        tools.extend(canvas_dashboards::definitions());
+        tools.extend(canvas_templates::definitions());
+        tools.extend(agent_comms::definitions());
+        tools.extend(squads::definitions());
+        tools.extend(request_tools::definitions());
+        tools.push(plan_tool_definition());
+        tools
+    }
+
+    /// Return tools exposed by all connected MCP servers.
+    /// Call this after builtins + skill_tools to merge dynamic tools.
+    pub fn mcp_tools(app_handle: &tauri::AppHandle) -> Vec<Self> {
+        if let Some(state) = app_handle.try_state::<EngineState>() {
+            // Use try_lock to avoid blocking — if locked, return empty
+            // (tools will be available on next request)
+            match state.mcp_registry.try_lock() {
+                Ok(reg) => reg.all_tool_definitions(),
+                Err(_) => vec![],
+            }
+        } else {
+            vec![]
+        }
+    }
+
+    /// Return tool definitions from any registered external executor (e.g. OPIDE IDE tools).
+    pub fn external_tools(app_handle: &tauri::AppHandle) -> Vec<Self> {
+        if let Some(ext) = app_handle.try_state::<Box<dyn ExternalToolExecutor>>() {
+            ext.tool_definitions_dynamic(app_handle)
+        } else {
+            vec![]
+        }
+    }
+
+    /// Return tools for enabled skills.
+    ///
+    /// Phase 1 of the OPIDE extraction removed the OpenPawz integration
+    /// skills (rest_api, image_gen, google_workspace, microsoft_365,
+    /// coinbase, discourse, etc.) along with the skill credential vault.
+    /// IDE-side skills are surfaced via `ExternalToolExecutor` instead, so
+    /// this function now returns no per-skill tool definitions.
+    pub fn skill_tools(_enabled_skill_ids: &[String]) -> Vec<Self> {
+        Vec::new()
+    }
+}
+
+// ── Free-function aliases (backward-compatible API for callers) ─────────────
+
+/// Return the default set of built-in tools.
+/// Convenience free function that delegates to `ToolDefinition::builtins()`.
+pub fn builtin_tools() -> Vec<ToolDefinition> {
+    ToolDefinition::builtins()
+}
+
+/// Return tools for the given enabled skill IDs.
+/// Convenience free function that delegates to `ToolDefinition::skill_tools()`.
+pub fn skill_tools(enabled_skill_ids: &[String]) -> Vec<ToolDefinition> {
+    ToolDefinition::skill_tools(enabled_skill_ids)
+}
+
+// ── Main executor ──────────────────────────────────────────────────────────
+
+/// Execute a single tool call and return the result.
+pub async fn execute_tool(
+    tool_call: &crate::engine::types::ToolCall,
+    app_handle: &tauri::AppHandle,
+    agent_id: &str,
+) -> ToolResult {
+    let name = &tool_call.function.name;
+    let args_str = &tool_call.function.arguments;
+
+    // ── OPIDE tool execution guard ─────────────────────────────────
+    // B73: only apply this block list when running INSIDE OPIDE (i.e. when an
+    // ExternalToolExecutor has been registered). Standalone OpenPawz needs
+    // these tools available — gating unconditionally was a layering violation.
+    let is_opide_host = app_handle
+        .try_state::<Box<dyn ExternalToolExecutor>>()
+        .is_some();
+    if is_opide_host {
+        // After phase 1 most of the multi-channel/integration tools are gone.
+        // Keep a minimal block list for the few generic ones still alive in
+        // tools/ so the IDE host surfaces ide_* equivalents instead.
+        const BLOCKED_TOOLS: &[&str] = &[
+            "request_tools",
+            "list_squads", "create_squad", "squad_assign",
+            "canvas_push", "canvas_update", "canvas_save", "canvas_load",
+            "canvas_list_dashboards", "canvas_delete_dashboard",
+            "canvas_list_templates", "canvas_from_template", "canvas_create_template",
+        ];
+        if BLOCKED_TOOLS.contains(&name.as_str()) {
+            info!("[engine] BLOCKED tool '{}' — not available in OPIDE", name);
+            return ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                output: format!(
+                    "Tool '{}' is not available. Use IDE tools instead (ide_read_file, ide_write_file, execute_code, etc.).",
+                    name
+                ),
+                success: false,
+            };
+        }
+    }
+
+    // §Security: Log tool invocation at debug level only, and redact args
+    // to prevent credential fragments from leaking into logs.
+    debug!("[engine] Executing tool: {} agent={}", name, agent_id,);
+
+    // Default empty/whitespace args to {} — models sometimes send no args
+    // for tools that take no parameters (e.g. mcp_refresh).
+    let args_str = if args_str.trim().is_empty() {
+        "{}"
+    } else {
+        args_str
+    };
+
+    let args: serde_json::Value = match serde_json::from_str(args_str) {
+        Ok(v) => v,
+        Err(parse_err) => {
+            // Special case: execute_code often has malformed JSON because the LLM
+            // puts complex JS code (with nested quotes) inside a JSON string.
+            // Try to extract the code directly from the raw string.
+            if name == "execute_code" {
+                if let Some(code) = extract_code_from_malformed_json(args_str) {
+                    log::info!(
+                        "[engine] Recovered execute_code args from malformed JSON ({} chars of code)",
+                        code.len()
+                    );
+                    serde_json::json!({"code": code})
+                } else {
+                    log::warn!("[engine] execute_code: could not recover code from malformed JSON");
+                    return ToolResult {
+                        tool_call_id: tool_call.id.clone(),
+                        output: format!(
+                            "ERROR: Your execute_code arguments contained malformed JSON. \
+                             The code string had unescaped characters. Please try again with simpler code, \
+                             or break the task into smaller execute_code calls."
+                        ),
+                        success: false,
+                    };
+                }
+            } else {
+            let truncated = safe_truncate(args_str, 300);
+            log::warn!(
+                "[engine] Malformed tool args for '{}' — JSON parse failed: {}. Args: {}",
+                name,
+                parse_err,
+                truncated,
+            );
+            // Return an explicit error to the model instead of silently
+            // proceeding with empty args — that caused the model to retry
+            // with the same (still-broken) arguments, wasting API rounds.
+            return ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                output: format!(
+                    "ERROR: Your tool arguments for '{}' were malformed JSON. Parse error: {}. \
+                     Please re-emit the tool call with valid JSON arguments.",
+                    name, parse_err,
+                ),
+                success: false,
+            };
+        } // else (non-execute_code malformed JSON)
+        } // Err(parse_err)
+    };
+
+    // fetch & exec: When a worker model is configured, delegate these to the
+    // worker (Foreman) so the main model doesn't spend API tokens on
+    // data-fetching rounds. The worker is typically a cheaper model.
+    if (name == "fetch" || name == "exec") && worker_delegate::has_worker(app_handle) {
+        info!("[engine] Delegating {} to Foreman (worker model)", name);
+        if let Some(worker_result) =
+            worker_delegate::delegate_to_worker(tool_call, app_handle, agent_id).await
+        {
+            return worker_result;
+        }
+        // Worker delegation failed — fall through to direct execution
+        info!(
+            "[engine] Worker delegation failed, executing {} directly",
+            name
+        );
+    }
+
+    // ── External tool executor hook (OPIDE IDE tools) ─────────────────
+    // If an external executor is registered (e.g. OPIDE's IDE tools),
+    // try it first before the built-in chain.
+    if let Some(ext) = app_handle.try_state::<Box<dyn ExternalToolExecutor>>() {
+        if let Some(result) = ext.try_execute(name, &args, agent_id, app_handle).await {
+            let (output, success) = match result {
+                Ok(output) => (output, true),
+                Err(e) => (format!("ERROR: {}", e), false),
+            };
+            return ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                output,
+                success,
+            };
+        }
+    }
+
+    // Try each module in order — first Some(result) wins.
+    // B72: Use short-circuit `if let` chains so we stop awaiting once a module
+    // claims the tool name. The previous `Option::or(...)` form was eager — it
+    // awaited every module's `execute()` future on every tool call regardless
+    // of which one owned the name. Each module's execute already does an
+    // early-return on name mismatch, so the work was wasted but not
+    // incorrect; this still saves ~20 future polls per tool invocation.
+    let result: Option<Result<String, String>> =
+        if let Some(r) = exec::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = fetch::execute(name, &args, app_handle).await { Some(r) }
+        else if let Some(r) = filesystem::execute(name, &args, agent_id).await { Some(r) }
+        else if let Some(r) = soul::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = memory::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = tasks::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = agents::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = skill_output::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = skill_storage::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = canvas::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = canvas_dashboards::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = canvas_templates::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = agent_comms::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = squads::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else if let Some(r) = request_tools::execute(name, &args, app_handle, agent_id).await { Some(r) }
+        else { None };
+
+    // Try MCP tools (prefixed with `mcp_`) if no built-in handled it.
+    // When a worker_model is configured, delegate MCP calls to the local
+    // Ollama worker instead of executing directly — zero API cost.
+    let result = match result {
+        Some(r) => r,
+        None if name.starts_with("mcp_") => {
+            // Try worker delegation first (local Ollama model)
+            if let Some(worker_result) =
+                worker_delegate::delegate_to_worker(tool_call, app_handle, agent_id).await
+            {
+                if worker_result.success {
+                    Ok(worker_result.output)
+                } else {
+                    Err(worker_result.output)
+                }
+            } else {
+                // No worker configured — fall back to direct MCP execution
+                info!("[engine] No worker model configured, executing MCP tool directly");
+                if let Some(state) = app_handle.try_state::<EngineState>() {
+                    let reg = state.mcp_registry.lock().await;
+                    match reg.execute_tool(name, &args).await {
+                        Some(r) => r,
+                        None => Err(format!("Unknown tool: {}", name)),
+                    }
+                } else {
+                    Err(format!("Unknown tool: {}", name))
+                }
+            }
+        }
+        None => Err(format!("Unknown tool: {}", name)),
+    };
+
+    match result {
+        Ok(output) => ToolResult {
+            tool_call_id: tool_call.id.clone(),
+            output,
+            success: true,
+        },
+        Err(err) => ToolResult {
+            tool_call_id: tool_call.id.clone(),
+            output: format!("Error: {}", err),
+            success: false,
+        },
+    }
+}
+
+// ── Workspace helpers ──────────────────────────────────────────────────────
+
+/// Get the per-agent workspace directory path.
+/// Each agent gets its own isolated workspace under the Paw data root.
+pub fn agent_workspace(agent_id: &str) -> std::path::PathBuf {
+    crate::engine::paths::agent_workspace_dir(agent_id)
+}
+
+/// Ensure the agent's workspace directory exists.
+pub fn ensure_workspace(agent_id: &str) -> EngineResult<std::path::PathBuf> {
+    let ws = agent_workspace(agent_id);
+    std::fs::create_dir_all(&ws)
+        .map_err(|e| format!("Failed to create workspace for agent '{}': {}", agent_id, e))?;
+    Ok(ws)
+}
+
+// The shared `get_skill_creds` helper was removed in OPIDE phase 1 along
+// with engine::skills. Tools that need credentialed access to third-party
+// services (google, microsoft, coinbase, discourse, integrations) were
+// removed at the same time; OPIDE surfaces those via MCP servers instead.
+
+/// Extract JS code from a malformed execute_code JSON string.
+/// The LLM sends {"code": "function run(ctx) { ... }"} but the JS code
+/// contains unescaped characters that break JSON parsing.
+/// We find the code by looking for the pattern: {"code": " ... and extracting everything
+/// between the first and last quote of the code value.
+fn extract_code_from_malformed_json(raw: &str) -> Option<String> {
+    // Find the start of the code value: {"code": " or {"code":"
+    let code_start = raw.find("\"code\"")
+        .or_else(|| raw.find("\"code\" "))?;
+
+    // Find the colon after "code"
+    let after_key = &raw[code_start + 6..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = &after_key[colon_pos + 1..].trim_start();
+
+    // The value should start with a quote
+    if !after_colon.starts_with('"') {
+        return None;
+    }
+
+    // Extract everything after the opening quote until we find the pattern
+    // that looks like the end of the JSON: "} or "\n}
+    let code_content = &after_colon[1..];
+
+    // Find the last occurrence of "} which closes the JSON object
+    // Work backwards from the end
+    let trimmed = raw.trim_end();
+    if trimmed.ends_with('}') {
+        // Find the closing quote before the }
+        let before_brace = &trimmed[..trimmed.len() - 1].trim_end();
+        if before_brace.ends_with('"') {
+            let end_pos = before_brace.len() - 1;
+            // Calculate where in code_content this corresponds to
+            let code_start_in_raw = raw.len() - code_content.len();
+            if end_pos > code_start_in_raw {
+                let code = &raw[code_start_in_raw..end_pos];
+                // Unescape basic JSON escapes
+                let unescaped = code
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t")
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\");
+                if unescaped.contains("function run") {
+                    return Some(unescaped);
+                }
+            }
+        }
+    }
+
+    None
+}

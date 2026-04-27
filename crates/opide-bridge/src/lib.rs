@@ -6,11 +6,11 @@
 
 pub mod claude_code;
 
-use paw_temp_lib::atoms::engram_types::{MemoryScope, ProceduralMemory, ProceduralStep};
-use paw_temp_lib::atoms::traits::{AiProvider, ProviderFactory, ToolAssembler};
-use paw_temp_lib::atoms::types::ToolDefinition;
-use paw_temp_lib::engine::sessions::SessionStore;
-use paw_temp_lib::engine::types::{ProviderConfig, ProviderKind};
+use opide_engine::atoms::engram_types::{MemoryScope, ProceduralMemory, ProceduralStep};
+use opide_engine::atoms::traits::{AiProvider, ProviderFactory, ToolAssembler};
+use opide_engine::atoms::types::ToolDefinition;
+use opide_engine::engine::sessions::SessionStore;
+use opide_engine::engine::types::{ProviderConfig, ProviderKind};
 
 // ── Provider Factory ────────────────────────────────────────────────────────
 

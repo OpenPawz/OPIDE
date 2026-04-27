@@ -20,7 +20,7 @@ use tauri::Manager;
 /// the real boundary is the user-approval gate at the agent loop tier.
 pub(crate) fn sensitive_redirect_target(command: &str) -> Option<String> {
     let target = extract_redirect_target(command)?;
-    if paw_temp_lib::engine::util::check_sensitive_path(&target).is_err() {
+    if opide_engine::engine::util::check_sensitive_path(&target).is_err() {
         Some(target)
     } else {
         None
@@ -42,8 +42,8 @@ pub(crate) fn off_workspace_redirect_target(
     active_workspace: Option<&str>,
 ) -> Option<String> {
     let target = extract_redirect_target(command)?;
-    use paw_temp_lib::engine::util::WriteTarget;
-    match paw_temp_lib::engine::util::classify_write_target(&target, active_workspace) {
+    use opide_engine::engine::util::WriteTarget;
+    match opide_engine::engine::util::classify_write_target(&target, active_workspace) {
         WriteTarget::OffWorkspace | WriteTarget::NoWorkspace => Some(target),
         _ => None,
     }
@@ -390,7 +390,7 @@ pub async fn execute(
             // itself. Any literal credential-shaped value in the command
             // (in a `printf`/`echo`/heredoc) gets refused before the
             // shell sees it.
-            if let Some(kind) = paw_temp_lib::engine::util::looks_like_credential_value(&command) {
+            if let Some(kind) = opide_engine::engine::util::looks_like_credential_value(&command) {
                 log::warn!(
                     "[tools] B195: refusing ide_run_command — command contains {}",
                     kind
@@ -426,7 +426,7 @@ pub async fn execute(
             // the agent to use ctx.file_write instead so the diff-editor
             // review can fire.
             let active_workspace: Option<String> = _app_handle
-                .try_state::<paw_temp_lib::engine::state::EngineState>()
+                .try_state::<opide_engine::engine::state::EngineState>()
                 .and_then(|st| st.active_workspace.lock().clone());
             if let Some(target) =
                 off_workspace_redirect_target(&command, active_workspace.as_deref())

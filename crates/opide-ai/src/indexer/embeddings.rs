@@ -78,15 +78,15 @@ pub async fn embed_chunks(
 /// Build an EmbeddingClient from OpenPawz's managed state.
 fn build_embed_client(
     app_handle: &AppHandle,
-) -> Result<paw_temp_lib::engine::memory::embedding::EmbeddingClient, String> {
+) -> Result<opide_engine::engine::memory::embedding::EmbeddingClient, String> {
     use tauri::Manager;
 
     let state = app_handle
-        .try_state::<paw_temp_lib::engine::state::EngineState>()
+        .try_state::<opide_engine::engine::state::EngineState>()
         .ok_or("EngineState not available — cannot generate embeddings")?;
 
     let memory_config = state.memory_config.lock();
-    let client = paw_temp_lib::engine::memory::embedding::EmbeddingClient::new(&memory_config);
+    let client = opide_engine::engine::memory::embedding::EmbeddingClient::new(&memory_config);
 
     Ok(client)
 }

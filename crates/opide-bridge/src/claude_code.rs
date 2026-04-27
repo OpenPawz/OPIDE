@@ -13,8 +13,8 @@
 // - OPIDE's own system message (engram/soul) dominates context — no --system-prompt needed
 // - stderr captured and logged (not swallowed)
 
-use paw_temp_lib::atoms::traits::{AiProvider, ProviderError};
-use paw_temp_lib::engine::types::{
+use opide_engine::atoms::traits::{AiProvider, ProviderError};
+use opide_engine::engine::types::{
     Message, MessageContent, ProviderConfig, ProviderKind, Role, StreamChunk,
     TokenUsage, ToolDefinition,
 };
@@ -106,7 +106,7 @@ impl ClaudeCodeProvider {
                 MessageContent::Text(s) => s.clone(),
                 MessageContent::Blocks(blocks) => {
                     blocks.iter().filter_map(|b| match b {
-                        paw_temp_lib::engine::types::ContentBlock::Text { text } => Some(text.as_str()),
+                        opide_engine::engine::types::ContentBlock::Text { text } => Some(text.as_str()),
                         _ => None,
                     }).collect::<Vec<_>>().join("\n")
                 }
@@ -402,7 +402,7 @@ impl AiProvider for ClaudeCodeProvider {
             for (i, (name, args)) in tool_calls.iter().enumerate() {
                 chunks.push(StreamChunk {
                     delta_text: None,
-                    tool_calls: vec![paw_temp_lib::engine::types::ToolCallDelta {
+                    tool_calls: vec![opide_engine::engine::types::ToolCallDelta {
                         index: i,
                         id: Some(format!("call_{}", uuid::Uuid::new_v4())),
                         function_name: Some(name.clone()),
