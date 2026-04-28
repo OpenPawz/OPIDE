@@ -13,7 +13,7 @@ use crate::atoms::engram_types::{
     TrustScore, WorkingMemorySnapshot,
 };
 use crate::atoms::error::{EngineError, EngineResult};
-use rusqlite::params;
+use rusqlite::{params, params_from_iter, ToSql};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Episodic Memories
@@ -444,38 +444,45 @@ impl SessionStore {
         let rc = self.read_conn();
         let conn = rc.lock();
 
-        // Build hierarchical scope WHERE clause
-        let mut scope_conditions: Vec<String> = vec!["1=1".into()]; // always true for global search
-        let mut _scope_params: Vec<String> = Vec::new();
+        // Build hierarchical scope WHERE clause using bound params (no manual escaping).
+        // Placeholder numbering: ?1 = query, ?2 = limit, scope binds start at ?3.
+        let mut scope_clause = String::from("1=1");
+        let mut scope_params: Vec<String> = Vec::new();
 
         if !scope.global {
             let mut or_clauses: Vec<String> = vec!["em.scope_global = 1".into()];
+            let mut next_idx = 3usize; // ?1 and ?2 are reserved for query and limit
 
             if let Some(ref aid) = scope.agent_id {
-                or_clauses.push(format!("em.scope_agent_id = '{}'", aid.replace('\'', "''")));
+                or_clauses.push(format!("em.scope_agent_id = ?{}", next_idx));
+                scope_params.push(aid.clone());
+                next_idx += 1;
             }
             if let Some(ref pid) = scope.project_id {
-                or_clauses.push(format!(
-                    "em.scope_project_id = '{}'",
-                    pid.replace('\'', "''")
-                ));
+                or_clauses.push(format!("em.scope_project_id = ?{}", next_idx));
+                scope_params.push(pid.clone());
+                next_idx += 1;
             }
             if let Some(ref sid) = scope.squad_id {
-                or_clauses.push(format!("em.scope_squad_id = '{}'", sid.replace('\'', "''")));
+                or_clauses.push(format!("em.scope_squad_id = ?{}", next_idx));
+                scope_params.push(sid.clone());
+                next_idx += 1;
             }
             if let Some(ref ch) = scope.channel {
-                or_clauses.push(format!("em.scope_channel = '{}'", ch.replace('\'', "''")));
+                or_clauses.push(format!("em.scope_channel = ?{}", next_idx));
+                scope_params.push(ch.clone());
+                next_idx += 1;
             }
             if let Some(ref uid) = scope.channel_user_id {
-                or_clauses.push(format!(
-                    "em.scope_channel_user_id = '{}'",
-                    uid.replace('\'', "''")
-                ));
+                or_clauses.push(format!("em.scope_channel_user_id = ?{}", next_idx));
+                scope_params.push(uid.clone());
+                next_idx += 1;
             }
+            let _ = next_idx; // index no longer needed after final branch
             // Also include unscoped memories (no agent restriction)
             or_clauses.push("(em.scope_agent_id IS NULL OR em.scope_agent_id = '')".into());
 
-            scope_conditions = vec![format!("({})", or_clauses.join(" OR "))];
+            scope_clause = format!("({})", or_clauses.join(" OR "));
         }
 
         let sql = format!(
@@ -493,12 +500,18 @@ impl SessionStore {
                AND {}
              ORDER BY fts.rank
              LIMIT ?2",
-            scope_conditions.join(" AND ")
+            scope_clause
         );
+
+        let mut all_params: Vec<Box<dyn ToSql>> =
+            vec![Box::new(query.to_string()), Box::new(limit as i64)];
+        for p in scope_params {
+            all_params.push(Box::new(p));
+        }
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(params![query, limit as i64], |row| {
+            .query_map(params_from_iter(all_params.iter().map(|b| b.as_ref())), |row| {
                 let mem = Self::episodic_from_row(row)?;
                 let rank: f64 = row.get(22)?;
                 Ok((mem, -rank))
@@ -917,25 +930,32 @@ impl SessionStore {
         let rc = self.read_conn();
         let conn = rc.lock();
 
-        // Build hierarchical scope WHERE clause
+        // Build hierarchical scope WHERE clause using bound params (no manual escaping).
+        // Placeholder numbering: ?1 = query, ?2 = limit, scope binds start at ?3.
+        let mut scope_params: Vec<String> = Vec::new();
         let scope_clause = if scope.global {
             "1=1".to_string()
         } else {
             let mut or_clauses: Vec<String> =
                 vec!["sm.scope_agent_id = '' OR sm.scope_agent_id IS NULL".into()];
+            let mut next_idx = 3usize;
 
             if let Some(ref aid) = scope.agent_id {
-                or_clauses.push(format!("sm.scope_agent_id = '{}'", aid.replace('\'', "''")));
+                or_clauses.push(format!("sm.scope_agent_id = ?{}", next_idx));
+                scope_params.push(aid.clone());
+                next_idx += 1;
             }
             if let Some(ref pid) = scope.project_id {
-                or_clauses.push(format!(
-                    "sm.scope_project_id = '{}'",
-                    pid.replace('\'', "''")
-                ));
+                or_clauses.push(format!("sm.scope_project_id = ?{}", next_idx));
+                scope_params.push(pid.clone());
+                next_idx += 1;
             }
             if let Some(ref ch) = scope.channel {
-                or_clauses.push(format!("sm.scope_channel = '{}'", ch.replace('\'', "''")));
+                or_clauses.push(format!("sm.scope_channel = ?{}", next_idx));
+                scope_params.push(ch.clone());
+                next_idx += 1;
             }
+            let _ = next_idx;
 
             format!("({})", or_clauses.join(" OR "))
         };
@@ -956,9 +976,15 @@ impl SessionStore {
             scope_clause
         );
 
+        let mut all_params: Vec<Box<dyn ToSql>> =
+            vec![Box::new(query.to_string()), Box::new(limit as i64)];
+        for p in scope_params {
+            all_params.push(Box::new(p));
+        }
+
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(params![query, limit as i64], |row| {
+            .query_map(params_from_iter(all_params.iter().map(|b| b.as_ref())), |row| {
                 let mem = Self::semantic_from_row(row)?;
                 let rank: f64 = row.get(14)?;
                 Ok((mem, -rank))
@@ -1667,30 +1693,39 @@ impl SessionStore {
     ) -> EngineResult<Vec<EpisodicMemory>> {
         let conn = self.conn.lock();
 
+        // Build hierarchical scope WHERE clause using bound params (no manual escaping).
+        // Placeholder numbering: ?1 = start, ?2 = end, ?3 = limit, scope binds start at ?4.
         let mut scope_clause = String::from("1=1");
+        let mut scope_params: Vec<String> = Vec::new();
         if !scope.global {
             let mut or_clauses: Vec<String> = vec!["em.scope_global = 1".into()];
+            let mut next_idx = 4usize;
             if let Some(ref aid) = scope.agent_id {
-                or_clauses.push(format!("em.scope_agent_id = '{}'", aid.replace('\'', "''")));
+                or_clauses.push(format!("em.scope_agent_id = ?{}", next_idx));
+                scope_params.push(aid.clone());
+                next_idx += 1;
             }
             if let Some(ref pid) = scope.project_id {
-                or_clauses.push(format!(
-                    "em.scope_project_id = '{}'",
-                    pid.replace('\'', "''")
-                ));
+                or_clauses.push(format!("em.scope_project_id = ?{}", next_idx));
+                scope_params.push(pid.clone());
+                next_idx += 1;
             }
             if let Some(ref sid) = scope.squad_id {
-                or_clauses.push(format!("em.scope_squad_id = '{}'", sid.replace('\'', "''")));
+                or_clauses.push(format!("em.scope_squad_id = ?{}", next_idx));
+                scope_params.push(sid.clone());
+                next_idx += 1;
             }
             if let Some(ref ch) = scope.channel {
-                or_clauses.push(format!("em.scope_channel = '{}'", ch.replace('\'', "''")));
+                or_clauses.push(format!("em.scope_channel = ?{}", next_idx));
+                scope_params.push(ch.clone());
+                next_idx += 1;
             }
             if let Some(ref uid) = scope.channel_user_id {
-                or_clauses.push(format!(
-                    "em.scope_channel_user_id = '{}'",
-                    uid.replace('\'', "''")
-                ));
+                or_clauses.push(format!("em.scope_channel_user_id = ?{}", next_idx));
+                scope_params.push(uid.clone());
+                next_idx += 1;
             }
+            let _ = next_idx;
             or_clauses.push("(em.scope_agent_id IS NULL OR em.scope_agent_id = '')".into());
             scope_clause = format!("({})", or_clauses.join(" OR "));
         }
@@ -1710,11 +1745,21 @@ impl SessionStore {
              LIMIT ?3"
         );
 
+        let mut all_params: Vec<Box<dyn ToSql>> = vec![
+            Box::new(start.to_string()),
+            Box::new(end.to_string()),
+            Box::new(limit as i64),
+        ];
+        for p in scope_params {
+            all_params.push(Box::new(p));
+        }
+
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(params![start, end, limit as i64], |row| {
-                Self::episodic_from_row(row)
-            })?
+            .query_map(
+                params_from_iter(all_params.iter().map(|b| b.as_ref())),
+                Self::episodic_from_row,
+            )?
             .filter_map(|r| r.ok())
             .collect();
 
