@@ -28,7 +28,11 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use zeroize::Zeroizing;
 
+// These are only consulted in non-test builds (the test build short-circuits
+// `read_vault` / `persist_vault` to an in-memory map — see those functions).
+#[cfg(not(test))]
 const VAULT_SERVICE: &str = "openpawz";
+#[cfg(not(test))]
 const VAULT_USER: &str = "key-vault";
 
 /// Type alias: all in-memory key material is wrapped in `Zeroizing` so it
@@ -157,7 +161,24 @@ fn ensure_loaded() {
 
 /// Read the unified vault JSON from the keychain.
 /// If no vault exists yet, returns an empty map.
+///
+/// In `cfg(test)` builds the OS keychain is bypassed entirely. The keyring
+/// crate's macOS backend serialises access through the user's login keychain,
+/// so two test binaries running concurrently (e.g. `cargo test --workspace
+/// -j 2`) can race on the same `keyring::Entry` and either (a) wedge on a
+/// hidden authorisation prompt or (b) interleave reads and writes to the
+/// shared `openpawz / key-vault` entry. Either case manifests as a hang in
+/// the engram consolidation tests, which trigger the vault by way of
+/// `tokenize_edge_type` → `get_memory_encryption_key`. Keeping tests fully
+/// in-process makes the suite deterministic and parallel-safe without
+/// changing production behaviour.
 fn read_vault() -> VaultMap {
+    #[cfg(test)]
+    {
+        debug!("[key-vault] cfg(test): in-memory vault, skipping OS keychain read");
+        return VaultMap::new();
+    }
+    #[cfg(not(test))]
     match keyring::Entry::new(VAULT_SERVICE, VAULT_USER) {
         Ok(entry) => match entry.get_password() {
             Ok(json_str) => {
@@ -197,23 +218,36 @@ fn read_vault() -> VaultMap {
 /// Serialise the vault map to JSON and write to the single keychain entry.
 /// Accepts `VaultMap` (Zeroizing values) — unwraps to plain strings for
 /// JSON serialisation only; the serialised JSON lives briefly on the stack.
+///
+/// In `cfg(test)` builds this is a no-op — see `read_vault` for the rationale
+/// (parallel test binaries racing on the OS keychain).
 fn persist_vault(map: &VaultMap) {
-    // Build a plain HashMap for serde (Zeroizing<String> doesn't impl Serialize)
-    let plain: HashMap<&str, &str> = map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    #[cfg(test)]
+    {
+        let _ = map; // suppress unused-variable warning under cfg(test)
+        debug!("[key-vault] cfg(test): in-memory vault, skipping OS keychain write");
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        // Build a plain HashMap for serde (Zeroizing<String> doesn't impl Serialize)
+        let plain: HashMap<&str, &str> =
+            map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
-    let json = match serde_json::to_string(&plain) {
-        Ok(j) => Zeroizing::new(j),
-        Err(e) => {
-            error!("[key-vault] Failed to serialise vault: {}", e);
-            return;
+        let json = match serde_json::to_string(&plain) {
+            Ok(j) => Zeroizing::new(j),
+            Err(e) => {
+                error!("[key-vault] Failed to serialise vault: {}", e);
+                return;
+            }
+        };
+
+        match keyring::Entry::new(VAULT_SERVICE, VAULT_USER) {
+            Ok(entry) => match entry.set_password(&json) {
+                Ok(()) => debug!("[key-vault] Persisted unified vault ({} keys)", map.len()),
+                Err(e) => error!("[key-vault] Failed to persist vault: {}", e),
+            },
+            Err(e) => error!("[key-vault] Keyring init failed on persist: {}", e),
         }
-    };
-
-    match keyring::Entry::new(VAULT_SERVICE, VAULT_USER) {
-        Ok(entry) => match entry.set_password(&json) {
-            Ok(()) => debug!("[key-vault] Persisted unified vault ({} keys)", map.len()),
-            Err(e) => error!("[key-vault] Failed to persist vault: {}", e),
-        },
-        Err(e) => error!("[key-vault] Keyring init failed on persist: {}", e),
     }
 }
