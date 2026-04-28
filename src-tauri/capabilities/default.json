@@ -28,6 +28,23 @@
       ]
     },
     {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [
+        { "path": "$HOME/**" },
+        { "path": "$HOME/**/.*" },
+        { "path": "$HOME/**/.*/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DESKTOP/**/.*" },
+        { "path": "$DESKTOP/**/.*/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOCUMENT/**/.*" },
+        { "path": "$DOCUMENT/**/.*/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$DOWNLOAD/**/.*" },
+        { "path": "$DOWNLOAD/**/.*/**" }
+      ]
+    },
+    {
       "identifier": "fs:allow-write-file",
       "allow": [
         { "path": "$HOME/**" },
