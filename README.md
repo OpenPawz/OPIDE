@@ -257,7 +257,7 @@ function run(ctx) {
 }
 ```
 
-The `ctx` object exposes: `file_read`, `file_write`, `dir_list`, `exec`, `git_status`, `git_diff`, `git_log`, `git_branches`, `search`, `get_diagnostics`, `get_selection`, `get_open_files`.
+The `ctx` object exposes: `file_read`, `file_write`, `list_dir`, `exec`, `git_status`, `git_diff`, `git_log`, `git_branches`, `search`, `diagnostics`, `selection`, `open_files`.
 
 No raw filesystem access. No network access. No child process spawning outside the HostApi. The host controls exactly what the agent can do.
 
