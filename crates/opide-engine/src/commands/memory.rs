@@ -86,8 +86,9 @@ pub async fn engine_memory_search(
             id: r.id,
             content: r.content,
             category: r.category,
-            importance: 5, // bridge::search doesn't expose importance
-            created_at: String::new(),
+            // bridge yields importance as f32 in [0.0, 1.0]; Memory expects u8 0-10.
+            importance: (r.importance.clamp(0.0, 1.0) * 10.0).round() as u8,
+            created_at: r.created_at,
             score: Some(r.score),
             agent_id: agent_id.clone(),
         })
