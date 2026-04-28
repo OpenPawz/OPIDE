@@ -146,8 +146,20 @@ pub async fn search_files(request: SearchRequest) -> Result<SearchResult, String
 }
 
 #[tauri::command]
-pub async fn search_file_list(root: String, max_results: Option<usize>) -> Result<Vec<String>, String> {
+pub async fn search_file_list(
+    root: String,
+    max_results: Option<usize>,
+    pattern: Option<String>,
+) -> Result<Vec<String>, String> {
     let max = max_results.unwrap_or(5000);
+
+    // Compile the optional glob once. A `None` or empty/`*` pattern is treated
+    // as "match everything" so we don't pay the matcher cost for the common
+    // case where the caller just wants every file.
+    let compiled = match pattern.as_deref() {
+        None | Some("") | Some("*") => None,
+        Some(p) => Some(glob::Pattern::new(p).map_err(|e| format!("invalid glob: {e}"))?),
+    };
 
     let walker = WalkBuilder::new(&root)
         .hidden(true)
@@ -174,6 +186,12 @@ pub async fn search_file_list(root: String, max_results: Option<usize>) -> Resul
             .unwrap_or(&path)
             .trim_start_matches('/')
             .to_string();
+
+        if let Some(g) = &compiled {
+            if !g.matches(&relative) {
+                continue;
+            }
+        }
 
         files.push(relative);
 

@@ -482,7 +482,7 @@ export function initPalaceTabs(): void {
   });
 }
 
-/** Programmatically switch to a palace tab (recall, graph, atlas, remember, files). */
+/** Programmatically switch to a palace tab (recall, graph, atlas, remember). */
 export function activatePalaceTab(target: string): void {
   document.querySelectorAll('.palace-tab').forEach((t) => t.classList.remove('active'));
   document.querySelector(`.palace-tab[data-palace-tab="${target}"]`)?.classList.add('active');

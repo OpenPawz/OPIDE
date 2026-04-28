@@ -168,6 +168,11 @@ pub struct SearchResult {
     pub category: String,
     pub memory_type: String,
     pub score: f64,
+    /// Source memory's `importance` (0.0-1.0). Caller scales for display.
+    /// Procedural and other types without a real importance signal use 0.5.
+    pub importance: f32,
+    /// ISO-8601 creation timestamp of the source memory.
+    pub created_at: String,
 }
 
 /// Search Engram memories. Equivalent to the old `memory::search_memories`
@@ -222,12 +227,40 @@ pub async fn search(
             // §10.14 Prompt injection scanning on recalled content
             let content = encryption::sanitize_recalled_memory(&content);
 
+            // RetrievedMemory carries created_at but not importance. Episodic
+            // is the only memory type with a true `importance` field on the
+            // source row; for semantic/procedural the bridge maps the closest
+            // analogue (confidence, success_rate) so the frontend gets a
+            // meaningful per-row signal instead of a hard-coded 0.5.
+            let importance = match r.memory_type {
+                super::super::super::atoms::engram_types::MemoryType::Episodic => store
+                    .engram_get_episodic(&r.memory_id)
+                    .ok()
+                    .flatten()
+                    .map(|m| m.importance)
+                    .unwrap_or(0.5),
+                super::super::super::atoms::engram_types::MemoryType::Semantic => store
+                    .engram_get_semantic(&r.memory_id)
+                    .ok()
+                    .flatten()
+                    .map(|m| m.confidence)
+                    .unwrap_or(0.5),
+                super::super::super::atoms::engram_types::MemoryType::Procedural => store
+                    .engram_get_procedural(&r.memory_id)
+                    .ok()
+                    .flatten()
+                    .map(|m| m.success_rate)
+                    .unwrap_or(0.5),
+            };
+
             SearchResult {
                 id: r.memory_id,
                 content,
                 category: r.category,
                 memory_type: r.memory_type.to_string(),
                 score: r.trust_score.composite() as f64,
+                importance,
+                created_at: r.created_at,
             }
         })
         .collect();
@@ -448,6 +481,8 @@ mod tests {
             category: "preference".to_string(),
             memory_type: "Episodic".to_string(),
             score: 0.85,
+            importance: 0.7,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
         };
         assert_eq!(result.memory_type, "Episodic");
         assert!(result.score > 0.5);

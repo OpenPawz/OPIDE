@@ -627,24 +627,6 @@
   overflow-y: auto;
   flex: 1;
 }
-/* Files panel (legacy) */
-.opide-memory-palace .palace-panel .memory-editor-panel{
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.opide-memory-palace .palace-panel .memory-editor{
-  flex: 1;
-  margin: 0;
-  border: none;
-  border-radius: 0;
-  box-shadow: none;
-}
-.opide-memory-palace .palace-panel .memory-editor-content{
-  flex: 1;
-  min-height: unset;
-}
 .opide-memory-palace .palace-panel .empty-state{
   flex: 1;
 }

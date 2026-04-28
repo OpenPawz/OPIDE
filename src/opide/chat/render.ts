@@ -173,7 +173,8 @@ export function makeFeedbackBtn(iconCls: string, action: string, msg: ChatMsg): 
         invoke('engine_message_feedback', {
           sessionId: S.sessionId,
           messageId: msg.messageId,
-          feedback: action,
+          agentId: S.selectedAgent?.agent_id ?? '',
+          helpful: action === 'up',
         }).catch(console.error)
       }
       btn.style.opacity = '1'

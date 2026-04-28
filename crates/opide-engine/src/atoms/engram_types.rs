@@ -486,6 +486,7 @@ impl Default for ProceduralMemory {
 
 /// Edge type in the memory graph.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum EdgeType {
     /// Source memory was consolidated into target.
     ConsolidatedInto,

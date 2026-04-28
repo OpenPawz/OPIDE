@@ -18,7 +18,6 @@ import {
 } from '@codingame/monaco-vscode-workbench-service-override';
 
 import './styles/memory-palace.css';
-import './styles/memory.css';
 
 import { pawEngine } from './engine';
 import { $ } from './helpers';
@@ -235,13 +234,6 @@ const PALACE_HTML = `
     <div class="palace-memory-list" id="palace-memory-list">
       <div class="palace-list-empty">Loading…</div>
     </div>
-    <div class="palace-section-divider" id="palace-files-divider">
-      <span>Agent Files</span>
-      <button class="btn-icon" id="refresh-memory-btn" title="Refresh files">
-        <span class="ms ms-sm">sync</span>
-      </button>
-    </div>
-    <div class="palace-memory-list" id="memory-list"></div>
   </div>
   <div class="palace-main">
     <div class="palace-tabs">
@@ -256,9 +248,6 @@ const PALACE_HTML = `
       </button>
       <button class="palace-tab" data-palace-tab="remember">
         <span class="ms ms-sm">add</span> Remember
-      </button>
-      <button class="palace-tab" data-palace-tab="files">
-        <span class="ms ms-sm">description</span> Files
       </button>
     </div>
     <div class="palace-panel active" id="palace-recall-panel">
@@ -325,25 +314,6 @@ const PALACE_HTML = `
         <button class="btn btn-primary" id="palace-remember-save">
           <span class="ms ms-sm" style="margin-right:4px">add</span> Store Memory
         </button>
-      </div>
-    </div>
-    <div class="palace-panel" id="palace-files-panel">
-      <div class="memory-editor-panel" style="flex:1;display:flex;flex-direction:column">
-        <div class="memory-editor" id="memory-editor" style="display:none">
-          <div class="memory-editor-header">
-            <span class="memory-editor-path" id="memory-editor-path"></span>
-            <div style="display:flex;gap:6px">
-              <button class="btn btn-ghost btn-sm" id="memory-editor-close">Close</button>
-              <button class="btn btn-primary btn-sm" id="memory-editor-save">Save</button>
-            </div>
-          </div>
-          <textarea class="memory-editor-content" id="memory-editor-content"></textarea>
-        </div>
-        <div class="empty-state" id="memory-empty">
-          <div class="empty-icon"><span class="ms" style="font-size:48px">description</span></div>
-          <div class="empty-title">Agent files</div>
-          <div class="empty-subtitle">Raw filesystem used by your agent for persistent storage</div>
-        </div>
       </div>
     </div>
   </div>

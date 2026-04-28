@@ -478,7 +478,11 @@ async function routeNotification(method: string, params: any, id?: number): Prom
 
     case 'workspace/findFiles': {
       const { include } = params || {}
-      invoke('search_file_list', { path: '/', pattern: include || '*' })
+      invoke('search_file_list', {
+        root: '/',
+        maxResults: 10000,
+        pattern: include || undefined,
+      })
         .then((result: any) => {
           if (id) sendResponse(id, Array.isArray(result) ? result : [])
         })
@@ -489,7 +493,7 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'workspace/watchFiles': {
       // Use our existing file watcher
       if (params?.pattern) {
-        invoke('fs_watch', { path: params.pattern }).catch(() => {})
+        invoke('fs_watch', { path: params.pattern, recursive: true }).catch(() => {})
       }
       if (id) sendResponse(id, null)
       break
