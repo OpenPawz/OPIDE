@@ -106,9 +106,9 @@ pub async fn run_consolidation(
     // context-dependent PII to be worth catching.
     const PII_SCAN_INTERVAL_RUNS: u64 = 12; // ≈ once per hour at the default 5min cadence
     const PII_SCAN_MIN_AGE_SECS: u64 = 24 * 3600;
-    static CYCLE_COUNTER: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
-    let cycle = CYCLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let cycle = store
+        .consolidation_cycle
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let pii_scan_due = cycle % PII_SCAN_INTERVAL_RUNS == 0;
 
     let mut pii_upgrades_applied = 0usize;

@@ -20,7 +20,7 @@ use log::info;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 mod agent_files;
@@ -78,6 +78,12 @@ pub struct SessionStore {
     read_pool: Vec<Arc<Mutex<Connection>>>,
     /// Atomic counter for round-robin read pool selection.
     read_idx: AtomicUsize,
+    /// Per-store consolidation cycle counter. Incremented once per
+    /// `run_consolidation` call and used to throttle the LLM PII scan
+    /// (fires every Nth cycle). Per-store rather than process-global so
+    /// tests do not couple their PII-scan timing to whatever other tests
+    /// happened to run first in the same process.
+    pub(crate) consolidation_cycle: AtomicU64,
 }
 
 impl SessionStore {
@@ -122,6 +128,7 @@ impl SessionStore {
             conn: Arc::new(Mutex::new(conn)),
             read_pool,
             read_idx: AtomicUsize::new(0),
+            consolidation_cycle: AtomicU64::new(0),
         })
     }
 
@@ -155,6 +162,7 @@ impl SessionStore {
             conn: Arc::new(Mutex::new(conn)),
             read_pool: Vec::new(),
             read_idx: AtomicUsize::new(0),
+            consolidation_cycle: AtomicU64::new(0),
         })
     }
 
@@ -165,6 +173,7 @@ impl SessionStore {
             conn: Arc::new(Mutex::new(conn)),
             read_pool: Vec::new(),
             read_idx: AtomicUsize::new(0),
+            consolidation_cycle: AtomicU64::new(0),
         }
     }
 }
