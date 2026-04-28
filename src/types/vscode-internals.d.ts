@@ -41,10 +41,6 @@ declare module '@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/commo
   export const IQuickInputService: any
 }
 
-declare module '@codingame/monaco-vscode-api/vscode/vs/base/common/uri' {
-  export const URI: any
-}
-
 declare module '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService' {
   export const IEditorService: any
 }
