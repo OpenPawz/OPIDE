@@ -270,7 +270,7 @@ function addApprovalButtons(toolCallId: string, toolName: string, tier: string):
   approveBtn.textContent = 'Approve'
   approveBtn.style.cssText = 'background:#2ea043;color:white;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500'
   approveBtn.addEventListener('click', () => {
-    invoke('engine_approve_tool', { sessionId: S.sessionId, toolCallId, approved: true }).catch(console.error)
+    invoke('engine_approve_tool', { toolCallId, approved: true }).catch(console.error)
     row.remove()
   })
 
@@ -278,7 +278,7 @@ function addApprovalButtons(toolCallId: string, toolName: string, tier: string):
   denyBtn.textContent = 'Deny'
   denyBtn.style.cssText = 'background:#da3633;color:white;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500'
   denyBtn.addEventListener('click', () => {
-    invoke('engine_approve_tool', { sessionId: S.sessionId, toolCallId, approved: false }).catch(console.error)
+    invoke('engine_approve_tool', { toolCallId, approved: false }).catch(console.error)
     row.remove()
   })
 
