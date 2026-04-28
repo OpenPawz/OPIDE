@@ -109,7 +109,7 @@ export function createWorkspaceProvider() {
     async open(workspace: unknown, _options?: unknown): Promise<boolean> {
       // If VS Code passes a specific folder, check if it's already open
       if (workspace && typeof workspace === 'object' && 'folderUri' in workspace) {
-        const uri = (workspace as { folderUri: InstanceType<typeof URI> }).folderUri
+        const uri = (workspace as { folderUri: URI }).folderUri
         if (uri && uri.path) {
           const currentPath = getWorkspacePath()
           if (uri.path === currentPath) return true
