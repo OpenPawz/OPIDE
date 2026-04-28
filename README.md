@@ -295,8 +295,7 @@ OPIDE
 │   ├── opide-engine/       # The agent engine
 │   │   └── src/engine/
 │   │       ├── agent_loop/     # Core agent execution cycle
-│   │       ├── engram/         # Memory system (23 modules)
-│   │       ├── orchestrator/   # Multi-agent boss/worker
+│   │       ├── engram/         # Memory system (30+ modules)
 │   │       ├── providers/      # AI provider implementations
 │   │       ├── mcp/            # Model Context Protocol integration
 │   │       └── ...
