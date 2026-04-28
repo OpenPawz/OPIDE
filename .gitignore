@@ -46,3 +46,4 @@ crates/opide-shell/src/extension_host.rs
 OpenPawz/.AGENT_EXECUTION_ROADMAP.md
 OpenPawz/.paw-architecture.md
 OpenPawz/docs/.flow_strategy.md
+/.opide/

@@ -301,11 +301,6 @@ pub fn run() {
             commands::config::engine_list_provider_models,
             // ── OpenPawz: Agents ────────────────────────────────────────
             commands::agent::engine_list_all_agents,
-            // Agent file CRUD — used by Memory Palace's Files tab.
-            commands::agent::engine_agent_file_list,
-            commands::agent::engine_agent_file_get,
-            commands::agent::engine_agent_file_set,
-            commands::agent::engine_agent_file_delete,
             // ── OpenPawz: Memory ────────────────────────────────────────
             commands::memory::engine_message_feedback,
             // Memory palace surface — store/list/search/visualize engram memories.
