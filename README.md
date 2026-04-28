@@ -6,7 +6,7 @@
 
 <p align="center">
   Not a fork. Not a wrapper. Not a clone.<br />
-  A ground-up desktop IDE with a biological memory system, multi-agent orchestration,<br />
+  A ground-up desktop IDE with a biological memory system, configurable agent profiles,<br />
   AST-level code intelligence, and a sandboxed execution engine — all in Rust.
 </p>
 
