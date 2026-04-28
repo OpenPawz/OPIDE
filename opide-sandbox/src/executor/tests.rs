@@ -371,12 +371,17 @@ pub(crate) mod tests {
 
     #[test]
     fn test_memory_limit() {
+        // Memory limit is 128 MB (see runtime::MEMORY_LIMIT). Allocate well
+        // beyond that — 5000 strings × 100_000 chars each. QuickJS strings
+        // are stored as UTF-16 (≈2 bytes/char), so this is roughly 1 GB,
+        // which decisively exceeds the 128 MB cap regardless of internal
+        // overhead. Was previously sized for a 10 MB cap.
         let result = execute_js(r#"
             function run(ctx) {
                 var arr = [];
-                for (var i = 0; i < 2000; i++) {
+                for (var i = 0; i < 5000; i++) {
                     var s = "";
-                    for (var j = 0; j < 10000; j++) s += "A";
+                    for (var j = 0; j < 100000; j++) s += "A";
                     arr.push(s);
                 }
                 return { len: arr.length };
