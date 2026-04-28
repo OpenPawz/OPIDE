@@ -6,7 +6,7 @@
 
 <p align="center">
   Not a fork. Not a wrapper. Not a clone.<br />
-  A ground-up desktop IDE with a biological memory system, multi-agent orchestration,<br />
+  A ground-up desktop IDE with a biological memory system, configurable agent profiles,<br />
   AST-level code intelligence, and a sandboxed execution engine — all in Rust.
 </p>
 
@@ -88,23 +88,23 @@ The core innovation. A biologically-inspired three-tier memory architecture span
 
 | Tier | Name | What it stores | Lifetime |
 |------|------|---------------|----------|
-| **0** | Sensory Buffer | Raw input from current turn — messages, tool results, recalled memories | Single turn (ring buffer, 20 items) |
-| **1** | Working Memory | Active context — priority-evicted slots with token budgets (4,096 tokens default) | Current session |
-| **2** | Long-Term Memory Graph | Persistent knowledge across sessions — episodic, knowledge, procedural | Permanent (with decay) |
+| **0** | Sensory Buffer | Raw input from current turn — messages, tool results, recalled memories | Single turn (ring buffer, configurable; default 5 entries) |
+| **1** | Working Memory | Active context — priority-evicted slots with token budgets (derived from the model's context window: ~10%, clamped 2,048–32,768 tokens) | Current session |
+| **2** | Long-Term Memory Graph | Persistent knowledge across sessions — episodic, semantic, procedural | Permanent (with decay) |
 
 ### Long-Term Memory Graph
 
 Three interconnected stores with typed graph edges:
 
 - **Episodic** — "what happened." Conversations, events, results. Each memory has an importance score, strength (decays via Ebbinghaus curve), scope, and optional vector embedding.
-- **Knowledge** — "what is true." Subject-predicate-object triples. `("Project", "uses", "Rust + TypeScript")`. Auto-reconsolidated when facts update.
+- **Semantic** — "what is true." Subject-predicate-object triples. `("Project", "uses", "Rust + TypeScript")`. Auto-reconsolidated when facts update.
 - **Procedural** — "how to do things." Step-by-step procedures with trigger conditions and success/failure tracking.
 
 ### Advanced Retrieval Pipeline
 
 Not just keyword search. A four-stage pipeline:
 
-1. **Gating** — classifies intent (Skip / Retrieve / Deep / Refuse / Defer). Prevents 40% of unnecessary memory lookups. Based on Self-RAG and CRAG research.
+1. **Gating** — classifies each query into one of five actions (Skip / Retrieve / DeepRetrieve / Refuse / Defer) so trivial queries skip the search entirely. Inspired by CRAG.
 2. **Hybrid Search** — BM25 full-text + vector semantic search across all three stores simultaneously.
 3. **Reranking** — Reciprocal Rank Fusion (RRF, k=60), Maximal Marginal Relevance (MMR), cross-type deduplication.
 4. **Quality Gating** — NDCG scoring, CRAG 3-tier classification (Correct / Ambiguous / Incorrect). Every search returns quality metrics.
@@ -231,7 +231,7 @@ Security is not a feature — it's the architecture.
 | Layer | What it does |
 |-------|-------------|
 | **1. Rust type system** | No null pointers, no data races, no use-after-free. Compile-time guarantees. |
-| **2. Memory encryption** | PII detected via 20 regex patterns + LLM classification. Three tiers: Cleartext, Sensitive (AES-256-GCM + searchable summary), Confidential (fully encrypted, vector-only search). |
+| **2. Memory encryption** | PII detected via 17 regex patterns + LLM classification. Three tiers: Cleartext, Sensitive (AES-256-GCM + searchable summary), Confidential (fully encrypted, vector-only search). |
 | **3. Sandbox enforcement** | All file operations forced through QuickJS sandbox with HostApi trait. No raw filesystem access from agent. |
 | **4. Tool circuit breaker** | Blocks tools after 5 consecutive failures. Prevents infinite loops and resource exhaustion. |
 | **5. MCP isolation** | External MCP servers run in separate processes. Tool results validated before injection. |
@@ -239,7 +239,7 @@ Security is not a feature — it's the architecture.
 | **7. Token budget enforcement** | Context window never exceeded. Prevents context overflow attacks. |
 | **8. GDPR compliance** | Automatic PII tier escalation, key rotation with re-encryption, memory purge capabilities. |
 | **9. Audit trail** | Every operation logged — agent actions, tool calls, memory access, security decisions. Queryable history. |
-| **10. SQLite encryption** | Database encrypted at rest. Anti-forensic measures: file size masking, metadata zeroing. |
+| **10. Secure deletion** | When memories are purged (GC, fusion, or GDPR right-to-erasure), content fields are overwritten with zeros before the row is deleted, so recovered DB pages don't yield plaintext. |
 
 ---
 
@@ -257,7 +257,7 @@ function run(ctx) {
 }
 ```
 
-The `ctx` object exposes: `file_read`, `file_write`, `dir_list`, `exec`, `git_status`, `git_diff`, `git_log`, `git_branches`, `search`, `get_diagnostics`, `get_selection`, `get_open_files`.
+The `ctx` object exposes: `file_read`, `file_write`, `list_dir`, `exec`, `git_status`, `git_diff`, `git_log`, `git_branches`, `search`, `diagnostics`, `selection`, `open_files`.
 
 No raw filesystem access. No network access. No child process spawning outside the HostApi. The host controls exactly what the agent can do.
 
@@ -295,8 +295,7 @@ OPIDE
 │   ├── opide-engine/       # The agent engine
 │   │   └── src/engine/
 │   │       ├── agent_loop/     # Core agent execution cycle
-│   │       ├── engram/         # Memory system (23 modules)
-│   │       ├── orchestrator/   # Multi-agent boss/worker
+│   │       ├── engram/         # Memory system (30+ modules)
 │   │       ├── providers/      # AI provider implementations
 │   │       ├── mcp/            # Model Context Protocol integration
 │   │       └── ...
