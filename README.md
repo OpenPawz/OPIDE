@@ -12,8 +12,9 @@
 
 <p align="center">
   <a href="#what-is-opide">What is OPIDE?</a> &bull;
+  <a href="#screenshots">Screenshots</a> &bull;
   <a href="#engram---the-memory-system">Engram</a> &bull;
-  <a href="#openpawz---the-engine">OpenPawz Engine</a> &bull;
+  <a href="#the-engine">The Engine</a> &bull;
   <a href="#ast-indexing">AST Indexing</a> &bull;
   <a href="#getting-started">Getting Started</a> &bull;
   <a href="#contributing">Contributing</a>
@@ -46,7 +47,36 @@ OPIDE is different:
 - **It remembers.** Engram gives the agent persistent memory with consolidation, decay, and retrieval — modelled on how biological memory works.
 - **It understands structure.** Tree-sitter AST indexing means the agent knows your call graph, type hierarchy, and impact radius without reading every file.
 - **It's secure by default.** PII detection, field-level encryption, sandbox enforcement, keychain integration, audit trails — not optional plugins, built into the core.
-- **It's a platform.** OpenPawz is a standalone agent runtime. OPIDE is one host app. The same engine powers multi-agent workflows, MCP servers, and channel integrations.
+- **It's owned end-to-end.** The agent engine, the memory, the security, the indexing — all OPIDE-native Rust. No external runtime, no plugin sprawl, no version skew between the IDE and the agent it runs.
+
+---
+
+## Screenshots
+
+<p align="center">
+  <img src="screenshots/overview.png" alt="OPIDE overview" width="900" /><br />
+  <em>Full IDE — editor, agent chat, terminal, Memory Palace, all in one window.</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/memory-palace.png" alt="Memory Palace" width="900" /><br />
+  <em>Memory Palace — visualize the agent's long-term memory graph, embedding atlas, and recall pipeline.</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/editor.png" alt="Editor with agent" width="900" /><br />
+  <em>Monaco-based editor with LSP diagnostics, ghost completions, and the agent panel inline.</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/activity.png" alt="Activity feed" width="900" /><br />
+  <em>Activity feed — every tool call, every decision, every approval the agent made, in real time.</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/extensions.png" alt="Extensions" width="900" /><br />
+  <em>Open VSX extensions running native in OPIDE.</em>
+</p>
 
 ---
 
@@ -103,9 +133,9 @@ Hippocampal-inspired background process. When the application is idle, Engram re
 
 ---
 
-## OpenPawz — The Engine
+## The Engine
 
-OPIDE's runtime is **OpenPawz** — a standalone multi-agent AI engine written entirely in Rust.
+OPIDE owns its agent engine end-to-end — a multi-agent AI runtime written entirely in Rust, living in `crates/opide-engine/` alongside the IDE.
 
 ### Agent Loop
 
@@ -245,7 +275,7 @@ No raw filesystem access. No network access. No child process spawning outside t
 
 OPIDE does **not** use VS Code's proprietary extension marketplace. It uses **Open VSX** — the open-source extension registry at [open-vsx.org](https://open-vsx.org), which provides thousands of compatible extensions without any Microsoft lock-in.
 
-The extension runtime source is not included in this repository. Public API stubs are provided so the IDE compiles and runs without extension support — full Open VSX integration is available in OPIDE V2.
+Extension support ships with the OPIDE app today. The runtime implementation is held back from this open-source repository because it's part of the paid product surface — public API stubs are provided here so the codebase compiles and runs without it. The full extension runtime is included in the published OPIDE program.
 
 ---
 
@@ -267,25 +297,24 @@ The editor is the interface. Everything else — the agent, the memory, the secu
 
 ```
 OPIDE
-├── src/                    # TypeScript — Monaco editor surface, chat UI
+├── src/                    # TypeScript — Monaco editor surface, chat UI, Memory Palace
 ├── src-tauri/              # Tauri shell — window management, plugin stack
 ├── crates/
+│   ├── opide-engine/       # The agent engine
+│   │   └── src/engine/
+│   │       ├── agent_loop/     # Core agent execution cycle
+│   │       ├── engram/         # Memory system (23 modules)
+│   │       ├── orchestrator/   # Multi-agent boss/worker
+│   │       ├── providers/      # AI provider implementations
+│   │       ├── mcp/            # Model Context Protocol integration
+│   │       └── ...
 │   ├── opide-ai/           # AST indexer, tool executor, sandbox bridge
 │   ├── opide-bridge/       # Hook traits: ToolAssembler, ProviderFactory
 │   └── opide-shell/        # Terminal, git, LSP, DAP, file watcher, extensions
-├── opide-sandbox/          # QuickJS execution sandbox (rquickjs)
-└── OpenPawz/               # The engine
-    └── src-tauri/src/engine/
-        ├── agent_loop/     # Core agent execution cycle
-        ├── engram/         # Memory system (23 modules)
-        ├── orchestrator/   # Multi-agent boss/worker
-        ├── providers/      # 10 AI provider implementations
-        ├── mcp/            # Model Context Protocol integration
-        ├── routing/        # Channel + model routing
-        └── ...
+└── opide-sandbox/          # QuickJS execution sandbox (rquickjs)
 ```
 
-OPIDE is a host app. OpenPawz is the platform. The bridge layer (`opide-bridge`) connects them through Rust traits — `ToolAssembler`, `ProviderFactory`, `ExternalToolExecutor` — so the engine never depends on the IDE.
+OPIDE owns the engine end-to-end. The bridge layer (`opide-bridge`) connects the engine to OPIDE-specific behavior through Rust traits — `ToolAssembler`, `ProviderFactory`, `ExternalToolExecutor` — keeping the engine layer decoupled from the IDE workbench so each can evolve independently.
 
 ---
 
@@ -302,7 +331,7 @@ OPIDE is a host app. OpenPawz is the platform. The bridge layer (`opide-bridge`)
 git clone https://github.com/OpenPawz/OPIDE.git
 cd OPIDE
 npm install
-npm run tauri dev
+npm run tauri:dev
 ```
 
 First build compiles the Rust backend (~2-3 min). Subsequent launches are fast.
@@ -321,7 +350,7 @@ We welcome contributions — open an issue or submit a PR.
 2. Create a feature branch (`git checkout -b feat/my-feature`)
 3. Make your changes
 4. Run `cargo check` to verify Rust compiles
-5. Run `npm run tauri dev` to test
+5. Run `npm run tauri:dev` to test
 6. Submit a PR
 
 ### Areas We'd Love Help With
