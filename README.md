@@ -33,9 +33,9 @@
 
 OPIDE is a **new class of IDE**. It looks like VS Code — that's where the similarity ends.
 
-Under the surface it's a Rust-native desktop application powered by **OpenPawz**, an AI agent runtime with a biologically-inspired memory system called **Engram**, multi-agent orchestration, 10-layer security, and AST-level code intelligence built on tree-sitter.
+Under the surface it's a Rust-native desktop application with a biologically-inspired memory system called **Engram**, 10-layer security architecture, and AST-level code intelligence built on tree-sitter — all in compiled Rust.
 
-The agent doesn't just autocomplete your code. It remembers your codebase across sessions, understands call graphs and type hierarchies, runs sandboxed operations, delegates to specialised sub-agents, and encrypts sensitive data at rest with AES-256-GCM — automatically.
+The agent doesn't just autocomplete your code. It remembers your codebase across sessions, understands call graphs and type hierarchies, runs sandboxed operations, and encrypts sensitive data at rest with AES-256-GCM — automatically.
 
 **Everything is Rust.** The engine, the memory, the security, the sandbox enforcement, the agent loop, the tool execution. The frontend is TypeScript on Monaco for the editor surface. Everything underneath is compiled, type-safe, and fast.
 
@@ -82,7 +82,7 @@ OPIDE is different:
 
 ## Engram — The Memory System
 
-The core innovation. A biologically-inspired three-tier memory architecture with 23 Rust modules.
+The core innovation. A biologically-inspired three-tier memory architecture spanning 30+ Rust modules.
 
 ### Three Tiers
 
@@ -129,13 +129,13 @@ Hippocampal-inspired background process. When the application is idle, Engram re
 - **Intent Classifier** — 6-intent query routing
 - **Entity Tracker** — canonical name resolution across memories
 - **Abstraction Tree** — 4-level hierarchical semantic compression for context window packing
-- **Memory Bus** — multi-agent memory sync with pub/sub and scoped read capabilities
+- **Memory Bus** — pub/sub event bus with scoped read capabilities for cross-component memory sync
 
 ---
 
 ## The Engine
 
-OPIDE owns its agent engine end-to-end — a multi-agent AI runtime written entirely in Rust, living in `crates/opide-engine/` alongside the IDE.
+OPIDE owns its agent engine end-to-end — a Rust-native AI agent runtime living in `crates/opide-engine/` alongside the IDE.
 
 ### Agent Loop
 
@@ -151,19 +151,11 @@ Built-in safety:
 - **Yield signaling** — graceful interruption when user sends a new message mid-turn
 - **Token budget enforcement** — context window never exceeded, budget-aware at every stage
 
-### Multi-Agent Orchestration
+### Configurable Agent Profiles
 
-Boss/worker pattern with specialised sub-agents:
+Each agent in OPIDE is a profile you can configure independently — its own model, system prompt, capability set, and **specialty** drawn from a fixed taxonomy: `coder`, `researcher`, `designer`, `communicator`, `security`, `general`. The model-routing layer resolves per-agent, per-specialty overrides through a 5-level fallback hierarchy.
 
-```
-Boss Agent (orchestrator)
-├── Coder Agent      — writes and edits code
-├── Researcher Agent — searches docs, reads URLs
-├── Security Agent   — reviews for vulnerabilities
-└── General Agent    — fallback for uncategorised tasks
-```
-
-The boss decomposes goals into subtasks, delegates to workers, monitors progress, requests revisions, and synthesises results. Each agent can have its own model, system prompt, and capability set. Workers cannot spawn other agents — no infinite recursion.
+You switch agents from the chat panel; one agent runs at a time. (Boss/worker orchestration with goal decomposition and automatic delegation is on the roadmap, not in the current build.)
 
 ### 10 AI Providers
 
@@ -239,7 +231,7 @@ Security is not a feature — it's the architecture.
 | Layer | What it does |
 |-------|-------------|
 | **1. Rust type system** | No null pointers, no data races, no use-after-free. Compile-time guarantees. |
-| **2. Memory encryption** | PII detected via 17 regex patterns + LLM classification. Three tiers: Cleartext, Sensitive (AES-256-GCM + searchable summary), Confidential (fully encrypted, vector-only search). |
+| **2. Memory encryption** | PII detected via 20 regex patterns + LLM classification. Three tiers: Cleartext, Sensitive (AES-256-GCM + searchable summary), Confidential (fully encrypted, vector-only search). |
 | **3. Sandbox enforcement** | All file operations forced through QuickJS sandbox with HostApi trait. No raw filesystem access from agent. |
 | **4. Tool circuit breaker** | Blocks tools after 5 consecutive failures. Prevents infinite loops and resource exhaustion. |
 | **5. MCP isolation** | External MCP servers run in separate processes. Tool results validated before injection. |
