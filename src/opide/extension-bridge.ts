@@ -493,7 +493,7 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'workspace/watchFiles': {
       // Use our existing file watcher
       if (params?.pattern) {
-        invoke('fs_watch', { path: params.pattern }).catch(() => {})
+        invoke('fs_watch', { path: params.pattern, recursive: true }).catch(() => {})
       }
       if (id) sendResponse(id, null)
       break
