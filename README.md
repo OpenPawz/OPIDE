@@ -231,7 +231,7 @@ Security is not a feature — it's the architecture.
 | Layer | What it does |
 |-------|-------------|
 | **1. Rust type system** | No null pointers, no data races, no use-after-free. Compile-time guarantees. |
-| **2. Memory encryption** | PII detected via 20 regex patterns + LLM classification. Three tiers: Cleartext, Sensitive (AES-256-GCM + searchable summary), Confidential (fully encrypted, vector-only search). |
+| **2. Memory encryption** | PII detected via 17 regex patterns + LLM classification. Three tiers: Cleartext, Sensitive (AES-256-GCM + searchable summary), Confidential (fully encrypted, vector-only search). |
 | **3. Sandbox enforcement** | All file operations forced through QuickJS sandbox with HostApi trait. No raw filesystem access from agent. |
 | **4. Tool circuit breaker** | Blocks tools after 5 consecutive failures. Prevents infinite loops and resource exhaustion. |
 | **5. MCP isolation** | External MCP servers run in separate processes. Tool results validated before injection. |
@@ -239,7 +239,7 @@ Security is not a feature — it's the architecture.
 | **7. Token budget enforcement** | Context window never exceeded. Prevents context overflow attacks. |
 | **8. GDPR compliance** | Automatic PII tier escalation, key rotation with re-encryption, memory purge capabilities. |
 | **9. Audit trail** | Every operation logged — agent actions, tool calls, memory access, security decisions. Queryable history. |
-| **10. SQLite encryption** | Database encrypted at rest. Anti-forensic measures: file size masking, metadata zeroing. |
+| **10. Secure deletion** | When memories are purged (GC, fusion, or GDPR right-to-erasure), content fields are overwritten with zeros before the row is deleted, so recovered DB pages don't yield plaintext. |
 
 ---
 
