@@ -337,6 +337,6 @@ mod tests {
         let count2 = store.seed_builtin_templates().unwrap();
         assert_eq!(count2, 0);
         let all = store.list_templates(Some("builtin")).unwrap();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 8);
     }
 }
