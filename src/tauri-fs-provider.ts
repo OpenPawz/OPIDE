@@ -27,6 +27,11 @@ import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { Emitter, type Event } from '@codingame/monaco-vscode-api/vscode/vs/base/common/event'
 import { Disposable } from '@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle'
 
+// `URI` is exported from monaco-vscode-api as a class with a `protected` constructor.
+// Under `verbatimModuleSyntax`, TypeScript narrows the imported binding to a value-only
+// reference, so in type position we use this instance-type alias instead.
+type Uri = InstanceType<typeof URI>
+
 import {
   readFile,
   writeFile,
@@ -42,7 +47,7 @@ import { listen } from '@tauri-apps/api/event'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-function uriToPath(resource: URI): string {
+function uriToPath(resource: Uri): string {
   // VS Code URIs on macOS/Linux: file:///Users/foo/bar → /Users/foo/bar
   return resource.fsPath
 }
@@ -92,7 +97,7 @@ export class TauriFileSystemProvider extends Disposable
 
   // ── stat ────────────────────────────────────────────────────────────────────
 
-  async stat(resource: URI): Promise<IStat> {
+  async stat(resource: Uri): Promise<IStat> {
     const path = uriToPath(resource)
     try {
       const s = await stat(path)
@@ -111,7 +116,7 @@ export class TauriFileSystemProvider extends Disposable
 
   // ── readdir ─────────────────────────────────────────────────────────────────
 
-  async readdir(resource: URI): Promise<[string, FileType][]> {
+  async readdir(resource: Uri): Promise<[string, FileType][]> {
     const path = uriToPath(resource)
     try {
       const entries = await readDir(path)
@@ -132,7 +137,7 @@ export class TauriFileSystemProvider extends Disposable
 
   // ── readFile ────────────────────────────────────────────────────────────────
 
-  async readFile(resource: URI): Promise<Uint8Array> {
+  async readFile(resource: Uri): Promise<Uint8Array> {
     const path = uriToPath(resource)
     try {
       const data = await readFile(path)
@@ -145,7 +150,7 @@ export class TauriFileSystemProvider extends Disposable
   // ── writeFile ───────────────────────────────────────────────────────────────
 
   async writeFile(
-    resource: URI,
+    resource: Uri,
     content: Uint8Array,
     _opts: IFileOverwriteOptions,
   ): Promise<void> {
@@ -164,7 +169,7 @@ export class TauriFileSystemProvider extends Disposable
 
   // ── mkdir ───────────────────────────────────────────────────────────────────
 
-  async mkdir(resource: URI): Promise<void> {
+  async mkdir(resource: Uri): Promise<void> {
     const path = uriToPath(resource)
     try {
       await mkdir(path, { recursive: true })
@@ -175,7 +180,7 @@ export class TauriFileSystemProvider extends Disposable
 
   // ── delete ──────────────────────────────────────────────────────────────────
 
-  async delete(resource: URI, opts: IFileDeleteOptions): Promise<void> {
+  async delete(resource: Uri, opts: IFileDeleteOptions): Promise<void> {
     const path = uriToPath(resource)
     try {
       await remove(path, { recursive: opts.recursive })
@@ -186,7 +191,7 @@ export class TauriFileSystemProvider extends Disposable
 
   // ── rename ──────────────────────────────────────────────────────────────────
 
-  async rename(from: URI, to: URI, opts: IFileOverwriteOptions): Promise<void> {
+  async rename(from: Uri, to: Uri, opts: IFileOverwriteOptions): Promise<void> {
     const fromPath = uriToPath(from)
     const toPath = uriToPath(to)
     try {
@@ -208,7 +213,7 @@ export class TauriFileSystemProvider extends Disposable
 
   // ── watch ─────────────────────────────────────────────────────────────────
 
-  watch(resource: URI, opts: IWatchOptions): { dispose(): void } {
+  watch(resource: Uri, opts: IWatchOptions): { dispose(): void } {
     const path = uriToPath(resource)
     let watchId: string | null = null
     let unlisten: (() => void) | null = null

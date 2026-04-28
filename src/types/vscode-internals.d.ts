@@ -13,6 +13,7 @@ declare module '@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/a
 
 declare module '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands' {
   export const ICommandService: any
+  export const CommandsRegistry: any
 }
 
 declare module '@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration' {
