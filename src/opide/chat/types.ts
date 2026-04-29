@@ -82,7 +82,7 @@ export type EngineEvent =
   | { kind: 'delta'; session_id: string; run_id: string; text: string }
   | { kind: 'thinking_delta'; session_id: string; run_id: string; text: string }
   | { kind: 'agent_reasoning'; session_id: string; run_id: string; round: number; text: string }
-  | { kind: 'tool_request'; session_id: string; run_id: string; tool_call: ToolCall; tool_tier?: string; round_number?: number; loaded_tools?: string[]; context_tokens?: number }
+  | { kind: 'tool_request'; session_id: string; run_id: string; tool_call: ToolCall; tool_tier?: string; auto_approved?: boolean; round_number?: number; loaded_tools?: string[]; context_tokens?: number }
   | { kind: 'tool_result'; session_id: string; run_id: string; tool_call_id: string; output: string; success: boolean; duration_ms?: number }
   | { kind: 'complete'; session_id: string; run_id: string; text: string; tool_calls_count: number; usage?: TokenUsage; model?: string; total_rounds?: number }
   | { kind: 'surfaced'; session_id: string; run_id: string; round: number; summary: string }
