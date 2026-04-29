@@ -200,7 +200,21 @@ function formatDuration(ms: number): string {
 
 function addEntry(entry: ActivityEntry): void {
   entries.push(entry)
-  if (entries.length > MAX_ENTRIES) entries.shift()
+  if (entries.length > MAX_ENTRIES) {
+    entries.shift()
+    // Drop the matching DOM node so the rendered list stays bounded too.
+    // Without this, the in-memory array is capped but the DOM accumulates
+    // forever, which causes UI lag in long-running sessions (1D-1).
+    // We drop the first non-empty-state child, since the empty-state
+    // placeholder lives at the top until the first real entry appears.
+    if (listEl) {
+      let firstReal = listEl.firstElementChild
+      while (firstReal && firstReal.classList?.contains('af-empty')) {
+        firstReal = firstReal.nextElementSibling
+      }
+      if (firstReal) firstReal.remove()
+    }
+  }
   if (listEl) renderEntry(entry)
 }
 
@@ -477,6 +491,14 @@ async function startListening(): Promise<void> {
       }
       case 'tool_auto_approved': {
         const ev = payload as Extract<EngineEvent, { kind: string }>
+        // 1D-2: in yolo mode the engine fires both `tool_request` (audit
+        // trail for the activity bar timer) AND `tool_auto_approved`. If
+        // the tool_call_id already has an entry from `tool_request`, this
+        // event is a duplicate and we skip it. The fallback path (no
+        // matching tool_request, e.g. an event arriving before the panel
+        // mounted) still records an entry so we don't lose the signal.
+        const toolCallId = (ev as any).tool_call_id as string | undefined
+        if (toolCallId && activeTools.has(toolCallId)) break
         addEntry({
           ts: new Date(),
           kind: 'auto_approved',
