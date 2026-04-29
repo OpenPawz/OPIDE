@@ -161,7 +161,11 @@ pub enum EngineEvent {
         run_id: String,
         text: String,
     },
-    /// The model wants to call a tool — waiting for approval
+    /// The model wants to call a tool. The engine emits this for every
+    /// tool call it dispatches, including the ones it auto-approves: the
+    /// frontend uses the event to attach a duration timer to the activity
+    /// feed regardless of whether a banner is appropriate. The
+    /// `auto_approved` flag distinguishes the two cases. See finding 1A-2.
     #[serde(rename = "tool_request")]
     ToolRequest {
         session_id: String,
@@ -170,6 +174,17 @@ pub enum EngineEvent {
         /// Tool classification: "safe", "reversible", "external", "dangerous", "unknown"
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_tier: Option<String>,
+        /// True when the engine is NOT awaiting an approval oneshot for
+        /// this tool: it has been auto-approved (yolo mode, tier1/tier2
+        /// auto, sandbox-auto-approved, or user-allowlisted) and is going
+        /// to run regardless. Frontends MUST NOT render an approval
+        /// banner for these; clicking buttons would hit the stale
+        /// approval branch in chat::engine_approve_tool and silently
+        /// no-op. False when the engine has registered a oneshot in
+        /// `state.pending_approvals` and is waiting for a real answer
+        /// from `engine_approve_tool`.
+        #[serde(default)]
+        auto_approved: bool,
         // ── Inspector metadata (Phase 4) ──
         /// Current round number in the agent loop
         #[serde(skip_serializing_if = "Option::is_none")]

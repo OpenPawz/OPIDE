@@ -168,7 +168,17 @@ async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }
   // matching the Rust serialization.
   const toolName = ev.tool_call.function?.name ?? '(unknown)'
   const toolArgs = ev.tool_call.function?.arguments ?? ''
-  const needsApproval = needsApprovalFor(tier, toolName)
+
+  // 1A-2: the engine is the authority on whether it is awaiting an
+  // approval oneshot. `auto_approved` says "I am NOT waiting". If true,
+  // we must not render the approval banner: the engine has already
+  // dispatched the tool and the buttons would hit the stale-approval
+  // branch in chat::engine_approve_tool and silently no-op. The
+  // `needsApprovalFor` predicate is kept as a fallback for older
+  // engine builds that omit the flag (Rust serde default = false for
+  // the unset case, so this is sound).
+  const engineAwaiting = ev.auto_approved !== true
+  const needsApproval = engineAwaiting && needsApprovalFor(tier, toolName)
 
   S.pendingToolCalls.set(ev.tool_call.id, { call: ev.tool_call })
 
@@ -204,7 +214,7 @@ async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }
   if (needsApproval) {
     S.messages.push({
       role: 'tool',
-      content: `Tool requires approval: **${toolName}**\nTier: ${tier}\nArgs: \`${toolArgs.slice(0, 200)}\``,
+      content: formatApprovalMessage(toolName, tier, toolArgs),
       ts: new Date(),
       toolName,
     })
@@ -214,6 +224,44 @@ async function showToolRequest(ev: Extract<EngineEvent, { kind: 'tool_request' }
     updateStatus(`Running: ${toolName}`)
     showToolIndicator(toolName)
   }
+}
+
+/**
+ * 1A-3: render the full tool arguments in the approval prompt instead of
+ * truncating at 200 characters. The user is the last line of defence for
+ * tools that reach this banner; truncating the args means they cannot
+ * actually see what they are about to approve. For `execute_code`
+ * specifically, extract the JS body and present it directly so the
+ * dangerous tail of a 1KB script is visible.
+ */
+function formatApprovalMessage(toolName: string, tier: string, toolArgs: string): string {
+  const header = `Tool requires approval: **${toolName}**\nTier: ${tier}`
+  if (!toolArgs) return `${header}\n_(no arguments)_`
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(toolArgs)
+  } catch {
+    // Not valid JSON — show raw, fenced for monospace and so long lines
+    // don't break the chat layout. No truncation.
+    return `${header}\n\n\`\`\`\n${toolArgs}\n\`\`\``
+  }
+
+  // execute_code is the highest-risk tool that reaches this banner.
+  // Extract the `code` body so the user reads JavaScript, not JSON.
+  if (
+    toolName === 'execute_code' &&
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    typeof (parsed as { code?: unknown }).code === 'string'
+  ) {
+    const code = (parsed as { code: string }).code
+    return `${header}\n\n\`\`\`js\n${code}\n\`\`\``
+  }
+
+  // Anything else: pretty-print the JSON.
+  const pretty = JSON.stringify(parsed, null, 2)
+  return `${header}\n\n\`\`\`json\n${pretty}\n\`\`\``
 }
 
 // ─── Approval Buttons ────────────────────────────────────────────────────────
