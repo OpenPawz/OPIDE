@@ -210,6 +210,197 @@ pub fn is_sandbox_auto_approved(tc: &ToolCall) -> bool {
     READ_ONLY_IDE_TOOLS.contains(&tc.function.name.as_str())
 }
 
+// ── Tier classification ──────────────────────────────────────────────────────
+//
+// Single source of truth for tool tier lookup. The agent_loop main loop
+// uses these via classify_tool_tier; the force-sandbox single-tool path
+// and the multi-tool batch path both call the same helper so the tier
+// label and the auto-approve decision stay consistent across all three
+// code sites.
+
+/// Tier 1, safe: read-only, never mutate user state. Always auto-approve.
+pub const TIER1_SAFE: &[&str] = &[
+    "fetch",
+    "read_file",
+    "list_directory",
+    "soul_read",
+    "soul_list",
+    "memory_search",
+    "memory_stats",
+    "self_info",
+    "web_search",
+    "web_read",
+    "web_screenshot",
+    "web_browse",
+    "list_tasks",
+    "email_read",
+    "slack_read",
+    "telegram_read",
+    "google_gmail_list",
+    "google_gmail_read",
+    "google_calendar_list",
+    "google_drive_list",
+    "google_drive_read",
+    "google_sheets_read",
+    "sol_balance",
+    "sol_quote",
+    "sol_portfolio",
+    "sol_token_info",
+    "dex_balance",
+    "dex_quote",
+    "dex_portfolio",
+    "dex_token_info",
+    "dex_check_token",
+    "dex_search_token",
+    "dex_watch_wallet",
+    "dex_whale_transfers",
+    "dex_top_traders",
+    "dex_trending",
+    "coinbase_prices",
+    "coinbase_balance",
+    "agent_list",
+    "agent_skills",
+    "agent_read_messages",
+    "list_squads",
+    "skill_search",
+    "skill_list",
+    "request_tools",
+    "mcp_refresh",
+    "search_ncnodes",
+    "n8n_list_workflows",
+    "canvas_push",
+    "canvas_update",
+    "canvas_save",
+    "canvas_load",
+    "canvas_list_dashboards",
+    "canvas_delete_dashboard",
+    "canvas_list_templates",
+    "canvas_from_template",
+    "canvas_create_template",
+    "trello_list_boards",
+    "trello_get_board",
+    "trello_get_lists",
+    "trello_get_cards",
+    "trello_get_card",
+    "trello_search",
+    "trello_get_labels",
+    "trello_get_members",
+    "execute_plan",
+];
+
+/// Tier 2, reversible: local writes that can be undone. Auto-approve in 'auto' mode.
+///
+/// B198 (and the audit findings 1A): `execute_code` deliberately not in this
+/// list. The sandbox JS body can call `ctx.tool('ide_run_command', ...)` or
+/// `ctx.exec(...)` to reach the host shell with full user privilege; an
+/// auto-approve here would let an agent sneak destructive commands past
+/// every other gate.
+pub const TIER2_REVERSIBLE: &[&str] = &[
+    "soul_write",
+    "memory_store",
+    "memory_knowledge",
+    "update_profile",
+    "create_task",
+    "manage_task",
+    "write_file",
+    "agent_skill_assign",
+    "skill_install",
+    "agent_send_message",
+    "create_squad",
+    "manage_squad",
+    "squad_broadcast",
+];
+
+/// Tier 3, external: irreversible outbound actions. Always prompt.
+pub const TIER3_EXTERNAL: &[&str] = &[
+    "email_send",
+    "google_gmail_send",
+    "google_docs_create",
+    "google_drive_upload",
+    "google_drive_share",
+    "google_calendar_create",
+    "google_sheets_append",
+    "google_api",
+    "image_generate",
+    "trello_create_board",
+    "trello_update_board",
+    "trello_create_list",
+    "trello_update_list",
+    "trello_archive_list",
+    "trello_create_card",
+    "trello_update_card",
+    "trello_move_card",
+    "trello_add_comment",
+    "trello_create_label",
+    "trello_update_label",
+    "trello_add_label",
+    "trello_remove_label",
+    "trello_create_checklist",
+    "trello_add_checklist_item",
+    "trello_toggle_checklist_item",
+];
+
+/// Tier 4, dangerous: financial / destructive. Always prompt.
+pub const TIER4_DANGEROUS: &[&str] = &[
+    "exec",
+    "run_command",
+    "delete_file",
+    "ide_delete_file",
+    "sol_swap",
+    "sol_transfer",
+    "sol_wallet_create",
+    "dex_swap",
+    "dex_transfer",
+    "dex_wallet_create",
+    "coinbase_trade",
+    "coinbase_transfer",
+    "coinbase_wallet_create",
+];
+
+/// Returns the tier label ("safe", "reversible", "external", "dangerous",
+/// or "unknown") for a given tool name. The tier label flows to the
+/// frontend in `EngineEvent::ToolRequest.tool_tier`.
+///
+/// Unknown is the safe default: any tool that doesn't appear in the four
+/// lists (e.g. dynamic MCP tools, brand-new IDE tools, `execute_code`)
+/// must be prompted.
+pub fn classify_tool_tier(name: &str) -> &'static str {
+    if TIER1_SAFE.contains(&name) {
+        "safe"
+    } else if TIER2_REVERSIBLE.contains(&name) {
+        "reversible"
+    } else if TIER3_EXTERNAL.contains(&name) {
+        "external"
+    } else if TIER4_DANGEROUS.contains(&name) {
+        "dangerous"
+    } else {
+        "unknown"
+    }
+}
+
+/// Should this tool be auto-approved (no human-in-the-loop prompt) given
+/// the current approval policy? Mirrors the `skip_hil` predicate in the
+/// per-tc loop in agent_loop::run_agent_turn so all three sandbox routing
+/// branches (single force-sandbox, multi-tool batch, per-tc loop) reach
+/// the same decision.
+pub fn should_auto_approve(
+    tc: &ToolCall,
+    auto_approve_all: bool,
+    user_approved_tools: &[String],
+) -> bool {
+    if auto_approve_all {
+        return true;
+    }
+    if user_approved_tools.iter().any(|t| t == &tc.function.name) {
+        return true;
+    }
+    if is_sandbox_auto_approved(tc) {
+        return true;
+    }
+    let name = tc.function.name.as_str();
+    TIER1_SAFE.contains(&name) || TIER2_REVERSIBLE.contains(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +529,162 @@ mod tests {
         let code = build_batch_sandbox_code(&calls);
         assert!(!code.contains('`'));
         assert!(code.contains("JSON.parse("));
+    }
+
+    // ── Tier classification + auto-approve helpers (audit finding 1A) ──
+
+    #[test]
+    fn classify_tool_tier_returns_safe_for_tier1_examples() {
+        for name in &["fetch", "read_file", "memory_search", "self_info"] {
+            assert_eq!(classify_tool_tier(name), "safe", "{}", name);
+        }
+    }
+
+    #[test]
+    fn classify_tool_tier_returns_reversible_for_tier2_examples() {
+        for name in &["soul_write", "memory_store", "write_file"] {
+            assert_eq!(classify_tool_tier(name), "reversible", "{}", name);
+        }
+    }
+
+    #[test]
+    fn classify_tool_tier_returns_external_for_tier3_examples() {
+        for name in &["email_send", "google_drive_upload", "trello_create_card"] {
+            assert_eq!(classify_tool_tier(name), "external", "{}", name);
+        }
+    }
+
+    #[test]
+    fn classify_tool_tier_returns_dangerous_for_tier4_examples() {
+        for name in &["exec", "run_command", "delete_file", "ide_delete_file"] {
+            assert_eq!(classify_tool_tier(name), "dangerous", "{}", name);
+        }
+    }
+
+    #[test]
+    fn classify_tool_tier_returns_unknown_for_force_sandbox_targets() {
+        // These are the headline tools from finding 1A. None of them appear
+        // in any of the tier lists, so they fall to "unknown" which means
+        // the engine must prompt before running them.
+        for name in &[
+            "ide_run_command",
+            "ide_git_commit",
+            "ide_git_checkout",
+            "ide_git_stage",
+            "ide_git_stage_all",
+            "ide_create_project",
+            "ide_open_workspace",
+            "execute_code",
+        ] {
+            assert_eq!(classify_tool_tier(name), "unknown", "{}", name);
+        }
+    }
+
+    #[test]
+    fn classify_tool_tier_returns_unknown_for_dynamic_mcp_tools() {
+        // Dynamic MCP tools (mcp_*) and unknown names default to "unknown"
+        // so the engine prompts.
+        for name in &["mcp_some_server_tool", "totally_made_up_tool"] {
+            assert_eq!(classify_tool_tier(name), "unknown", "{}", name);
+        }
+    }
+
+    #[test]
+    fn should_auto_approve_returns_true_for_yolo_mode() {
+        let tc = make_tc("ide_run_command", r#"{"command": "rm -rf /"}"#);
+        assert!(
+            should_auto_approve(&tc, true, &[]),
+            "yolo mode (auto_approve_all) should bypass every prompt"
+        );
+    }
+
+    #[test]
+    fn should_auto_approve_returns_true_for_user_approved_tools() {
+        let tc = make_tc("ide_run_command", r#"{"command": "ls"}"#);
+        let approved: Vec<String> = vec!["ide_run_command".into()];
+        assert!(
+            should_auto_approve(&tc, false, &approved),
+            "tools the user added to user_approved_tools should auto-approve"
+        );
+    }
+
+    #[test]
+    fn should_auto_approve_returns_true_for_read_only_ide_tools() {
+        let tc = make_tc("ide_read_file", r#"{"path": "src/main.rs"}"#);
+        assert!(
+            should_auto_approve(&tc, false, &[]),
+            "read-only IDE tools auto-approve via is_sandbox_auto_approved"
+        );
+    }
+
+    #[test]
+    fn should_auto_approve_returns_true_for_wasm_skills() {
+        let tc = make_tc("wasm_audit_solidity", r#"{"contract": "..."}"#);
+        assert!(
+            should_auto_approve(&tc, false, &[]),
+            "wasm_* skills run isolated and auto-approve"
+        );
+    }
+
+    #[test]
+    fn should_auto_approve_returns_true_for_tier1_tools() {
+        let tc = make_tc("memory_search", r#"{"query": "previous bugs"}"#);
+        assert!(should_auto_approve(&tc, false, &[]));
+    }
+
+    #[test]
+    fn should_auto_approve_returns_true_for_tier2_tools() {
+        let tc = make_tc("memory_store", r#"{"content": "x"}"#);
+        assert!(should_auto_approve(&tc, false, &[]));
+    }
+
+    #[test]
+    fn should_auto_approve_returns_false_for_force_sandboxed_ide_run_command() {
+        // The headline finding from 1A: ide_run_command must prompt in
+        // 'ask' / 'auto' mode. Auto-approval here is the bug we're fixing.
+        let tc = make_tc("ide_run_command", r#"{"command": "git push"}"#);
+        assert!(
+            !should_auto_approve(&tc, false, &[]),
+            "ide_run_command MUST prompt outside yolo mode"
+        );
+    }
+
+    #[test]
+    fn should_auto_approve_returns_false_for_force_sandboxed_git_writes() {
+        for name in &[
+            "ide_git_commit",
+            "ide_git_checkout",
+            "ide_git_stage_all",
+            "ide_git_stage",
+            "ide_git_unstage",
+            "ide_create_project",
+            "ide_open_workspace",
+        ] {
+            let tc = make_tc(name, "{}");
+            assert!(
+                !should_auto_approve(&tc, false, &[]),
+                "{} MUST prompt outside yolo mode",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn should_auto_approve_returns_false_for_execute_code() {
+        // B198 deliberately removed execute_code from tier2_reversible.
+        let tc = make_tc("execute_code", r#"{"code": "function run(ctx){...}"}"#);
+        assert!(
+            !should_auto_approve(&tc, false, &[]),
+            "execute_code MUST prompt outside yolo mode"
+        );
+    }
+
+    #[test]
+    fn should_auto_approve_returns_false_for_unknown_mcp_tool() {
+        let tc = make_tc("mcp_some_server_tool", "{}");
+        assert!(
+            !should_auto_approve(&tc, false, &[]),
+            "unknown / dynamic tools must prompt"
+        );
     }
 }
