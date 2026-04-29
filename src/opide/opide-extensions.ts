@@ -939,7 +939,11 @@ function renderDetailView(container: HTMLElement): void {
       link.textContent = 'Repository'
       link.style.cssText = 'color:#E8B931;cursor:pointer;text-decoration:none'
       link.addEventListener('click', () => {
-        invoke('ide_run_command', { command: `open "${ext.repository}"`, cwd: '/' }).catch(() => {})
+        // Repository link click. Silent failure means clicking does nothing
+        // and the user has no signal — log so we can debug.
+        invoke('ide_run_command', { command: `open "${ext.repository}"`, cwd: '/' }).catch((e) => {
+          console.warn('[opide-extensions] open repository link failed:', ext.repository, e)
+        })
       })
       sidebar.appendChild(link)
     }

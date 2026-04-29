@@ -69,7 +69,12 @@ export function initEditReviewListener(): void {
     document.querySelectorAll<HTMLElement>('.opide-review-toolbar[data-request-id]').forEach(toolbar => {
       const requestId = toolbar.dataset.requestId
       if (requestId) {
-        invoke('ide_edit_review_response', { requestId, accepted: false }).catch(() => {})
+        // Silent failure here would leave the engine waiting up to 120s for an
+        // approval response that never arrives. Surfacing the error at least
+        // lets us spot the hang in the next session's logs.
+        invoke('ide_edit_review_response', { requestId, accepted: false }).catch((e) => {
+          console.warn('[opide-tool-bridge] beforeunload reject failed:', requestId, e)
+        })
       }
     })
   })
