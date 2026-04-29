@@ -9,14 +9,14 @@
 
 import { marked } from 'marked'
 import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import { listen, emit } from '@tauri-apps/api/event'
 import {
   registerCustomView,
   ViewContainerLocation,
 } from '@codingame/monaco-vscode-workbench-service-override'
 
 import { S } from './state.ts'
-import type { Agent, Session, StoredMessage, ApprovalMode } from './types.ts'
+import type { Agent, Session, StoredMessage, ApprovalMode, ChatMsg } from './types.ts'
 import {
   renderMessages,
   renderMessagesFull,
@@ -418,7 +418,12 @@ export function registerOpideChat(): void {
       // current S values (rather than taking arguments) so the callsites
       // stay short and don't drift out of sync.
       function persistPrefs(): void {
-        persistPrefs()
+        savePrefs({
+          approvalMode: S.approvalMode,
+          thinkingLevel: S.thinkingLevel,
+          planMode: S.planMode,
+          selectedAgentId: S.selectedAgent?.agent_id ?? null,
+        })
       }
 
       // Inject chat styles once
@@ -560,6 +565,123 @@ export function registerOpideChat(): void {
       settingsBtn.innerHTML = '<span class="codicon codicon-settings-gear" style="font-size:13px"></span>'
       settingsBtn.addEventListener('click', () => renderProviderSetup())
       topBar.appendChild(settingsBtn)
+
+      // Phase 3 v1: detach chat into its own window. Snapshot the state
+      // into localStorage so the new window can hydrate, then ask Rust
+      // to spawn the WebviewWindow. The auxiliary-bar slot will keep
+      // showing the chat panel until the user clicks Reattach (v1
+      // doesn't render a "detached" placeholder yet - both windows
+      // listen to engine-event independently and stay in sync via
+      // localStorage on the handoff). v2 adds the placeholder.
+      const detachBtn = document.createElement('button')
+      detachBtn.title = 'Pop chat into its own window'
+      detachBtn.style.cssText = 'padding:0'
+      detachBtn.innerHTML = '<span class="codicon codicon-multiple-windows" style="font-size:13px"></span>'
+      detachBtn.addEventListener('click', async () => {
+        try {
+          const snapshot = {
+            messages: S.messages,
+            sessionId: S.sessionId,
+            runId: S.runId,
+            streamAccum: S.streamAccum,
+            streaming: S.streaming,
+            selectedAgentId: S.selectedAgent?.agent_id ?? null,
+            selectedModel: S.selectedModel,
+          }
+          localStorage.setItem('opide:chat:detached-state', JSON.stringify(snapshot))
+          await invoke('open_chat_window')
+          // Park the main panel: clear the message list and replace it with
+          // a "Chat is detached" card so the user has one obvious place
+          // to bring it back. Disable the input so they can't send from
+          // here while detached.
+          renderDetachedPlaceholder()
+        } catch (e) {
+          console.warn('[opide-chat] detach failed:', e)
+        }
+      })
+      topBar.appendChild(detachBtn)
+
+      /**
+       * Replace the message list with a "Chat detached" card and disable
+       * the input. Called on Detach. Restored by `renderMessagesFull()`
+       * which the chat-reattach listener triggers.
+       */
+      function renderDetachedPlaceholder(): void {
+        if (S.msgList) {
+          S.msgList.innerHTML = ''
+          const card = document.createElement('div')
+          card.style.cssText =
+            'margin:24px 14px;padding:18px 20px;border-radius:8px;' +
+            'background:rgba(212,168,67,0.06);border:1px solid rgba(212,168,67,0.25);' +
+            'display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;'
+
+          const title = document.createElement('div')
+          title.style.cssText = 'font-size:13px;font-weight:600;color:var(--opide-accent, #d4a843);'
+          title.textContent = 'Chat is detached'
+          card.appendChild(title)
+
+          const desc = document.createElement('div')
+          desc.style.cssText = 'font-size:11px;color:var(--opide-text-secondary, #a0a0a8);line-height:1.5;'
+          desc.textContent = 'The chat is running in its own window. Bring it back here when you want.'
+          card.appendChild(desc)
+
+          const btn = document.createElement('button')
+          btn.textContent = 'Bring chat back'
+          btn.style.cssText =
+            'background:var(--opide-accent, #d4a843);color:var(--opide-bg, #0a0a0c);' +
+            'border:none;border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;' +
+            'cursor:pointer;font-family:inherit;'
+          btn.addEventListener('click', async () => {
+            // Symmetric with the Reattach button INSIDE the detached
+            // window: ask that window's JS to perform the reattach
+            // itself (write snapshot → emit chat-reattach → close).
+            // We CANNOT just `invoke('close_chat_window')` here because
+            // Tauri's Rust-side close skips the JS `beforeunload`, so
+            // the snapshot never gets written and the chat-reattach
+            // event never fires. By emitting a trigger event, the
+            // detached window runs the same code path the working
+            // Reattach button uses.
+            try { await emit('chat-trigger-reattach') } catch (e) { console.warn('[opide-chat] trigger reattach failed:', e) }
+            // Belt-and-braces fallback: if the detached window is
+            // already gone (no listener), hydrate from any stale
+            // localStorage snapshot after a short delay so the user
+            // isn't stranded with the placeholder.
+            setTimeout(() => {
+              // If chat-reattach already fired, the localStorage key
+              // has been cleared and S.msgList is no longer the
+              // placeholder — bail out.
+              if (!localStorage.getItem('opide:chat:detached-state')) return
+              try {
+                const raw = localStorage.getItem('opide:chat:detached-state')
+                if (!raw) return
+                const snap = JSON.parse(raw)
+                if (Array.isArray(snap.messages)) S.messages = snap.messages
+                if ('sessionId' in snap) S.sessionId = snap.sessionId ?? null
+                if ('runId' in snap) S.runId = snap.runId ?? null
+                if (typeof snap.streamAccum === 'string') S.streamAccum = snap.streamAccum
+                if (typeof snap.streaming === 'boolean') S.streaming = snap.streaming
+                if (typeof snap.selectedModel === 'string') S.selectedModel = snap.selectedModel
+                localStorage.removeItem('opide:chat:detached-state')
+                renderMessagesFull()
+                if (S.textarea) S.textarea.disabled = false
+                if (S.sendBtn) S.sendBtn.disabled = false
+              } catch { /* nothing */ }
+              // Try to close the window in case it's still hanging.
+              void invoke('close_chat_window').catch(() => { /* ignored */ })
+            }, 600)
+          })
+          card.appendChild(btn)
+
+          S.msgList.appendChild(card)
+        }
+
+        // Disable the input row while detached.
+        if (S.textarea) {
+          S.textarea.disabled = true
+          S.textarea.placeholder = 'Chat is in the detached window…'
+        }
+        if (S.sendBtn) S.sendBtn.disabled = true
+      }
 
       container.appendChild(topBar)
 
@@ -940,12 +1062,62 @@ export function registerOpideChat(): void {
         console.warn('[opide-chat] provider-updated listener registration failed:', e)
       })
 
+      // Phase 3 v1: re-hydrate from the detached chat's snapshot when the
+      // user clicks Reattach in the chat window. The chat-main.ts script
+      // serialises state into the same localStorage key the Detach button
+      // uses and emits `chat-reattach` before closing its window.
+      listen('chat-reattach', () => {
+        try {
+          const raw = localStorage.getItem('opide:chat:detached-state')
+          if (!raw) return
+          const snap = JSON.parse(raw) as {
+            messages?: ChatMsg[]
+            sessionId?: string | null
+            runId?: string | null
+            streamAccum?: string
+            streaming?: boolean
+            selectedAgentId?: string | null
+            selectedModel?: string | null
+          }
+          if (Array.isArray(snap.messages)) S.messages = snap.messages
+          if ('sessionId' in snap) S.sessionId = snap.sessionId ?? null
+          if ('runId' in snap) S.runId = snap.runId ?? null
+          if (typeof snap.streamAccum === 'string') S.streamAccum = snap.streamAccum
+          if (typeof snap.streaming === 'boolean') S.streaming = snap.streaming
+          if (typeof snap.selectedModel === 'string') S.selectedModel = snap.selectedModel
+          // selectedAgentId hydration relies on S.agents being populated;
+          // if loadAgents has already run we resolve, otherwise leave it
+          // for the user to repick.
+          if (snap.selectedAgentId) {
+            const found = S.agents.find((a) => a.agent_id === snap.selectedAgentId)
+            if (found) S.selectedAgent = found
+          }
+          localStorage.removeItem('opide:chat:detached-state')
+          renderMessagesFull()
+          // Re-enable the input row that the "Chat detached" placeholder
+          // disabled. Without this the textarea stays read-only after
+          // reattach and the user can't type.
+          if (S.textarea) {
+            S.textarea.disabled = false
+            S.textarea.placeholder = 'Ask OPIDE anything… (Cmd+L)'
+          }
+          if (S.sendBtn) S.sendBtn.disabled = false
+        } catch (e) {
+          console.warn('[opide-chat] chat-reattach hydration failed:', e)
+        }
+      }).then((unlisten) => {
+        S.chatReattachUnlisten = unlisten
+      }).catch((e) => {
+        console.warn('[opide-chat] chat-reattach listener registration failed:', e)
+      })
+
       return {
         dispose() {
           S.msgList = null; S.textarea = null; S.sendBtn = null; S.stopBtn = null
           S.toolRow = null; S.streamingBubble = null; S.headerStatus = null; S.progressLog = null
           if (S.progressUnlisten) { S.progressUnlisten(); S.progressUnlisten = null }
           if (S.providerUpdatedUnlisten) { S.providerUpdatedUnlisten(); S.providerUpdatedUnlisten = null }
+          if (S.chatReattachUnlisten) { S.chatReattachUnlisten(); S.chatReattachUnlisten = null }
           S.agentSelect = null; S.modelSelect = null; S.sessionSelect = null
           S.tokenDisplay = null; S.attachmentBar = null; S.contextBar = null
           S.whisperRow = null; S.whisperInput = null

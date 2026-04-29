@@ -95,6 +95,10 @@ interface ChatState {
 
   // ── Misc unlistens (panel-scoped) ────────────────────────────────────
   providerUpdatedUnlisten: (() => void) | null
+  /** Phase 3: re-hydrate the chat panel when the user reattaches the
+   * detached chat window. Set during renderBody and torn down on
+   * dispose. */
+  chatReattachUnlisten: (() => void) | null
 }
 
 /** The single shared state object. Import as `S` everywhere. */
@@ -161,4 +165,5 @@ export const S: ChatState = {
   progressUnlisten: null,
 
   providerUpdatedUnlisten: null,
+  chatReattachUnlisten: null,
 }

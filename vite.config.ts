@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import path from 'path'
+import { resolve } from 'path'
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -14,6 +15,13 @@ export default defineConfig({
   build: {
     target: 'esnext',
     rollupOptions: {
+      // Two HTML entries: index.html boots the full workbench, chat.html
+      // is the detached-chat window's slim entry that mounts only the
+      // chat panel (no Monaco, no workbench).
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        chat: resolve(__dirname, 'chat.html'),
+      },
       output: {
         // Keep @codingame chunks manageable
         manualChunks: (id) => {

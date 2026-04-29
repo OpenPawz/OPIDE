@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OPIDE Chat</title>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      html,
+      body {
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+        background: #1e1e1e;
+        color: #d4d2cc;
+      }
+
+      /*
+       * Shim for the VS Code design tokens the chat panel uses. The full
+       * workbench (index.html) gets these from monaco-vscode-api's CSS
+       * injection. The detached chat window does NOT load the workbench, so
+       * we provide a minimal subset here. Values mirror the dark+ theme
+       * defaults so the chat looks the same across both hosting contexts.
+       */
+      :root {
+        --vscode-foreground: #cccccc;
+        --vscode-descriptionForeground: #9d9d9d;
+        --vscode-editor-background: #1e1e1e;
+        --vscode-sideBar-background: #181818;
+        --vscode-input-background: #2b2b2b;
+        --vscode-input-foreground: #cccccc;
+        --vscode-input-border: #3c3c3c;
+        --vscode-button-background: #d4a843;
+        --vscode-button-foreground: #1a1a1a;
+        --vscode-widget-border: rgba(255, 255, 255, 0.08);
+        --vscode-textLink-foreground: #4daafc;
+      }
+
+      /* Codicon font is loaded by the workbench in the main window. The
+       * detached chat does not load it; fall back to a unicode middot for
+       * the few inline `codicon` references in the chat panel so the UI
+       * does not show empty boxes. Real codicon font would be a v2
+       * polish task. */
+      .codicon::before {
+        content: '\\00B7';
+        font-family: var(--opide-font-mono, monospace);
+      }
+
+      #opide-chat-detached-root {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        width: 100vw;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="opide-chat-detached-root"></div>
+    <script type="module" src="/src/chat-main.ts"></script>
+  </body>
+</html>

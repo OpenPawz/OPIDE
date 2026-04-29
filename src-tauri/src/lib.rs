@@ -82,6 +82,66 @@ fn get_target_platform() -> String {
     format!("{os}-{arch}")
 }
 
+/// Open the OPIDE chat in a detached window. The detached window loads
+/// `chat.html` which renders only the chat panel — no full workbench, no
+/// Monaco editor. State migration between the auxiliary-bar slot and the
+/// detached window happens through localStorage at the key
+/// `opide:chat:detached-state`. Engine events broadcast to all webviews
+/// via `app.emit()` so the detached window receives the same payloads
+/// as the main window for free.
+#[tauri::command]
+async fn open_chat_window(app: tauri::AppHandle) -> Result<String, String> {
+    let window_label = "opide-chat-detached";
+
+    // If the chat is already detached, focus that window instead of
+    // spawning a duplicate. Multi-instance detached chat is not a v1
+    // feature.
+    if let Some(existing) = app.get_webview_window(window_label) {
+        let _ = existing.set_focus();
+        return Ok(window_label.to_string());
+    }
+
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        &app,
+        window_label,
+        WebviewUrl::App("chat.html".into()),
+    )
+    .title("OPIDE Chat")
+    .inner_size(420.0, 720.0)
+    .min_inner_size(320.0, 480.0)
+    .resizable(true)
+    .decorations(true);
+
+    // On macOS tie the chat window's lifecycle to the main OPIDE window
+    // so minimise / close cascades. On other platforms parent-window
+    // tracking is not as clean; the window stays independent and the
+    // user manages it via the OS.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(main) = app.get_webview_window("main") {
+            builder = builder.parent(&main).map_err(|e| format!("parent: {e}"))?;
+        }
+    }
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to open chat window: {e}"))?;
+
+    log::info!("[opide] opened detached chat window: {}", window_label);
+    Ok(window_label.to_string())
+}
+
+/// Close the detached chat window programmatically. Called by the
+/// chat-window's Reattach button after it has serialised state into
+/// localStorage and emitted a `chat-reattach` event.
+#[tauri::command]
+async fn close_chat_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("opide-chat-detached") {
+        window.close().map_err(|e| format!("close: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Increase tokio worker thread stack size from 2MB to 8MB.
@@ -295,6 +355,8 @@ pub fn run() {
             opide_ai::engine::frontend_bridge::ide_tool_response,
             opide_ai::engine::frontend_bridge::ide_edit_review_response,
             open_new_window,
+            open_chat_window,
+            close_chat_window,
             get_target_platform,
             opide_shell::ide_mcp::ide_read_file,
             opide_shell::ide_mcp::ide_write_file,
