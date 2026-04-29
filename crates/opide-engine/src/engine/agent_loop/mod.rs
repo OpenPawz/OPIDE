@@ -936,10 +936,108 @@ pub async fn run_agent_turn(
         // ── Sandbox enforcement: route tools through sandbox when available ──
         let has_sandbox = sandbox_enforcement::has_sandbox(app_handle);
 
-        // Single tool: force non-query IDE tools through sandbox
+        // Single tool: force non-query IDE tools through sandbox.
+        //
+        // Audit finding 1A: prior to this, the wrap-and-execute below ran
+        // with no `ToolRequest` event ever fired, so the user never saw an
+        // approval banner for `ide_run_command`, `ide_git_commit`,
+        // `ide_git_checkout`, etc. The B194/B195/B198 content gates inside
+        // host_api/tool_executor still fire on credential-shaped strings
+        // and shell redirects, but `rm -rf`, `git push --force`,
+        // `npm publish`, `curl | bash` slip through them. Now: classify
+        // the original tool's tier, prompt for approval when needed, and
+        // only wrap-and-execute on approval. The sandbox stays in place
+        // as defense-in-depth.
         if has_sandbox && tool_calls.len() == 1 {
             let tc = &tool_calls[0];
             if sandbox_enforcement::should_force_single_tool(tc) {
+                let tier = sandbox_enforcement::classify_tool_tier(&tc.function.name);
+                let skip_hil = sandbox_enforcement::should_auto_approve(
+                    tc,
+                    auto_approve_all,
+                    user_approved_tools,
+                );
+
+                let approved = if skip_hil {
+                    log::debug!(
+                        "[engine] Force-sandbox tool auto-approved: {} (tier={})",
+                        tc.function.name, tier
+                    );
+                    fire(
+                        app_handle,
+                        EngineEvent::ToolRequest {
+                            session_id: session_id.to_string(),
+                            run_id: run_id.to_string(),
+                            tool_call: tc.clone(),
+                            tool_tier: Some(tier.to_string()),
+                            round_number: Some(round),
+                            loaded_tools: None,
+                            context_tokens: None,
+                        },
+                    );
+                    true
+                } else {
+                    info!(
+                        "[engine] Force-sandbox tool requires approval: {} (tier={})",
+                        tc.function.name, tier
+                    );
+                    let (approval_tx, approval_rx) =
+                        tokio::sync::oneshot::channel::<bool>();
+                    {
+                        let mut map = pending_approvals.lock();
+                        map.insert(tc.id.clone(), approval_tx);
+                    }
+
+                    fire(
+                        app_handle,
+                        EngineEvent::ToolRequest {
+                            session_id: session_id.to_string(),
+                            run_id: run_id.to_string(),
+                            tool_call: tc.clone(),
+                            tool_tier: Some(tier.to_string()),
+                            round_number: Some(round),
+                            loaded_tools: None,
+                            context_tokens: None,
+                        },
+                    );
+
+                    let timeout_duration = Duration::from_secs(tool_timeout_secs);
+                    match tokio::time::timeout(timeout_duration, approval_rx).await {
+                        Ok(Ok(allowed)) => allowed,
+                        Ok(Err(_)) => {
+                            warn!(
+                                "[engine] Force-sandbox approval channel closed for {}",
+                                tc.id
+                            );
+                            false
+                        }
+                        Err(_) => {
+                            warn!(
+                                "[engine] Force-sandbox approval timeout ({}s) for {}",
+                                tool_timeout_secs, tc.function.name
+                            );
+                            let mut map = pending_approvals.lock();
+                            map.remove(&tc.id);
+                            false
+                        }
+                    }
+                };
+
+                if !approved {
+                    messages.push(Message {
+                        role: Role::Tool,
+                        content: MessageContent::Text(format!(
+                            "Tool '{}' was denied by user.",
+                            tc.function.name
+                        )),
+                        tool_calls: None,
+                        tool_call_id: Some(tc.id.clone()),
+                        name: Some(tc.function.name.clone()),
+                        reasoning_content: None,
+                    });
+                    continue;
+                }
+
                 let js_code = sandbox_enforcement::build_single_tool_sandbox_code(tc);
                 let batch_tc = sandbox_enforcement::make_execute_code_call(&js_code);
                 let result = crate::engine::tools::execute_tool(
@@ -966,8 +1064,116 @@ pub async fn run_agent_turn(
             }
         }
 
-        // Multiple tools: batch through sandbox (unless WASM tools present)
+        // Multiple tools: batch through sandbox (unless WASM tools present).
+        //
+        // Audit finding 1A: same gap as the single-tool force-sandbox branch
+        // above. The wrap-and-execute below previously ran with no per-tool
+        // `ToolRequest` events. Now: prompt for each tool that requires
+        // approval before wrapping. If any tool is denied, the entire batch
+        // is skipped and each tool gets a denial result message so the
+        // OpenAI/Kimi tool_call_id contract is satisfied.
         if has_sandbox && sandbox_enforcement::should_batch_tools(&tool_calls) {
+            let mut all_approved = true;
+            let mut denied_tool_name: Option<String> = None;
+            for tc in &tool_calls {
+                let tier = sandbox_enforcement::classify_tool_tier(&tc.function.name);
+                let skip_hil = sandbox_enforcement::should_auto_approve(
+                    tc,
+                    auto_approve_all,
+                    user_approved_tools,
+                );
+
+                let approved = if skip_hil {
+                    log::debug!(
+                        "[engine] Batch tool auto-approved: {} (tier={})",
+                        tc.function.name, tier
+                    );
+                    fire(
+                        app_handle,
+                        EngineEvent::ToolRequest {
+                            session_id: session_id.to_string(),
+                            run_id: run_id.to_string(),
+                            tool_call: tc.clone(),
+                            tool_tier: Some(tier.to_string()),
+                            round_number: Some(round),
+                            loaded_tools: None,
+                            context_tokens: None,
+                        },
+                    );
+                    true
+                } else {
+                    info!(
+                        "[engine] Batch tool requires approval: {} (tier={})",
+                        tc.function.name, tier
+                    );
+                    let (approval_tx, approval_rx) =
+                        tokio::sync::oneshot::channel::<bool>();
+                    {
+                        let mut map = pending_approvals.lock();
+                        map.insert(tc.id.clone(), approval_tx);
+                    }
+
+                    fire(
+                        app_handle,
+                        EngineEvent::ToolRequest {
+                            session_id: session_id.to_string(),
+                            run_id: run_id.to_string(),
+                            tool_call: tc.clone(),
+                            tool_tier: Some(tier.to_string()),
+                            round_number: Some(round),
+                            loaded_tools: None,
+                            context_tokens: None,
+                        },
+                    );
+
+                    let timeout_duration = Duration::from_secs(tool_timeout_secs);
+                    match tokio::time::timeout(timeout_duration, approval_rx).await {
+                        Ok(Ok(allowed)) => allowed,
+                        Ok(Err(_)) => {
+                            warn!(
+                                "[engine] Batch approval channel closed for {}",
+                                tc.id
+                            );
+                            false
+                        }
+                        Err(_) => {
+                            warn!(
+                                "[engine] Batch approval timeout ({}s) for {}",
+                                tool_timeout_secs, tc.function.name
+                            );
+                            let mut map = pending_approvals.lock();
+                            map.remove(&tc.id);
+                            false
+                        }
+                    }
+                };
+
+                if !approved {
+                    all_approved = false;
+                    denied_tool_name = Some(tc.function.name.clone());
+                    break;
+                }
+            }
+
+            if !all_approved {
+                let denied_name = denied_tool_name
+                    .unwrap_or_else(|| "(unknown)".to_string());
+                for tc in &tool_calls {
+                    messages.push(Message {
+                        role: Role::Tool,
+                        content: MessageContent::Text(format!(
+                            "Tool batch was aborted: '{}' was denied by user.",
+                            denied_name
+                        )),
+                        tool_calls: None,
+                        tool_call_id: Some(tc.id.clone()),
+                        name: Some(tc.function.name.clone()),
+                        reasoning_content: None,
+                    });
+                }
+                continue;
+            }
+
             let batch_code = sandbox_enforcement::build_batch_sandbox_code(&tool_calls);
             log::debug!(
                 "[engine] Batching {} tool calls through execution engine",
