@@ -870,9 +870,13 @@ export function registerOpideChat(): void {
       loadSessions().catch(() => {})
       loadModels().then(() => updateModelSelect()).catch(() => {})
       // Capture the unlisten so renderBody-on-remount doesn't stack listeners.
+      // Silent failure here means model select never auto-refreshes when the
+      // user adds or removes a provider in Settings — log so we can spot it.
       listen('provider-updated', () => updateModelSelect()).then((unlisten) => {
         S.providerUpdatedUnlisten = unlisten
-      }).catch(() => {})
+      }).catch((e) => {
+        console.warn('[opide-chat] provider-updated listener registration failed:', e)
+      })
 
       return {
         dispose() {

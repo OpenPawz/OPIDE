@@ -381,11 +381,18 @@ export async function initWorkspaceServices(): Promise<void> {
   // The Rust side will index in a background Tokio task (non-blocking).
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    invoke('trigger_reindex', { workspace }).catch(() => {
-      // trigger_reindex may not exist on older builds — fall back to event
+    invoke('trigger_reindex', { workspace }).catch((reindexErr) => {
+      // trigger_reindex may not exist on older builds — fall back to event.
+      // Both paths failing means the workspace opens but indexing never
+      // starts; log so the silent state is debuggable.
       import('@tauri-apps/api/event').then(({ emit }) => {
         emit('open-workspace', { path: workspace })
-      }).catch(() => {})
+      }).catch((emitErr) => {
+        console.warn(
+          '[opide-workspace] indexing failed to start: trigger_reindex and open-workspace event both failed',
+          { reindexErr, emitErr },
+        )
+      })
     })
   } catch {
     // Last resort: emit the event (guarded by _openWorkspaceEmitted won't double-fire)
