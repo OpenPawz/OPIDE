@@ -152,7 +152,7 @@ async function showInlinePrompt(): Promise<void> {
   // Show captured selection preview
   if (_captured) {
     const preview = document.createElement('div')
-    preview.style.cssText = 'padding:6px 12px;font-family:var(--vscode-editor-font-family,monospace);font-size:11px;line-height:1.4;white-space:pre-wrap;max-height:120px;overflow-y:auto;background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-foreground);opacity:0.7;border-bottom:1px solid var(--vscode-widget-border,#333)'
+    preview.style.cssText = 'padding:6px 12px;font-family:var(--opide-font-mono);font-size:11px;line-height:1.4;white-space:pre-wrap;max-height:120px;overflow-y:auto;background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-foreground);opacity:0.7;border-bottom:1px solid var(--vscode-widget-border,#333)'
     // Show first 10 lines of selection
     const lines = _captured.text.split('\n')
     const truncated = lines.length > 10 ? lines.slice(0, 10).join('\n') + `\n... (${lines.length - 10} more lines)` : _captured.text
@@ -165,7 +165,7 @@ async function showInlinePrompt(): Promise<void> {
   input.type = 'text'
   input.placeholder = _captured ? 'Describe the change…' : 'Select code first, then press Cmd+K'
   input.disabled = !_captured
-  input.style.cssText = 'padding:10px 12px;background:var(--vscode-input-background);border:none;outline:none;color:var(--vscode-input-foreground);font-size:13px;font-family:var(--vscode-font-family)'
+  input.style.cssText = 'padding:10px 12px;background:var(--vscode-input-background);border:none;outline:none;color:var(--vscode-input-foreground);font-size:13px;font-family:var(--opide-font-ui)'
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault()
@@ -183,7 +183,7 @@ async function showInlinePrompt(): Promise<void> {
   // Result area (hidden until response comes in)
   const resultArea = document.createElement('div')
   resultArea.id = 'opide-inline-result'
-  resultArea.style.cssText = 'display:none;max-height:300px;overflow-y:auto;padding:8px 12px;font-family:var(--vscode-editor-font-family,monospace);font-size:12px;line-height:1.5;white-space:pre-wrap;color:var(--vscode-foreground)'
+  resultArea.style.cssText = 'display:none;max-height:300px;overflow-y:auto;padding:8px 12px;font-family:var(--opide-font-mono);font-size:12px;line-height:1.5;white-space:pre-wrap;color:var(--vscode-foreground)'
   overlay.appendChild(resultArea)
 
   // Action buttons (hidden until response)

@@ -764,7 +764,7 @@ const STYLES = `
   .af-panel {
     height: 100%; min-height: 0; overflow: hidden;
     display: flex; flex-direction: column;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-family: var(--opide-font-ui);
     background: transparent;
   }
   .af-header {
@@ -818,7 +818,7 @@ const STYLES = `
     border-left-color: #E8B931; color: #E8B931; font-size: 10px;
     margin-top: 8px; font-weight: 600;
   }
-  .af-time { color: #555; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10px; }
+  .af-time { color: #555; font-family: var(--opide-font-mono); font-size: 10px; }
   .af-icon { margin: 0 4px; }
   .af-text { }
   .af-dur { color: #555; font-size: 10px; margin-left: 4px; }
@@ -826,7 +826,7 @@ const STYLES = `
   .af-expandable:hover { background: rgba(255, 107, 107, 0.05); }
   .af-error-detail {
     white-space: pre-wrap; word-break: break-all;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--opide-font-mono);
     font-size: 10px; color: #cc5555; line-height: 1.4;
     padding: 6px 8px; margin: 2px 0 4px 16px;
     background: rgba(255, 50, 50, 0.06);
@@ -844,7 +844,7 @@ const STYLES = `
   }
   .af-meter-label {
     width: 52px; flex-shrink: 0;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--opide-font-mono);
     font-weight: 600; font-size: 9px; letter-spacing: 0.5px;
   }
   .af-meter-bar {
@@ -857,7 +857,7 @@ const STYLES = `
   }
   .af-meter-detail {
     width: 70px; flex-shrink: 0; text-align: right;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--opide-font-mono);
     font-size: 9px;
   }
   .af-empty {

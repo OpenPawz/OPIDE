@@ -359,7 +359,7 @@ function showReviewToolbar(
     display: flex; gap: 8px; align-items: center;
     padding: 8px 16px; background: #1e1e1e; border: 1px solid #E8B931;
     border-radius: 8px; z-index: 10000; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-family: var(--opide-font-ui);
   `
 
   const label = document.createElement('span')

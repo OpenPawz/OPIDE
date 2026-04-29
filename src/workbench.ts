@@ -152,7 +152,7 @@ export async function initializeWorkbench(): Promise<void> {
   if (loading) {
     const statusEl = document.createElement('div')
     statusEl.id = 'opide-load-status'
-    statusEl.style.cssText = 'margin-top:12px;font-size:11px;color:#888;font-family:monospace'
+    statusEl.style.cssText = 'margin-top:12px;font-size:11px;color:#888;font-family:var(--opide-font-mono)'
     statusEl.textContent = 'Waiting for IPC...'
     loading.querySelector('.loading-inner')?.appendChild(statusEl)
   }

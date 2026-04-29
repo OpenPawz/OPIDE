@@ -353,7 +353,7 @@ class MemoryPalacePane extends SimpleEditorPane {
       console.error('[memory-palace] renderInput failed:', e);
       const root = document.getElementById('memory-view');
       if (root) {
-        root.innerHTML = `<div style="padding:20px;color:#ff6b6b;font-family:monospace;font-size:12px">
+        root.innerHTML = `<div style="padding:20px;color:#ff6b6b;font-family:var(--opide-font-mono);font-size:12px">
           <h3>Memory Palace failed to load</h3>
           <pre style="white-space:pre-wrap;margin-top:8px">${String(e)}</pre>
         </div>`;

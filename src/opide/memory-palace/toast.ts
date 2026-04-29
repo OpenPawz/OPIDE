@@ -16,7 +16,7 @@ function ensureContainer(): HTMLDivElement {
   c.style.cssText =
     'position:fixed;bottom:24px;right:24px;z-index:99999;' +
     'display:flex;flex-direction:column;gap:8px;align-items:flex-end;' +
-    'pointer-events:none;font-family:var(--vscode-font-family, system-ui);font-size:13px;';
+    'pointer-events:none;font-family:var(--opide-font-ui);font-size:13px;';
   document.body.appendChild(c);
   _container = c;
   return c;

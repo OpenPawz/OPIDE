@@ -46,7 +46,7 @@
 .opide-memory-palace .palace-install-title{
   font-size: 16px;
   font-weight: 700;
-  font-family: var(--font-sans);
+  font-family: var(--opide-font-ui);
   color: var(--text-primary);
   text-shadow: none;
   margin: 0;
@@ -126,7 +126,7 @@
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 13px;
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: var(--opide-font-mono);
   outline: none;
   transition: border-color 0.15s;
   box-sizing: border-box;
@@ -136,10 +136,10 @@
 }
 .opide-memory-palace .palace-api-input::placeholder{
   color: var(--text-muted);
-  font-family: var(--font-primary);
+  font-family: var(--opide-font-ui);
 }
 .opide-memory-palace .palace-api-select{
-  font-family: var(--font-primary);
+  font-family: var(--opide-font-ui);
   cursor: pointer;
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
@@ -219,7 +219,7 @@
 .opide-memory-palace .palace-sidebar-title{
   font-size: 11px;
   font-weight: 600;
-  font-family: var(--font-sans);
+  font-family: var(--opide-font-ui);
   color: var(--text-primary);
   text-shadow: none;
 }
@@ -730,7 +730,7 @@
   padding: 4px 8px;
   width: 160px;
   outline: none;
-  font-family: var(--font-sans);
+  font-family: var(--opide-font-ui);
 }
 .opide-memory-palace .atlas-search-input:focus{
   border-color: rgba(212, 101, 74, 0.4);
