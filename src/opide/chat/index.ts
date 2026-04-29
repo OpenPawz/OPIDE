@@ -31,6 +31,7 @@ import {
 import { ensureListening, initProgressListener } from './streaming.ts'
 import { checkProviders, renderProviderSetup } from './settings.ts'
 import { doSend, doAbort, doWhisper, doResume } from './send.ts'
+import { loadPrefs, savePrefs } from './prefs.ts'
 
 marked.setOptions({ async: false, breaks: true, gfm: true })
 
@@ -402,6 +403,24 @@ export function registerOpideChat(): void {
       container.className = 'opide-chat-container'
       container.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden'
 
+      // 2B: load persisted user prefs BEFORE building the controls so the
+      // initial UI state (selected approval mode button, thinking level
+      // dropdown, plan-mode toggle) reflects what the user picked last
+      // session. selectedAgent is resolved later, after loadAgents()
+      // populates S.agents.
+      const prefs = loadPrefs()
+      S.approvalMode = prefs.approvalMode
+      S.thinkingLevel = prefs.thinkingLevel
+      S.planMode = prefs.planMode
+      const prefsAgentId = prefs.selectedAgentId
+
+      // Helper for the four control mutation sites below. Reads the
+      // current S values (rather than taking arguments) so the callsites
+      // stay short and don't drift out of sync.
+      function persistPrefs(): void {
+        persistPrefs()
+      }
+
       // Inject chat styles once
       if (!document.getElementById('opide-chat-styles')) {
         const style = document.createElement('style')
@@ -443,6 +462,7 @@ export function registerOpideChat(): void {
         const val = agentSel.value
         if (!val) {
           S.selectedAgent = null
+          persistPrefs()
           return
         }
         // V2 build populates BUILTIN_AGENTS; OSS keeps it empty so we go
@@ -451,6 +471,7 @@ export function registerOpideChat(): void {
         import('./send.ts').then(({ BUILTIN_AGENTS }) => {
           if (BUILTIN_AGENTS.length === 0) {
             S.selectedAgent = S.agents.find(a => a.agent_id === val) || null
+            persistPrefs()
             return
           }
           const builtin = (BUILTIN_AGENTS as unknown as any[]).find((a: any) => a.agent_id === val)
@@ -464,8 +485,10 @@ export function registerOpideChat(): void {
           } else {
             S.selectedAgent = S.agents.find(a => a.agent_id === val) || null
           }
+          persistPrefs()
         }).catch(() => {
           S.selectedAgent = S.agents.find(a => a.agent_id === val) || null
+          persistPrefs()
         })
       })
       S.agentSelect = agentSel
@@ -606,8 +629,14 @@ export function registerOpideChat(): void {
 
       const thinkingSel = document.createElement('select')
       thinkingSel.style.cssText = 'background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,#333);border-radius:3px;padding:1px 3px;font-size:10px'
-      thinkingSel.innerHTML = '<option value="none" selected>None</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>'
-      thinkingSel.addEventListener('change', () => { S.thinkingLevel = thinkingSel.value })
+      thinkingSel.innerHTML = '<option value="none">None</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>'
+      // 2B: restore the persisted level from prefs (S.thinkingLevel was
+      // hydrated above) instead of always defaulting to "none".
+      thinkingSel.value = S.thinkingLevel || 'none'
+      thinkingSel.addEventListener('change', () => {
+        S.thinkingLevel = thinkingSel.value
+        persistPrefs()
+      })
       optionsRow.appendChild(thinkingSel)
 
       // Plan mode toggle
@@ -621,7 +650,11 @@ export function registerOpideChat(): void {
         planBtn.style.borderColor = S.planMode ? 'var(--vscode-button-background)' : 'var(--vscode-widget-border,#444)'
         if (S.textarea) S.textarea.placeholder = S.planMode ? 'Describe what you want built… (agent will plan first)' : 'Ask OPIDE anything… (Cmd+L)'
       }
-      planBtn.addEventListener('click', () => { S.planMode = !S.planMode; updatePlanBtn() })
+      planBtn.addEventListener('click', () => {
+        S.planMode = !S.planMode
+        updatePlanBtn()
+        persistPrefs()
+      })
       updatePlanBtn()
       optionsRow.appendChild(planBtn)
 
@@ -634,7 +667,7 @@ export function registerOpideChat(): void {
         { mode: 'yolo', label: 'Yolo', title: 'Skip every prompt. Tools run without asking, including shell commands, file deletes, and external API calls.' },
       ]
       const approvalBtns: HTMLButtonElement[] = []
-      function setApprovalMode(m: ApprovalMode) {
+      function setApprovalMode(m: ApprovalMode, persist = true) {
         S.approvalMode = m
         approvalBtns.forEach((b, i) => {
           const active = approvalModes[i].mode === m
@@ -642,6 +675,18 @@ export function registerOpideChat(): void {
           b.style.color = active ? 'var(--vscode-button-foreground)' : 'var(--vscode-descriptionForeground)'
           b.style.fontWeight = active ? '600' : '400'
         })
+        // 2B: persist user's approval-mode pick across restarts. The
+        // `persist` arg lets the post-build initialisation call this to
+        // paint the UI without saving (the value already came FROM
+        // localStorage; saving on restore would be a no-op write).
+        if (persist) {
+          savePrefs({
+            approvalMode: S.approvalMode,
+            thinkingLevel: S.thinkingLevel,
+            planMode: S.planMode,
+            selectedAgentId: S.selectedAgent?.agent_id ?? null,
+          })
+        }
       }
       for (const { mode, label, title } of approvalModes) {
         const btn = document.createElement('button')
@@ -652,7 +697,10 @@ export function registerOpideChat(): void {
         approvalBtns.push(btn)
         approvalWrap.appendChild(btn)
       }
-      setApprovalMode(S.approvalMode)
+      // Paint the buttons to match the loaded preference. Pass persist=false
+      // because the value came FROM localStorage; saving here would be a
+      // redundant write on every renderBody.
+      setApprovalMode(S.approvalMode, false)
       optionsRow.appendChild(approvalWrap)
 
       inputArea.appendChild(optionsRow)
@@ -866,7 +914,21 @@ export function registerOpideChat(): void {
       }).catch(() => {
         renderMessages()
       })
-      loadAgents().catch(() => {})
+      loadAgents()
+        .then(() => {
+          // 2B: restore the persisted agent selection now that S.agents is
+          // populated. selectedAgentId stored in prefs may be stale if the
+          // agent has since been deleted; in that case we leave selectedAgent
+          // null and let the user repick.
+          if (prefsAgentId) {
+            const saved = S.agents.find((a) => a.agent_id === prefsAgentId)
+            if (saved) {
+              S.selectedAgent = saved
+              if (S.agentSelect) S.agentSelect.value = prefsAgentId
+            }
+          }
+        })
+        .catch(() => {})
       loadSessions().catch(() => {})
       loadModels().then(() => updateModelSelect()).catch(() => {})
       // Capture the unlisten so renderBody-on-remount doesn't stack listeners.
