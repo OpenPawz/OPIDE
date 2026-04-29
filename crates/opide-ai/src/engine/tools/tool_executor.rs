@@ -272,6 +272,28 @@ pub async fn execute(
             let path = args["path"].as_str().unwrap_or("").to_string();
             let content = args["content"].as_str().unwrap_or("").to_string();
 
+            // 1A-4: B194 credential + sensitive-path guards. Previously
+            // this path was the only ide_* write that skipped them — only
+            // the Monaco diff was the gate, and new-file paths skipped
+            // even that (line 280 below). A sandbox JS body could write
+            // OPENAI_API_KEY=sk-... to a brand-new path with no prompt
+            // and no engine refusal. Mirrors host_api.rs:67-86.
+            if let Some(kind) = opide_engine::engine::util::looks_like_credential_value(&content) {
+                log::warn!(
+                    "[tool-executor] 1A-4: refusing ide_write_file to '{}' - content looks like {}",
+                    path, kind
+                );
+                return Some(Err(format!(
+                    "Refusing to write '{}': content contains what looks like a {}. \
+                     Credentials should be stored via the engine's skill vault, not on disk.",
+                    path, kind
+                )));
+            }
+            if let Err(reason) = opide_engine::engine::util::check_sensitive_path(&path) {
+                log::warn!("[tool-executor] 1A-4: {}", reason);
+                return Some(Err(reason));
+            }
+
             // Read current content for diff (empty string = new file)
             let original = tokio::fs::read_to_string(&path).await.unwrap_or_default();
 
@@ -315,6 +337,25 @@ pub async fn execute(
             let end = args["end_line"].as_u64().unwrap_or(1) as usize;
             let new_content = args["new_content"].as_str().unwrap_or("").to_string();
 
+            // 1A-4: B194 credential + sensitive-path guards (see ide_write_file
+            // above). new_content carries the bytes that will hit disk, so it
+            // is the right thing to scan for credential shapes.
+            if let Some(kind) = opide_engine::engine::util::looks_like_credential_value(&new_content) {
+                log::warn!(
+                    "[tool-executor] 1A-4: refusing ide_apply_edit on '{}' - new content looks like {}",
+                    path, kind
+                );
+                return Some(Err(format!(
+                    "Refusing to edit '{}': new content contains what looks like a {}. \
+                     Credentials should be stored via the engine's skill vault, not on disk.",
+                    path, kind
+                )));
+            }
+            if let Err(reason) = opide_engine::engine::util::check_sensitive_path(&path) {
+                log::warn!("[tool-executor] 1A-4: {}", reason);
+                return Some(Err(reason));
+            }
+
             // Read current content and compute proposed result
             let original = match tokio::fs::read_to_string(&path).await {
                 Ok(c) => c,
@@ -348,6 +389,16 @@ pub async fn execute(
         }
         "ide_delete_file" => {
             let path = args["path"].as_str().unwrap_or("").to_string();
+
+            // 1A-4: B194 sensitive-path guard (no content to scan, but the
+            // path itself can be ~/.ssh/id_rsa or /etc/passwd and that
+            // should refuse before we even open the diff editor). Mirrors
+            // host_api.rs file_delete.
+            if let Err(reason) = opide_engine::engine::util::check_sensitive_path(&path) {
+                log::warn!("[tool-executor] 1A-4: {}", reason);
+                return Some(Err(reason));
+            }
+
             let desc = format!("Delete {}", path);
             match crate::engine::frontend_bridge::request_edit_review(
                 _app_handle, &path, &path, "", "ide_delete_file", &desc,
