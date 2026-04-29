@@ -629,9 +629,9 @@ export function registerOpideChat(): void {
       const approvalWrap = document.createElement('div')
       approvalWrap.style.cssText = 'display:flex;align-items:center;gap:2px;margin-left:auto;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,#333);border-radius:4px;overflow:hidden'
       const approvalModes: { mode: ApprovalMode; label: string; title: string }[] = [
-        { mode: 'ask',  label: 'Ask',  title: 'Ask before every tool call' },
-        { mode: 'auto', label: 'Auto', title: 'Auto-approve safe tools, ask for dangerous' },
-        { mode: 'yolo', label: 'Yolo', title: 'Auto-approve everything' },
+        { mode: 'ask',  label: 'Ask',  title: 'Ask before every write, run, edit, or external action. Read-only tools (file reads, AST queries, git status) still auto-approve.' },
+        { mode: 'auto', label: 'Auto', title: 'Auto-approve reversible local writes (memory_store, soul_write, etc). Ask before destructive, external, or unknown tools (run_command, delete_file, MCP, execute_code).' },
+        { mode: 'yolo', label: 'Yolo', title: 'Skip every prompt. Tools run without asking, including shell commands, file deletes, and external API calls.' },
       ]
       const approvalBtns: HTMLButtonElement[] = []
       function setApprovalMode(m: ApprovalMode) {
