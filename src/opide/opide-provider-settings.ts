@@ -13,7 +13,7 @@ import { SyncDescriptor } from '@codingame/monaco-vscode-api/vscode/vs/platform/
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const STYLES = `
-  .opide-prov { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; color:#ccc; padding:16px; max-width:720px; }
+  .opide-prov { font-family:var(--opide-font-ui); color:#ccc; padding:16px; max-width:720px; }
   .opide-prov h2 { font-size:16px; font-weight:600; color:#fff; margin:20px 0 6px; }
   .opide-prov h2:first-child { margin-top:0; }
   .opide-prov p.desc { font-size:11px; color:#888; margin:0 0 12px; }
@@ -161,7 +161,7 @@ class OpideAISettingsPane {
 
         // Model
         const tdModel = document.createElement('td')
-        tdModel.style.cssText = 'font-family:monospace;font-size:10px'
+        tdModel.style.cssText = 'font-family:var(--opide-font-mono);font-size:10px'
         tdModel.textContent = p.default_model || '—'
         tr.appendChild(tdModel)
 
@@ -207,7 +207,7 @@ class OpideAISettingsPane {
       tdLabel.style.color = '#888'
       tdLabel.textContent = label
       const tdValue = document.createElement('td')
-      tdValue.style.cssText = 'font-family:monospace;font-size:11px'
+      tdValue.style.cssText = 'font-family:var(--opide-font-mono);font-size:11px'
       tdValue.textContent = value
       tr.appendChild(tdLabel)
       tr.appendChild(tdValue)

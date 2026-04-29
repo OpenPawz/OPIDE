@@ -24,7 +24,7 @@ async function boot() {
     const loading = document.getElementById('workbench-loading')
     if (loading) {
       loading.innerHTML = `
-        <div style="text-align:center;color:#f88;font-family:monospace;padding:24px">
+        <div style="text-align:center;color:#f88;font-family:var(--opide-font-mono);padding:24px">
           <div style="font-size:18px;margin-bottom:8px">Workbench failed to start</div>
           <div style="font-size:12px;opacity:0.7">${String(err)}</div>
         </div>
@@ -39,7 +39,7 @@ async function boot() {
 function showStartupError(msg: string): void {
   try {
     const banner = document.createElement('div')
-    banner.style.cssText = 'position:fixed;bottom:12px;right:12px;background:#3a1f1f;color:#f88;padding:8px 12px;border-radius:6px;font-size:11px;font-family:monospace;z-index:9999;max-width:380px;box-shadow:0 4px 12px rgba(0,0,0,0.4)'
+    banner.style.cssText = 'position:fixed;bottom:12px;right:12px;background:#3a1f1f;color:#f88;padding:8px 12px;border-radius:6px;font-size:11px;font-family:var(--opide-font-mono);z-index:9999;max-width:380px;box-shadow:0 4px 12px rgba(0,0,0,0.4)'
     banner.textContent = msg
     document.body.appendChild(banner)
     setTimeout(() => banner.remove(), 12_000)

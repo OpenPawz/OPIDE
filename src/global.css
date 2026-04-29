@@ -24,7 +24,7 @@ html, body {
   padding: 0;
   overflow: hidden;
   background: #1e1e1e;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--opide-font-ui);
 }
 
 /* ─── 2. VS Code theme token overrides ───────────────────────────────────── */

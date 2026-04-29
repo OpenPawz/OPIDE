@@ -31,7 +31,7 @@ export function linkifyPaths(html: string): string {
     (_m, codeBlock, path) => {
       if (codeBlock) return codeBlock
       const name = path.split('/').pop() || path
-      return `<span class="opide-path-link" data-fspath="${path}" title="${path}" style="display:inline-flex;align-items:center;gap:3px;background:rgba(77,170,252,0.08);color:var(--vscode-textLink-foreground,#4daafc);cursor:pointer;border-radius:4px;padding:1px 6px 1px 4px;font-family:var(--vscode-editor-font-family,monospace);font-size:0.85em;border:1px solid rgba(77,170,252,0.18);vertical-align:middle;white-space:nowrap"><span class="codicon codicon-file-code" style="font-size:10px;opacity:0.8"></span>${name}</span>`
+      return `<span class="opide-path-link" data-fspath="${path}" title="${path}" style="display:inline-flex;align-items:center;gap:3px;background:rgba(77,170,252,0.08);color:var(--vscode-textLink-foreground,#4daafc);cursor:pointer;border-radius:4px;padding:1px 6px 1px 4px;font-family:var(--opide-font-mono);font-size:0.85em;border:1px solid rgba(77,170,252,0.18);vertical-align:middle;white-space:nowrap"><span class="codicon codicon-file-code" style="font-size:10px;opacity:0.8"></span>${name}</span>`
     },
   )
 }
@@ -237,7 +237,7 @@ export function makeBubble(msg: ChatMsg): HTMLElement {
     card.appendChild(icon)
 
     const toolLabel = document.createElement('span')
-    toolLabel.style.cssText = 'font-size:11px;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family,monospace)'
+    toolLabel.style.cssText = 'font-size:11px;color:var(--vscode-descriptionForeground);font-family:var(--opide-font-mono)'
     toolLabel.textContent = msg.toolName || 'tool'
     card.appendChild(toolLabel)
 
@@ -255,7 +255,7 @@ export function makeBubble(msg: ChatMsg): HTMLElement {
         'border:1px solid rgba(77,170,252,0.18)',
         'border-radius:4px',
         'padding:0 5px 0 3px',
-        'font-family:var(--vscode-editor-font-family,monospace)',
+        'font-family:var(--opide-font-mono)',
         'font-size:10px',
         'cursor:pointer',
         'white-space:nowrap',
@@ -265,7 +265,7 @@ export function makeBubble(msg: ChatMsg): HTMLElement {
 
       if (msg.linesAdded || msg.linesRemoved) {
         const stats = document.createElement('span')
-        stats.style.cssText = 'font-size:10px;font-family:monospace'
+        stats.style.cssText = 'font-size:10px;font-family:var(--opide-font-mono)'
         stats.innerHTML = [
           msg.linesAdded ? `<span style="color:#4ec9a8">+${msg.linesAdded}</span>` : '',
           msg.linesRemoved ? `<span style="color:#f48771"> −${msg.linesRemoved}</span>` : '',
@@ -296,7 +296,7 @@ export function makeBubble(msg: ChatMsg): HTMLElement {
       const diffEl = document.createElement('div')
       diffEl.style.cssText = [
         'font-size:11px',
-        'font-family:var(--vscode-editor-font-family,monospace)',
+        'font-family:var(--opide-font-mono)',
         'border-radius:6px',
         'overflow:hidden',
         'border:1px solid var(--vscode-widget-border,rgba(255,255,255,0.08))',

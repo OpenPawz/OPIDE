@@ -263,7 +263,7 @@ function addApprovalButtons(toolCallId: string, toolName: string, tier: string):
 
   const label = document.createElement('span')
   label.style.cssText = 'flex:1;font-size:12px;color:var(--vscode-foreground);line-height:1.4'
-  label.innerHTML = `<strong style="color:#d4a843">Approval needed</strong> <code style="font-family:var(--vscode-editor-font-family,monospace);font-size:11px;opacity:0.85">${toolName}</code> <span style="opacity:0.55;font-size:10px">(${tier})</span>`
+  label.innerHTML = `<strong style="color:#d4a843">Approval needed</strong> <code style="font-family:var(--opide-font-mono);font-size:11px;opacity:0.85">${toolName}</code> <span style="opacity:0.55;font-size:10px">(${tier})</span>`
   row.appendChild(label)
 
   const approveBtn = document.createElement('button')

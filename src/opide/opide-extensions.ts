@@ -174,7 +174,7 @@ function injectStyles(): void {
       height: 100%;
       min-height: 0;
       background: var(--vscode-sideBar-background);
-      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+      font-family: var(--opide-font-ui);
       color: var(--vscode-foreground);
       overflow: hidden;
     }

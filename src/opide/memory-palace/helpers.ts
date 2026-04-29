@@ -36,7 +36,7 @@ function ensureDialog(): HTMLDialogElement {
     'background:var(--vscode-editorWidget-background, #252526);' +
     'color:var(--vscode-foreground, #ccc);' +
     'border-radius:8px;padding:18px 20px;min-width:320px;max-width:480px;' +
-    'font-family:var(--vscode-font-family, system-ui);font-size:13px;';
+    'font-family:var(--opide-font-ui);font-size:13px;';
   dlg.innerHTML = `
     <h3 data-role="title" style="margin:0 0 8px 0;font-size:14px;font-weight:600"></h3>
     <p data-role="message" style="margin:0 0 16px 0;color:var(--vscode-descriptionForeground, #999)"></p>

@@ -305,7 +305,7 @@ const CHAT_STYLES = `
     border: 1px solid #2a2a35;
     box-shadow: inset 0 2px 6px rgba(0,0,0,0.4), 0 1px 0 rgba(255,255,255,0.02);
   }
-  .opide-chat-bubble code { font-size: 12px; font-family: var(--vscode-editor-font-family, monospace); }
+  .opide-chat-bubble code { font-size: 12px; font-family: var(--opide-font-mono); }
   .opide-chat-bubble code:not(pre code) {
     padding: 2px 7px;
     border-radius: 4px;
@@ -368,7 +368,7 @@ const CHAT_STYLES = `
     outline: none;
     color: var(--vscode-input-foreground);
     font-size: 11px;
-    font-family: var(--vscode-font-family);
+    font-family: var(--opide-font-ui);
     opacity: 0.8;
   }
   .opide-whisper-input::placeholder { opacity: 0.45; font-style: italic; }
@@ -665,7 +665,7 @@ export function registerOpideChat(): void {
       const textarea = document.createElement('textarea')
       textarea.rows = 1
       textarea.placeholder = 'Ask OPIDE anything… (Cmd+L)'
-      textarea.style.cssText = 'flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--vscode-input-foreground);font-size:13px;font-family:var(--vscode-font-family);line-height:1.4;min-height:20px;max-height:120px;overflow-y:auto;padding:0'
+      textarea.style.cssText = 'flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--vscode-input-foreground);font-size:13px;font-family:var(--opide-font-ui);line-height:1.4;min-height:20px;max-height:120px;overflow-y:auto;padding:0'
       let _heightTimer: ReturnType<typeof setTimeout> | null = null
       textarea.addEventListener('input', () => {
         if (_heightTimer) return
@@ -763,7 +763,7 @@ export function registerOpideChat(): void {
       // @ mention button
       const mentionBtn = document.createElement('button')
       mentionBtn.title = 'Mention file (@)'
-      mentionBtn.style.cssText = 'background:transparent;border:none;cursor:pointer;padding:3px 5px;color:var(--vscode-descriptionForeground);display:flex;align-items:center;opacity:0.7;flex-shrink:0;font-size:13px;font-weight:600;font-family:monospace'
+      mentionBtn.style.cssText = 'background:transparent;border:none;cursor:pointer;padding:3px 5px;color:var(--vscode-descriptionForeground);display:flex;align-items:center;opacity:0.7;flex-shrink:0;font-size:13px;font-weight:600;font-family:var(--opide-font-mono)'
       mentionBtn.textContent = '@'
       mentionBtn.addEventListener('click', () => pickAndAttach(true))
 
