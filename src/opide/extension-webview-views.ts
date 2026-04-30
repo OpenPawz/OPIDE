@@ -134,13 +134,76 @@ export function registerWebviewView(
   // package.json contributes.views (P0), the slot already exists in
   // the workbench. We attach to it here; we do NOT registerCustomView
   // again because that would create a duplicate panel.
+  //
+  // RACE: extensions activated by `onStartupFinished` register their
+  // webview-view providers BEFORE the bridge's extensionHost/ready
+  // handler runs registerAllContributedViews — so when this function
+  // fires, the slot may not yet be in the registry. Solution:
+  // register a pending callback that fires when (and if) the slot
+  // shows up. If no contributed-view slot ever exists for this id
+  // (extension didn't declare it in package.json), we fall back to
+  // the legacy "create our own custom view" path AFTER a short
+  // grace window.
   const preMounted = findPreMountedSlot(viewId)
   if (preMounted && preMounted.type === 'webview') {
-    markSlotAttached(viewId, (root) => {
-      buildBody(inst, root)
-    })
+    markSlotAttached(viewId, (root) => buildBody(inst, root))
     return
   }
+  // Defer + race-resolve: try again after the next pre-mount runs.
+  // If the slot does turn up, attach there and skip the legacy view.
+  // If not, create the legacy view as a last resort so the extension
+  // isn't stranded.
+  registerPendingWebviewProvider(viewId)
+  // Wait one tick for pre-mount to potentially happen (it runs
+  // synchronously inside registerAllContributedViews); if it didn't,
+  // schedule the legacy fallback after a 250ms grace window.
+  // 250ms = comfortably longer than the bridge's typical ready
+  // dispatch latency.
+  setTimeout(() => {
+    const slotNow = findPreMountedSlot(viewId)
+    if (slotNow && slotNow.type === 'webview') {
+      // Already attached via pending queue; nothing to do.
+      return
+    }
+    if (_views.get(viewId) !== inst) {
+      // Stale instance (re-registration happened). Skip.
+      return
+    }
+    // No contributed view ever appeared. Create a legacy custom view.
+    legacyRegisterWebviewView(viewId, inst)
+  }, 250)
+}
+
+// ─── Pending registration queue ────────────────────────────────────────
+//
+// When an extension activates eagerly (onStartupFinished) it registers
+// its webview-view provider BEFORE the bridge has a chance to call
+// registerAllContributedViews. That race used to create a duplicate
+// panel because findPreMountedSlot returned undefined. Now we queue
+// the registration; extension-contributed-views.ts checks this queue
+// every time it pre-mounts a slot and attaches matching providers.
+
+type PendingMount = (root: HTMLElement) => void
+const _pendingProviders = new Map<string, PendingMount>()
+
+function registerPendingWebviewProvider(viewId: string): void {
+  const inst = _views.get(viewId)
+  if (!inst) return
+  _pendingProviders.set(viewId, (root: HTMLElement) => buildBody(inst, root))
+}
+
+/** Called by extension-contributed-views.ts every time a slot is
+ * registered. If there's a pending webview provider for this slot,
+ * attach immediately. */
+export function drainPendingForSlot(viewId: string): boolean {
+  const mounter = _pendingProviders.get(viewId)
+  if (!mounter) return false
+  _pendingProviders.delete(viewId)
+  markSlotAttached(viewId, mounter)
+  return true
+}
+
+function legacyRegisterWebviewView(viewId: string, inst: WebviewViewInst): void {
 
   try {
     registerCustomView({

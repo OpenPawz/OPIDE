@@ -206,6 +206,25 @@ export function registerExtensionContributions(
     }
     _slots.set(v.id, slot)
 
+    // Race resolution: if the extension activated BEFORE pre-mount and
+    // already registered a webview-view / tree-view provider, that
+    // registration is sitting in extension-webview-views' pending
+    // queue. Drain it now so the slot mounts the real iframe instead
+    // of a "Activating…" placeholder. drainPendingForSlot returns
+    // true if it attached; we still proceed with registerCustomView
+    // so the slot exists in the workbench either way.
+    if (v.type === 'webview') {
+      const viewIdCapture = v.id
+      void import('./extension-webview-views.ts')
+        .then((m) => m.drainPendingForSlot?.(viewIdCapture))
+        .catch((e) => {
+          logToFile(`drainPendingForSlot import failed: ${String((e as Error)?.message || e)}`)
+        })
+    }
+    // Tree views currently don't have a pending queue (the race
+    // window doesn't manifest the same way for them); revisit if a
+    // tree-only extension hits the same symptom.
+
     // Each view becomes its own custom view in the workbench. We use
     // viewId as the workbench id so the user can identify which
     // extension's view they're looking at; collisions across
