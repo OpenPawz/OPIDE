@@ -262,9 +262,42 @@ export function postMessageToWebviewView(viewId: string, message: any): void {
 }
 
 export function revealWebviewView(viewId: string): void {
-  // Without a programmatic show API on monaco-vscode-workbench's custom
-  // views, the best we can do is log so the user knows the extension
-  // wants attention. v2: hook into IViewsService.openView once we
-  // confirm the API is exposed.
-  console.log(`[ext-webview-views] reveal request for ${viewId} (no-op in v1)`)
+  // Try to open the matching custom view via monaco-vscode-api. The
+  // pre-mounted slot's id is `opide-ext-cv-<viewId>` (from
+  // extension-contributed-views) and the legacy fallback's id is
+  // `opide-ext-wvview-<viewId>`. We try both — whichever is registered
+  // wins.
+  void (async () => {
+    try {
+      const { StandaloneServices, getService } = await import('@codingame/monaco-vscode-api/services')
+      // Internal monaco-vscode-api path. Same import style every other
+      // file in the codebase uses (see ambient declarations in
+      // src/types/vscode-internals.d.ts). Vite resolves these at the
+      // package level even though the literal `vscode/vs` directory
+      // doesn't exist on disk.
+      const viewsServiceModule = await import(
+        '@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service'
+      ).catch(() => null as any)
+      const IViewsService = viewsServiceModule?.IViewsService
+      if (!IViewsService) {
+        console.warn(`[ext-webview-views] reveal: IViewsService not available; ${viewId} not opened`)
+        return
+      }
+      const svc = (getService ? await getService(IViewsService) : StandaloneServices.get(IViewsService)) as any
+      if (!svc?.openView) {
+        console.warn(`[ext-webview-views] reveal: openView not on IViewsService; ${viewId} not opened`)
+        return
+      }
+      // Try contributed-view ids first, then the legacy.
+      for (const id of [`opide-ext-cv-${viewId}`, `opide-ext-wvview-${viewId}`]) {
+        try {
+          const view = await svc.openView(id, /* focus= */ true)
+          if (view) return
+        } catch { /* try next */ }
+      }
+      console.warn(`[ext-webview-views] reveal: no view registered for ${viewId}`)
+    } catch (e) {
+      console.warn(`[ext-webview-views] reveal failed for ${viewId}:`, e)
+    }
+  })()
 }

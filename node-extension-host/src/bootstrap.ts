@@ -77,6 +77,9 @@ async function activateExtension(
 
     const activated: ActivatedExtension = { id: ext.id, exports, extension: ext };
     activatedExtensions.set(ext.id, activated);
+    if (typeof (vsCodeApi as any)._markExtensionActivated === 'function') {
+      (vsCodeApi as any)._markExtensionActivated(ext.id, exports);
+    }
 
     bridge.log(`Extension activated: ${ext.id}`);
 
@@ -129,6 +132,18 @@ async function main() {
 
   for (const ext of extensions) {
     bridge.log(`  ${ext.id} — main: ${ext.main ? 'yes' : 'no (web-only)'}`);
+  }
+
+  // Populate vscode.extensions.getExtension data BEFORE any activate()
+  // runs. Extensions read their own packageJSON via getExtension during
+  // activation (Claude Code reads its version, Continue reads its
+  // displayName, etc); without this they'd see undefined and crash.
+  if (typeof (vsCodeApi as any)._setExtensionRegistry === 'function') {
+    (vsCodeApi as any)._setExtensionRegistry(extensions.map((e) => ({
+      id: e.id,
+      path: e.path,
+      manifest: e.manifest,
+    })));
   }
 
   // ── CC1: Activation events ───────────────────────────────────────────

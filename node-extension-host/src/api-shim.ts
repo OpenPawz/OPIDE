@@ -731,6 +731,33 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _decorationTypes = new Map<string, any>();
   let _nextDecorationTypeId = 1;
 
+  // ── Extension registry (for vscode.extensions.getExtension) ──────────
+  // bootstrap.ts populates this with every scanned extension AFTER
+  // scan completes; before that the registry is empty. Each value is a
+  // record we shape into a public Extension on read. We don't track
+  // active state here — the workbench owns lifecycle.
+  interface ExtRegistryRec {
+    id: string;
+    extensionPath: string;
+    extensionUri: any;
+    packageJSON: any;
+    isActive: boolean;
+    exports: any;
+  }
+  const _extensionRegistry = new Map<string, ExtRegistryRec>();
+  function toPublicExtension(rec: ExtRegistryRec): any {
+    return {
+      id: rec.id,
+      extensionPath: rec.extensionPath,
+      extensionUri: rec.extensionUri,
+      packageJSON: rec.packageJSON,
+      isActive: rec.isActive,
+      exports: rec.exports,
+      activate: () => Promise.resolve(rec.exports),
+      extensionKind: 1, // ExtensionKind.UI
+    };
+  }
+
   // ── P1 registries ─────────────────────────────────────────────────────
   interface InlineCompletionProviderRec {
     provider: any;
@@ -2049,10 +2076,18 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     },
 
     // ── extensions ─────────────────────────────────────────────────────
+    // Populated lazily by bootstrap.ts after the scan via
+    // _setExtensionRegistry. Until then both .all and getExtension
+    // return their defaults; that window is short (single tick from
+    // module load to scan) but extensions that read this synchronously
+    // during activate() rely on it being populated.
     extensions: {
-      all: [] as any[],
+      get all(): any[] {
+        return [..._extensionRegistry.values()].map(toPublicExtension);
+      },
       getExtension(id: string): any | undefined {
-        return undefined; // Will be populated after activation
+        const rec = _extensionRegistry.get(id);
+        return rec ? toPublicExtension(rec) : undefined;
       },
       onDidChange: new VSCodeEvent<void>('onDidChange').event,
     },
@@ -2573,6 +2608,33 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         return { dispose: () => { _authProviders.delete(id); } };
       },
       onDidChangeSessions: new VSCodeEvent<any>('onDidChangeSessions').event,
+    },
+
+    // ── Internal: registry hooks for bootstrap.ts ────────────────────
+    /** Bootstrap populates this with every scanned extension's
+     * package.json so vscode.extensions.getExtension returns real
+     * data instead of undefined. Called once per scan. */
+    _setExtensionRegistry(entries: Array<{ id: string; path: string; manifest: any }>) {
+      _extensionRegistry.clear();
+      for (const e of entries) {
+        _extensionRegistry.set(e.id, {
+          id: e.id,
+          extensionPath: e.path,
+          extensionUri: Uri.file(e.path),
+          packageJSON: e.manifest,
+          isActive: false,
+          exports: undefined,
+        });
+      }
+    },
+    /** Bootstrap calls this after activating an extension so
+     * getExtension() reflects current state (isActive, exports). */
+    _markExtensionActivated(id: string, exports: any) {
+      const rec = _extensionRegistry.get(id);
+      if (rec) {
+        rec.isActive = true;
+        rec.exports = exports;
+      }
     },
 
     // ── ExtensionContext (passed to activate) ─────────────────────────

@@ -57,3 +57,7 @@ declare module '@codingame/monaco-vscode-api/vscode/vs/workbench/services/status
 declare module '@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service' {
   export const IWorkbenchThemeService: any
 }
+
+declare module '@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service' {
+  export const IViewsService: any
+}
