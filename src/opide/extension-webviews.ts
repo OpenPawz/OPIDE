@@ -364,14 +364,34 @@ export function setWebviewHtml(panelId: string, html: string): void {
     })();
   </script>`
 
+  // Same CSP + URL rewrite as extension-webview-views.ts. See the
+  // longer comment there for the rationale; short version: Claude
+  // Code's HTML has a CSP meta tag that allows only vscode-resource:,
+  // we widen it to also allow opide-ext: which is the scheme our
+  // Tauri protocol handler actually serves.
+  let rewritten = html.replace(
+    /(<meta[^>]+http-equiv\s*=\s*["']Content-Security-Policy["'][^>]+content\s*=\s*["'])([^"']+)(["'])/gi,
+    (_full, prefix: string, content: string, suffix: string) => {
+      const widened = content
+        .replace(/vscode-resource:/g, 'vscode-resource: opide-ext:')
+        .replace(/\bopide-ext:\s+opide-ext:/g, 'opide-ext:')
+      return prefix + widened + suffix
+    },
+  )
+  rewritten = rewritten.replace(/vscode-resource:\/\/(\S+?)([\s"'<>])/g, (_m, p: string, term: string) => {
+    const m = p.match(/[\\/]\.opide[\\/]extensions[\\/]([^\\/]+)[\\/](.*)$/)
+    if (m) return `opide-ext://localhost/${encodeURIComponent(m[1])}/${m[2].split(/[\\/]/).map(encodeURIComponent).join('/')}${term}`
+    return `opide-ext://localhost/${p}${term}`
+  })
+
   // Append our scripts at the start of <body>; if the html has no body,
   // wrap it. This keeps the extension's html intact while ensuring our
   // shim runs before extension scripts.
-  let injected = html
-  if (/<body[^>]*>/i.test(html)) {
-    injected = html.replace(/<body([^>]*)>/i, `<body$1>${vsCodeApiShim}${readyScript}`)
+  let injected = rewritten
+  if (/<body[^>]*>/i.test(rewritten)) {
+    injected = rewritten.replace(/<body([^>]*)>/i, `<body$1>${vsCodeApiShim}${readyScript}`)
   } else {
-    injected = `<!doctype html><html><head></head><body>${vsCodeApiShim}${readyScript}${html}</body></html>`
+    injected = `<!doctype html><html><head></head><body>${vsCodeApiShim}${readyScript}${rewritten}</body></html>`
   }
 
   inst.ready = false

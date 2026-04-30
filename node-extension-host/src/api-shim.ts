@@ -318,6 +318,31 @@ enum TextEditorCursorStyle {
   Line = 1, Block = 2, Underline = 3, LineThin = 4, BlockOutline = 5, UnderlineThin = 6,
 }
 
+/**
+ * Convert an fsPath that lives inside `~/.opide/extensions/<id>/...`
+ * into a real URL the iframe can fetch. Real VS Code uses a custom
+ * `vscode-resource://` scheme served by the workbench; we register
+ * `opide-ext://` in Tauri (see src-tauri/src/lib.rs's
+ * opide_ext_protocol_handler) and route fsPaths inside the extensions
+ * root through it.
+ *
+ * For paths OUTSIDE the extensions root we fall back to file:// — the
+ * iframe usually can't load those (sandbox + cross-origin), but at
+ * least the URI is well-formed.
+ */
+function fsPathToWebviewUrl(fsPath: string): string {
+  if (!fsPath) return 'opide-ext://localhost/';
+  // Find ".opide/extensions/" anchor and split there.
+  const m = fsPath.match(/[\\/]\.opide[\\/]extensions[\\/]([^\\/]+)[\\/](.*)$/);
+  if (m) {
+    const extId = encodeURIComponent(m[1]);
+    const rel = m[2].split(/[\\/]/).map(encodeURIComponent).join('/');
+    return `opide-ext://localhost/${extId}/${rel}`;
+  }
+  // Outside the extensions dir — best effort.
+  return `file://${fsPath}`;
+}
+
 // ── Coding-agent API surface ────────────────────────────────────────────
 // These classes / enums / values are accessed at module-load time by every
 // modern coding-agent extension (Claude Code, Continue, Cline, Cody, Copilot,
@@ -1032,8 +1057,13 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           webview: {
             html: '',
             options: inst.options?.webviewOptions || {},
-            cspSource: 'vscode-resource:',
-            asWebviewUri(uri: Uri) { return Uri.parse(`vscode-resource://${uri.fsPath}`); },
+            // CSP source the extension HTML can use as a placeholder
+            // in <meta http-equiv="Content-Security-Policy">. Matches
+            // the scheme our protocol handler serves.
+            cspSource: 'opide-ext:',
+            asWebviewUri(uri: Uri) {
+              return Uri.parse(fsPathToWebviewUrl(uri.fsPath));
+            },
             postMessage(msg: any) {
               return rpcRequest('webviewView/postMessage', { viewId: params?.viewId, message: msg })
                 .then(() => true).catch(() => false);
@@ -1758,13 +1788,12 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           // the iframe sends `window.parent.postMessage(...)`.
           onDidReceiveMessage: onDidReceiveMessageEvent.event,
           // asWebviewUri converts a local fs URI to one the webview can
-          // load. Until we have a custom protocol handler we map fs paths
-          // to a `vscode-resource://` style URI; the bridge intercepts.
+          // load. We have a custom Tauri-registered `opide-ext://`
+          // protocol that serves files from ~/.opide/extensions/<id>/.
           asWebviewUri(uri: Uri) {
-            return Uri.parse(`vscode-resource://${uri.fsPath}`);
+            return Uri.parse(fsPathToWebviewUrl(uri.fsPath));
           },
-          // CSP source that the extension can include in its <meta http-equiv="Content-Security-Policy">
-          cspSource: 'vscode-resource:',
+          cspSource: 'opide-ext:',
         };
 
         const wp = {

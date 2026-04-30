@@ -111,10 +111,36 @@ function injectScripts(html: string): string {
       };
     })();
   </script>`
-  if (/<body[^>]*>/i.test(html)) {
-    return html.replace(/<body([^>]*)>/i, `<body$1>${vsCodeApiShim}${readyScript}`)
+  // Rewrite the extension's CSP so it allows opide-ext: alongside the
+  // legacy vscode-resource: scheme. Real VS Code's CSP allows
+  // vscode-resource: by routing it server-side; we serve opide-ext:
+  // from Tauri Rust (see opide_ext_protocol_handler in lib.rs).
+  // Without this rewrite, even though asWebviewUri returns opide-ext:
+  // URLs, the CSP meta tag in Claude Code's HTML blocks them and the
+  // iframe stays empty.
+  let rewritten = html.replace(
+    /(<meta[^>]+http-equiv\s*=\s*["']Content-Security-Policy["'][^>]+content\s*=\s*["'])([^"']+)(["'])/gi,
+    (_full, prefix: string, content: string, suffix: string) => {
+      const widened = content
+        .replace(/vscode-resource:/g, 'vscode-resource: opide-ext:')
+        .replace(/\bopide-ext:\s+opide-ext:/g, 'opide-ext:') // dedupe
+      return prefix + widened + suffix
+    },
+  )
+  // Also rewrite raw vscode-resource:// URLs in the HTML body. Some
+  // extensions don't go through asWebviewUri for every resource and
+  // hardcode the scheme; we redirect those to opide-ext as a defense.
+  rewritten = rewritten.replace(/vscode-resource:\/\/(\S+?)([\s"'<>])/g, (_m, path: string, term: string) => {
+    // Path may already start with /Users/.../.opide/extensions/<id>/<rel>;
+    // we strip the .opide/extensions prefix and rebuild.
+    const m = path.match(/[\\/]\.opide[\\/]extensions[\\/]([^\\/]+)[\\/](.*)$/)
+    if (m) return `opide-ext://localhost/${encodeURIComponent(m[1])}/${m[2].split(/[\\/]/).map(encodeURIComponent).join('/')}${term}`
+    return `opide-ext://localhost/${path}${term}`
+  })
+  if (/<body[^>]*>/i.test(rewritten)) {
+    return rewritten.replace(/<body([^>]*)>/i, `<body$1>${vsCodeApiShim}${readyScript}`)
   }
-  return `<!doctype html><html><head></head><body>${vsCodeApiShim}${readyScript}${html}</body></html>`
+  return `<!doctype html><html><head></head><body>${vsCodeApiShim}${readyScript}${rewritten}</body></html>`
 }
 
 // ─── Public API ────────────────────────────────────────────────────────
