@@ -57,6 +57,17 @@ function ensureMessageListener(): void {
             try { inst.iframe?.contentWindow?.postMessage(m, '*') } catch { /* ignore */ }
           }
           inst.pendingMessages.length = 0
+        } else if (event.data && typeof event.data === 'object' && event.data.__opide_webview_error__) {
+          // Iframe-side runtime error captured by the script we
+          // inject. Pipe straight to OPIDE.log so the user can see
+          // what crashed inside the extension's webview without
+          // opening dev tools.
+          const err = event.data.__opide_webview_error__
+          const summary =
+            `iframe error in ${inst.viewId}: ${err.kind || 'error'}: ${err.message || ''}` +
+            (err.source ? ` (${err.source}:${err.line}:${err.col})` : '') +
+            (err.stack ? `\nstack: ${String(err.stack).split('\n').slice(0, 8).join(' | ')}` : '')
+          logToFile(summary)
         } else {
           inst.onMessage(event.data)
         }
@@ -99,6 +110,36 @@ function buildBody(inst: WebviewViewInst, root: HTMLElement): void {
 
 function injectScripts(html: string): string {
   const readyScript = `<script>(function(){try{window.parent.postMessage('__opide_webview_ready__','*')}catch(e){}})();</script>`
+  // Forward iframe-side runtime errors to the parent so we can see
+  // what's actually failing inside extension webviews. Without this,
+  // an error in Claude Code's React app shows up as an empty panel
+  // with the stack visible only via dev tools (which the user
+  // doesn't want to use). Errors land in OPIDE.log via the
+  // __opide_webview_error__ message handler in extension-webview-views.
+  const errorCaptureScript = `<script>
+    (function(){
+      function send(payload){
+        try { window.parent.postMessage({ __opide_webview_error__: payload }, '*'); } catch(e){}
+      }
+      window.addEventListener('error', function(ev){
+        send({
+          kind: 'error',
+          message: ev.message,
+          source: ev.filename,
+          line: ev.lineno,
+          col: ev.colno,
+          stack: ev.error && ev.error.stack ? String(ev.error.stack) : '',
+        });
+      });
+      window.addEventListener('unhandledrejection', function(ev){
+        send({
+          kind: 'unhandledrejection',
+          message: String(ev.reason && ev.reason.message ? ev.reason.message : ev.reason),
+          stack: ev.reason && ev.reason.stack ? String(ev.reason.stack) : '',
+        });
+      });
+    })();
+  </script>`
   const vsCodeApiShim = `<script>
     (function(){
       let _state = undefined;
@@ -138,9 +179,9 @@ function injectScripts(html: string): string {
     return `opide-ext://localhost/${path}${term}`
   })
   if (/<body[^>]*>/i.test(rewritten)) {
-    return rewritten.replace(/<body([^>]*)>/i, `<body$1>${vsCodeApiShim}${readyScript}`)
+    return rewritten.replace(/<body([^>]*)>/i, `<body$1>${errorCaptureScript}${vsCodeApiShim}${readyScript}`)
   }
-  return `<!doctype html><html><head></head><body>${vsCodeApiShim}${readyScript}${rewritten}</body></html>`
+  return `<!doctype html><html><head></head><body>${errorCaptureScript}${vsCodeApiShim}${readyScript}${rewritten}</body></html>`
 }
 
 // ─── Public API ────────────────────────────────────────────────────────
