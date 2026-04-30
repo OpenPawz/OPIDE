@@ -21,6 +21,7 @@ import {
 import { markRunCompleted } from './streaming.ts'
 import { gatherIdeContext as _gatherIdeContext, getWorkspace } from '../ide-context.ts'
 import { buildSystemPrompt } from './system-prompt.ts'
+import { detectMention, dispatchToParticipant } from '../extension-chat-participants.ts'
 
 export { buildSystemPrompt }
 
@@ -37,6 +38,14 @@ export async function doSend(): Promise<void> {
   if (!S.textarea) return
   const content = S.textarea.value.trim()
   if (!content) return
+
+  // Phase B.B1: extension chat participants. If the user typed
+  // `@<id> <prompt>` and <id> is a registered participant, route the
+  // prompt to that extension's handler instead of OPIDE's engine. The
+  // participant streams chunks back via CustomEvents the engine never
+  // sees, so this short-circuits cleanly without disturbing the rest
+  // of doSend's redirect / streaming bookkeeping.
+  if (await dispatchToExtensionParticipantIfMatched(content)) return
 
   // Two related concepts that USED to share one flag:
   //   - mid-stream redirect: the agent is currently running and the user typed
@@ -282,4 +291,105 @@ export async function doAbort(): Promise<void> {
   } catch (e) {
     console.warn('[opide-chat] abort failed:', e)
   }
+}
+
+// ─── Phase B.B1: extension chat participant routing ───────────────────────
+//
+// If the user types `@<id> <prompt>` and <id> is a registered extension
+// chat participant, route the prompt to that extension's handler. The
+// extension streams chunks back via CustomEvents we listen on; each
+// chunk appends to the assistant message bubble. When the dispatch
+// ends (success or error), we detach listeners and clean up.
+//
+// Returns true if the message was handled by a participant (caller
+// should short-circuit). Returns false if no participant matched, in
+// which case doSend continues with the regular OPIDE engine flow.
+
+async function dispatchToExtensionParticipantIfMatched(content: string): Promise<boolean> {
+  const mention = detectMention(content)
+  if (!mention) return false
+  if (!S.textarea) return false
+
+  // Mirror the user's message in the chat thread, clear the textarea,
+  // and create a placeholder assistant bubble that we'll mutate as
+  // chunks arrive. We do NOT call setStreaming/showStreamingBubble
+  // because those manage the engine's own streaming state and would
+  // confuse the regular send path if it runs concurrently.
+  S.messages.push({ role: 'user', content, ts: new Date() })
+  S.textarea.value = ''
+  S.textarea.style.height = 'auto'
+
+  const placeholderIdx = S.messages.length
+  S.messages.push({
+    role: 'assistant',
+    content: `*Asking @${mention.participantId}…*`,
+    ts: new Date(),
+  })
+  renderMessages()
+
+  // Build per-dispatch listeners. We close over the requestId after
+  // dispatchToParticipant returns it; the listeners filter chunks so
+  // concurrent dispatches don't bleed into each other's bubbles.
+  let active = true
+  const handleChunk = (e: Event) => {
+    if (!active) return
+    const ev = e as CustomEvent
+    if (!ev.detail || ev.detail.requestId !== requestId) return
+    const msg = S.messages[placeholderIdx]
+    if (!msg) return
+    // Reset the placeholder copy on first chunk so we don't have
+    // "*Asking @claude…*" stuck above the real response.
+    if (msg.content.startsWith('*Asking @')) msg.content = ''
+    if (ev.detail.kind === 'markdown' && typeof ev.detail.value === 'string') {
+      msg.content += ev.detail.value
+    } else if (ev.detail.kind === 'progress' && typeof ev.detail.message === 'string') {
+      // Progress notes go inline as italic text; participants use these
+      // for "thinking" / "fetching context" style statuses.
+      msg.content += `\n\n_${ev.detail.message}_`
+    } else if (ev.detail.kind === 'anchor' && typeof ev.detail.value === 'string') {
+      msg.content += `\n\n[${ev.detail.title || ev.detail.value}](${ev.detail.value})`
+    } else if (ev.detail.kind === 'reference' && ev.detail.value) {
+      msg.content += `\n\n_(reference: ${String(ev.detail.value)})_`
+    }
+    renderMessages()
+  }
+  const handleEnd = (e: Event) => {
+    const ev = e as CustomEvent
+    if (!ev.detail || ev.detail.requestId !== requestId) return
+    active = false
+    window.removeEventListener('opide-chat-participant-chunk', handleChunk)
+    window.removeEventListener('opide-chat-participant-end', handleEnd)
+    if (ev.detail.error) {
+      const msg = S.messages[placeholderIdx]
+      if (msg) {
+        if (msg.content.startsWith('*Asking @')) msg.content = ''
+        msg.content += `\n\n*(error: ${String(ev.detail.error)})*`
+        renderMessages()
+      }
+    }
+  }
+  window.addEventListener('opide-chat-participant-chunk', handleChunk)
+  window.addEventListener('opide-chat-participant-end', handleEnd)
+
+  // Recent assistant turns become the "history" we hand the participant
+  // so it has continuity inside its own thread. We bound it to the last
+  // 10 turns to avoid blowing past extensions' own context limits.
+  const history = S.messages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .slice(-10)
+    .map((m) => ({ role: m.role, content: m.content }))
+
+  const { requestId } = dispatchToParticipant(mention.participantId, mention.prompt, history)
+  if (!requestId) {
+    // Participant disappeared between detect and dispatch; clean up.
+    active = false
+    window.removeEventListener('opide-chat-participant-chunk', handleChunk)
+    window.removeEventListener('opide-chat-participant-end', handleEnd)
+    const msg = S.messages[placeholderIdx]
+    if (msg) {
+      msg.content = '*(participant not found)*'
+      renderMessages()
+    }
+  }
+  return true
 }

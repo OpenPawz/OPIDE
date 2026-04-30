@@ -375,6 +375,22 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _decorationTypes = new Map<string, any>();
   let _nextDecorationTypeId = 1;
 
+  // ── Phase B registries ────────────────────────────────────────────────
+  // Chat participants: extensions register handlers here; OPIDE's chat
+  // panel catches @<id> prefixes and dispatches user messages to the
+  // matching handler. Streaming chunks travel the other way as
+  // notifications keyed on the dispatch's requestId.
+  interface ParticipantInst {
+    id: string;
+    handler: (request: any, context: any, stream: any, token: any) => any;
+    options: any;
+    iconPath?: any;
+  }
+  const _chatParticipants = new Map<string, ParticipantInst>();
+  // Authentication providers registered by extensions (separate from the
+  // built-in providers that OPIDE itself wires up at the bridge layer).
+  const _authProviders = new Map<string, any>();
+
   // Webview panel registry. Each createWebviewPanel allocates a panelId
   // the bridge uses to address that panel. Reverse direction (webview →
   // extension) routes through 'webview/messageFromWebview' notifications
@@ -431,6 +447,111 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       case 'configuration/didChange':
         onDidChangeConfig.fire(params);
         break;
+
+      // ── Phase B: chat participant dispatch ────────────────────────
+      // OPIDE's chat panel sends this when the user types `@<id> ...`.
+      // We look up the participant and call its handler with a
+      // ChatResponseStream that streams chunks back via
+      // 'chat/streamChunk' notifications keyed on the same requestId.
+      case 'chat/dispatch': {
+        const part = _chatParticipants.get(params?.participantId);
+        if (!part) {
+          bridge.send({
+            jsonrpc: '2.0',
+            method: 'chat/dispatchEnd',
+            params: { requestId: params?.requestId, error: 'participant not found' },
+          });
+          break;
+        }
+        const requestId: string = params?.requestId;
+        // Build the ChatResponseStream that the participant calls into.
+        // Each method translates to a streamChunk notification with a
+        // tagged kind so the UI can render text/anchors/buttons/etc
+        // correctly. Returns a disposable-shaped object since some
+        // extensions chain calls.
+        const stream = {
+          markdown(value: any) {
+            const text = typeof value === 'string' ? value : (value?.value ?? '');
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/streamChunk',
+              params: { requestId, kind: 'markdown', value: text },
+            });
+            return stream;
+          },
+          anchor(value: any, title?: string) {
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/streamChunk',
+              params: {
+                requestId, kind: 'anchor',
+                value: typeof value === 'string' ? value : value?.toString?.() ?? '',
+                title,
+              },
+            });
+            return stream;
+          },
+          button(command: any) {
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/streamChunk',
+              params: { requestId, kind: 'button', command },
+            });
+            return stream;
+          },
+          filetree(value: any, baseUri: any) {
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/streamChunk',
+              params: { requestId, kind: 'filetree', value, baseUri: baseUri?.toString?.() },
+            });
+            return stream;
+          },
+          progress(message: string) {
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/streamChunk',
+              params: { requestId, kind: 'progress', message },
+            });
+            return stream;
+          },
+          reference(value: any) {
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/streamChunk',
+              params: { requestId, kind: 'reference', value: value?.toString?.() ?? value },
+            });
+            return stream;
+          },
+          push(part: any) {
+            // Unknown part: forward as-is so the UI can decide.
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/streamChunk',
+              params: { requestId, kind: 'raw', value: part },
+            });
+            return stream;
+          },
+        };
+        const cancellation = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) };
+        const request = {
+          prompt: params?.prompt ?? '',
+          command: params?.command,
+          references: params?.references ?? [],
+          participant: params?.participantId,
+          location: params?.location ?? 1,
+        };
+        const context = { history: params?.history ?? [] };
+        Promise.resolve()
+          .then(() => part.handler(request, context, stream, cancellation))
+          .then((result: any) => {
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/dispatchEnd',
+              params: { requestId, result },
+            });
+          })
+          .catch((err: any) => {
+            bridge.log(`chat handler error for ${params?.participantId}: ${err?.message || err}`);
+            bridge.send({
+              jsonrpc: '2.0', method: 'chat/dispatchEnd',
+              params: { requestId, error: String(err?.message || err) },
+            });
+          });
+        break;
+      }
 
       // Phase A: round-trip messages from the webview iframe back to the
       // extension. The bridge fires this with { panelId, message } so we
@@ -1029,6 +1150,137 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         writeText: (text: string) => rpcRequest('env/clipboardWrite', { text }),
       },
       openExternal: (uri: Uri) => rpcRequest('env/openExternal', { uri: uri.toString() }),
+    },
+
+    // ── Phase B.B1: chat ────────────────────────────────────────────────
+    // Chat participants register themselves here. OPIDE's chat panel
+    // surfaces them as `@<id>` mentions; user prompts are dispatched
+    // via 'chat/dispatch' which fires the registered handler. Streaming
+    // back to the user uses the ChatResponseStream methods (markdown,
+    // anchor, button, filetree, progress, reference) — each method
+    // sends a 'chat/streamChunk' notification.
+    chat: {
+      createChatParticipant(id: string, handler: any) {
+        const inst: ParticipantInst = { id, handler, options: {} };
+        _chatParticipants.set(id, inst);
+        rpcRequest('chat/registerParticipant', { id }).catch(() => {});
+        const participant = {
+          id,
+          // Many extensions assign these as properties after creation;
+          // we forward updates to the bridge so OPIDE's chat surface
+          // can render the avatar/follow-up handlers.
+          set iconPath(v: any) { inst.iconPath = v; rpcRequest('chat/updateParticipant', { id, iconPath: v?.toString?.() ?? v }).catch(() => {}); },
+          get iconPath() { return inst.iconPath; },
+          set followupProvider(v: any) { inst.options.followupProvider = v; },
+          set fullName(v: string) { inst.options.fullName = v; rpcRequest('chat/updateParticipant', { id, fullName: v }).catch(() => {}); },
+          set commandProvider(v: any) { inst.options.commandProvider = v; },
+          dispose() {
+            _chatParticipants.delete(id);
+            rpcRequest('chat/disposeParticipant', { id }).catch(() => {});
+          },
+          requestHandler: handler,
+        };
+        return participant;
+      },
+      registerChatVariableResolver(name: string, _description: string, resolver: any) {
+        // Variable resolvers (#file, #selection, etc) — track but the
+        // wiring into OPIDE's chat textarea is incremental.
+        rpcRequest('chat/registerVariableResolver', { name }).catch(() => {});
+        return { dispose: () => { /* TODO: track */ } };
+      },
+    },
+
+    // ── Phase B.B2: lm (language model API) ──────────────────────────
+    // Routes through OPIDE's provider factory: the extension asks for a
+    // model by vendor/family, OPIDE returns a wrapper that calls our
+    // own LLM pipeline (Anthropic, OpenAI, Claude Code CLI, etc). The
+    // user's API keys never leave OPIDE — extensions get the models
+    // through OPIDE's auth, which is the whole point of this design.
+    lm: {
+      async selectChatModels(selector?: any): Promise<any[]> {
+        const models = await rpcRequest('lm/selectModels', { selector: selector || {} })
+          .catch(() => []);
+        return (models || []).map((m: any) => ({
+          id: m.id,
+          name: m.name || m.id,
+          vendor: m.vendor || 'opide',
+          family: m.family || m.id,
+          version: m.version || '1.0',
+          maxInputTokens: m.maxInputTokens || 200_000,
+          // Extension calls model.sendRequest(messages, opts, token); we
+          // route to lm/sendRequest and stream the response back.
+          async sendRequest(messages: any[], options?: any, token?: any): Promise<any> {
+            const requestId = `lm-${_nextRequestId++}`;
+            const chunks: string[] = [];
+            // Simple streaming: collect chunks pushed via lm/streamChunk
+            // notification then yield them to the extension as an async
+            // iterator over its `text` and `stream` properties.
+            const onChunk = (msg: any) => {
+              if (msg?.method === 'lm/streamChunk' && msg?.params?.requestId === requestId) {
+                chunks.push(msg.params.text || '');
+              }
+            };
+            bridge.onMessage(onChunk);
+            try {
+              const result = await rpcRequest('lm/sendRequest', {
+                requestId,
+                modelId: m.id,
+                messages: messages.map((mm: any) => ({
+                  role: mm.role ?? 'user',
+                  content: typeof mm.content === 'string'
+                    ? mm.content
+                    : (mm.content || []).map((c: any) => c?.text ?? '').join(''),
+                })),
+                options: options || {},
+              });
+              const text = chunks.length > 0 ? chunks.join('') : (result?.text || '');
+              const asyncIter = {
+                async *[Symbol.asyncIterator]() {
+                  for (const c of chunks) yield c;
+                },
+              };
+              return {
+                text: (async function* () { for (const c of chunks) yield c; })(),
+                stream: asyncIter,
+              };
+            } finally {
+              // bridge.onMessage doesn't return an unsubscribe; the
+              // listener stays attached but is harmless after the
+              // request completes (we filter by requestId).
+            }
+          },
+          async countTokens(text: string): Promise<number> {
+            const r = await rpcRequest('lm/countTokens', { modelId: m.id, text })
+              .catch(() => ({ count: Math.ceil((text || '').length / 4) }));
+            return r?.count ?? Math.ceil((text || '').length / 4);
+          },
+        }));
+      },
+      tokens: {
+        // Common tokenization helpers extensions sometimes use.
+      },
+    },
+
+    // ── Phase B.B3: authentication ─────────────────────────────────────
+    // OAuth flows happen in the user's default browser via OPIDE's
+    // shell openExternal + a localhost loopback the bridge listens on.
+    // Sessions are stored in OS keychain so tokens survive restart.
+    authentication: {
+      async getSession(providerId: string, scopes: string[], options?: any): Promise<any> {
+        return rpcRequest('auth/getSession', {
+          providerId,
+          scopes: scopes || [],
+          createIfNone: !!options?.createIfNone,
+          forceNewSession: !!options?.forceNewSession,
+          clearSessionPreference: !!options?.clearSessionPreference,
+        });
+      },
+      registerAuthenticationProvider(id: string, label: string, provider: any, _options?: any) {
+        _authProviders.set(id, { label, provider });
+        rpcRequest('auth/registerProvider', { id, label }).catch(() => {});
+        return { dispose: () => { _authProviders.delete(id); } };
+      },
+      onDidChangeSessions: new VSCodeEvent<any>('onDidChangeSessions').event,
     },
 
     // ── ExtensionContext (passed to activate) ─────────────────────────

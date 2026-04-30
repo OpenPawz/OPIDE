@@ -688,6 +688,81 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
+    // ── Phase B.B1: chat participants ────────────────────────────────
+    case 'chat/registerParticipant': {
+      handleChatRegisterParticipant(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'chat/updateParticipant': {
+      handleChatUpdateParticipant(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'chat/disposeParticipant': {
+      handleChatDisposeParticipant(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'chat/registerVariableResolver': {
+      // Phase B v1: just acknowledge. Variable expansion (#file, #selection)
+      // is done client-side in OPIDE chat panel and not yet wired through
+      // to extension-provided resolvers. v2 work.
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'chat/streamChunk': {
+      handleChatStreamChunk(params)
+      // Notifications, no response expected
+      break
+    }
+    case 'chat/dispatchEnd': {
+      handleChatDispatchEnd(params)
+      break
+    }
+
+    // ── Phase B.B2: lm (language model API) ──────────────────────────
+    case 'lm/selectModels': {
+      handleLmSelectModels(params).then((models) => {
+        if (id) sendResponse(id, models)
+      }).catch(() => {
+        if (id) sendResponse(id, [])
+      })
+      break
+    }
+    case 'lm/sendRequest': {
+      handleLmSendRequest(params).then((result) => {
+        if (id) sendResponse(id, result)
+      }).catch((e) => {
+        if (id) sendResponse(id, { error: String(e) })
+      })
+      break
+    }
+    case 'lm/countTokens': {
+      handleLmCountTokens(params).then((r) => {
+        if (id) sendResponse(id, r)
+      }).catch(() => {
+        if (id) sendResponse(id, { count: 0 })
+      })
+      break
+    }
+
+    // ── Phase B.B3: authentication ───────────────────────────────────
+    case 'auth/getSession': {
+      handleAuthGetSession(params).then((session) => {
+        if (id) sendResponse(id, session)
+      }).catch(() => {
+        if (id) sendResponse(id, null)
+      })
+      break
+    }
+    case 'auth/registerProvider': {
+      // Built-in providers (GitHub, Microsoft) are wired in extension-auth;
+      // this just lets us know an extension has its own provider too.
+      if (id) sendResponse(id, null)
+      break
+    }
+
     // ── Phase A: text editor decorations ─────────────────────────────
     case 'decorations/createType': {
       handleDecorationCreateType(params)
@@ -724,6 +799,76 @@ let _extDecorations: typeof import('./extension-decorations.ts') | null = null
 async function getDecorations() {
   if (!_extDecorations) _extDecorations = await import('./extension-decorations.ts')
   return _extDecorations
+}
+let _extChat: typeof import('./extension-chat-participants.ts') | null = null
+async function getChat() {
+  if (!_extChat) _extChat = await import('./extension-chat-participants.ts')
+  return _extChat
+}
+let _extLm: typeof import('./extension-lm.ts') | null = null
+async function getLm() {
+  if (!_extLm) _extLm = await import('./extension-lm.ts')
+  return _extLm
+}
+let _extAuth: typeof import('./extension-auth.ts') | null = null
+async function getAuth() {
+  if (!_extAuth) _extAuth = await import('./extension-auth.ts')
+  return _extAuth
+}
+
+// Phase B.B1: chat participant lifecycle. The participant module owns
+// the chat-panel UI hook (textarea @ detection, message rendering); we
+// just plumb the lifecycle events.
+function handleChatRegisterParticipant(params: any): void {
+  void getChat().then((c) => c.registerParticipant(params?.id, (participantId, prompt, requestId, history) => {
+    // When the user types `@<id> ...` in OPIDE chat, this callback fires.
+    // We send a chat/dispatch notification down to the sidecar; the
+    // api-shim's dispatch case calls the participant's handler with a
+    // ChatResponseStream. Streamed chunks come back as chat/streamChunk.
+    sendNotification('chat/dispatch', { participantId, prompt, requestId, history })
+  }))
+}
+function handleChatUpdateParticipant(params: any): void {
+  void getChat().then((c) => c.updateParticipant(params?.id, params))
+}
+function handleChatDisposeParticipant(params: any): void {
+  void getChat().then((c) => c.disposeParticipant(params?.id))
+}
+function handleChatStreamChunk(params: any): void {
+  void getChat().then((c) => c.deliverStreamChunk(params))
+}
+function handleChatDispatchEnd(params: any): void {
+  void getChat().then((c) => c.endDispatch(params))
+}
+
+// Phase B.B2: route LM requests through OPIDE's provider factory. The
+// extension lm/selectModels call returns a list of available models;
+// lm/sendRequest dispatches to the engine and the engine's tokens
+// stream back through lm/streamChunk notifications keyed on requestId.
+async function handleLmSelectModels(params: any): Promise<any[]> {
+  const lm = await getLm()
+  return lm.selectModels(params?.selector || {})
+}
+async function handleLmSendRequest(params: any): Promise<any> {
+  const lm = await getLm()
+  return lm.sendRequest(params, (chunk: string) => {
+    sendNotification('lm/streamChunk', { requestId: params?.requestId, text: chunk })
+  })
+}
+async function handleLmCountTokens(params: any): Promise<{ count: number }> {
+  const lm = await getLm()
+  return { count: await lm.countTokens(params?.modelId || '', params?.text || '') }
+}
+
+// Phase B.B3: auth sessions. Built-in providers (GitHub, Microsoft)
+// implemented in extension-auth.ts; we delegate everything there.
+async function handleAuthGetSession(params: any): Promise<any | null> {
+  const auth = await getAuth()
+  return auth.getSession(params?.providerId, params?.scopes || [], {
+    createIfNone: params?.createIfNone,
+    forceNewSession: params?.forceNewSession,
+    clearSessionPreference: params?.clearSessionPreference,
+  })
 }
 
 async function handleWebviewCreate(params: any): Promise<void> {
