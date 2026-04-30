@@ -15,11 +15,23 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
-// ─── Debug logging (visible in Rust terminal) ───────────────────────────────
-// Debug logging — console only, no IPC. The Rust-side IPC call on every message
-// was a major performance drain (fires on every extension host message).
+// ─── Debug logging ──────────────────────────────────────────────────────────
+//
+// The previous comment noted that piping every message log through the Rust
+// IPC was too costly because debugLog fires on every ext-host-message. That
+// was true when debugLog ran on the hot dispatch path; today the per-message
+// log happens elsewhere and `debugLog` is reserved for one-shot lifecycle
+// events (registrations, handler errors, extension activation). Piping those
+// through ext_host_log gets them into ~/Library/Logs/com.openpawz.opide/
+// OPIDE.log so users running `tauri:dev` can `tail -f` the file instead of
+// being forced into the dev tools to see why an extension failed.
+//
+// We still console.log for fast local feedback in dev tools when they're
+// open. Both paths are best-effort — failures in the IPC call are swallowed
+// so a misconfigured extension can't break the bridge's logging.
 function debugLog(msg: string): void {
   console.log(`[ext-bridge] ${msg}`)
+  invoke('ext_host_log', { message: `[ext-bridge] ${msg}` }).catch(() => {})
 }
 
 // ─── Centralised extensions-dir resolution (B36) ────────────────────────────

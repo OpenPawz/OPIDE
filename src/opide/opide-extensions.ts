@@ -1001,9 +1001,14 @@ async function doInstall(ext: OvsxExtension): Promise<void> {
   _installStatus.set(ext.id, 'downloading')
   render()
 
+  // Pipe install lifecycle events into the OPIDE log file so users can
+  // `tail -f ~/Library/Logs/com.openpawz.opide/OPIDE.log` from a second
+  // terminal and watch what failed without opening dev tools.
+  const log = (msg: string) =>
+    invoke('ext_host_log', { message: `[install:panel] ${msg}` }).catch(() => {})
+
   try {
-    _installStatus.set(ext.id, 'downloading')
-    render()
+    await log(`Starting install of ${ext.id}`)
 
     const success = await installExtensionFromOpenVsx(ext.id)
 
@@ -1011,11 +1016,18 @@ async function doInstall(ext: OvsxExtension): Promise<void> {
       _installStatus.set(ext.id, 'complete')
       _installedIds.add(ext.id)
       _extMetadataCache.set(ext.id, ext)
+      await log(`${ext.id} installed successfully`)
     } else {
       _installStatus.set(ext.id, 'error')
+      // installExtensionFromOpenVsx returns false rather than throwing.
+      // It already wrote a [install] failure line via ext_host_log; this
+      // line is the panel's own marker so users can correlate the UI
+      // status pip with the underlying failure in the log.
+      await log(`${ext.id} install reported failure — see the previous [install] lines for the cause`)
     }
-  } catch {
+  } catch (e) {
     _installStatus.set(ext.id, 'error')
+    await log(`${ext.id} install threw: ${e instanceof Error ? `${e.message}\n${e.stack ?? ''}` : String(e)}`)
   }
   render()
 }
