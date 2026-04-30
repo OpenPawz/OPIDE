@@ -318,6 +318,49 @@ enum TextEditorCursorStyle {
   Line = 1, Block = 2, Underline = 3, LineThin = 4, BlockOutline = 5, UnderlineThin = 6,
 }
 
+// Phase D: debug enums + descriptor types
+enum DebugConsoleMode { Separate = 0, MergeWithParent = 1 }
+class DebugAdapterExecutable {
+  constructor(
+    public readonly command: string,
+    public readonly args?: string[],
+    public readonly options?: any,
+  ) {}
+}
+class DebugAdapterServer {
+  constructor(public readonly port: number, public readonly host?: string) {}
+}
+class DebugAdapterNamedPipeServer {
+  constructor(public readonly path: string) {}
+}
+class DebugAdapterInlineImplementation {
+  constructor(public readonly implementation: any) {}
+}
+class SourceBreakpoint {
+  enabled: boolean;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
+  constructor(public location: any, enabled = true, condition?: string, hitCondition?: string, logMessage?: string) {
+    this.enabled = enabled;
+    this.condition = condition;
+    this.hitCondition = hitCondition;
+    this.logMessage = logMessage;
+  }
+}
+class FunctionBreakpoint {
+  enabled: boolean;
+  condition?: string;
+  hitCondition?: string;
+  logMessage?: string;
+  constructor(public functionName: string, enabled = true, condition?: string, hitCondition?: string, logMessage?: string) {
+    this.enabled = enabled;
+    this.condition = condition;
+    this.hitCondition = hitCondition;
+    this.logMessage = logMessage;
+  }
+}
+
 // Phase C: tree view + webview view enums
 enum TreeItemCollapsibleState { None = 0, Collapsed = 1, Expanded = 2 }
 class ThemeIcon {
@@ -397,6 +440,67 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   // call setDecorations later.
   const _decorationTypes = new Map<string, any>();
   let _nextDecorationTypeId = 1;
+
+  // ── Phase D registries ────────────────────────────────────────────────
+  interface DebugAdapterFactoryInst { type: string; factory: any }
+  interface DebugConfigProviderInst { type: string; provider: any; trigger?: number }
+  const _debugAdapterFactories = new Map<string, DebugAdapterFactoryInst>();
+  const _debugConfigProviders = new Map<string, DebugConfigProviderInst[]>();
+  const _activeDebugSessions = new Map<string, any>();
+  const onDidStartDebugSession = new VSCodeEvent<any>('onDidStartDebugSession');
+  const onDidTerminateDebugSession = new VSCodeEvent<any>('onDidTerminateDebugSession');
+  const onDidChangeActiveDebugSession = new VSCodeEvent<any>('onDidChangeActiveDebugSession');
+  const onDidChangeBreakpoints = new VSCodeEvent<any>('onDidChangeBreakpoints');
+  const onDidReceiveDebugSessionCustomEvent = new VSCodeEvent<any>('onDidReceiveDebugSessionCustomEvent');
+  let _activeDebugSession: any = undefined;
+  const _breakpoints: any[] = [];
+
+  // ── Phase E registries ────────────────────────────────────────────────
+  interface TaskProviderInst { type: string; provider: any }
+  const _taskProviders = new Map<string, TaskProviderInst>();
+  const _terminals = new Map<string, any>();
+  let _nextTerminalId = 1;
+  const onDidOpenTerminal = new VSCodeEvent<any>('onDidOpenTerminal');
+  const onDidCloseTerminal = new VSCodeEvent<any>('onDidCloseTerminal');
+  const onDidStartTask = new VSCodeEvent<any>('onDidStartTask');
+  const onDidEndTask = new VSCodeEvent<any>('onDidEndTask');
+
+  // ── Phase F registries ────────────────────────────────────────────────
+  interface SourceControlInst {
+    id: string; label: string; rootUri?: any;
+    inputBox: any; resourceGroups: Map<string, any>;
+    quickDiffProvider?: any;
+    statusBarCommands?: any[];
+    count: number;
+  }
+  const _sourceControls = new Map<string, SourceControlInst>();
+  let _nextScmGroupId = 1;
+
+  // ── Phase G registries ────────────────────────────────────────────────
+  interface TestControllerInst {
+    id: string; label: string; items: Map<string, any>;
+    runProfiles: Map<string, any>;
+    refreshHandler?: () => any;
+    resolveHandler?: (item: any) => any;
+  }
+  const _testControllers = new Map<string, TestControllerInst>();
+  let _nextTestProfileId = 1;
+  let _nextTestRunId = 1;
+
+  // ── Phase I registries ────────────────────────────────────────────────
+  interface CustomEditorProviderInst { viewType: string; provider: any }
+  const _customEditorProviders = new Map<string, CustomEditorProviderInst>();
+
+  // ── Phase H registries ────────────────────────────────────────────────
+  interface NotebookControllerInst {
+    id: string; viewType: string; label: string;
+    executeHandler?: (cells: any[], notebook: any, controller: any) => any;
+    interruptHandler?: (notebook: any) => any;
+    supportedLanguages?: string[];
+    supportsExecutionOrder?: boolean;
+  }
+  const _notebookControllers = new Map<string, NotebookControllerInst>();
+  const _notebookSerializers = new Map<string, any>();
 
   // ── Phase C registries ────────────────────────────────────────────────
   // Tree data providers keyed by view id (from contributes.views).
@@ -886,6 +990,14 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     ThemeIcon,
     ThemeColor,
     EventEmitter: VSCodeEventEmitter,
+    // Phase D: debug
+    DebugAdapterExecutable,
+    DebugAdapterServer,
+    DebugAdapterNamedPipeServer,
+    DebugAdapterInlineImplementation,
+    DebugConsoleMode,
+    SourceBreakpoint,
+    FunctionBreakpoint,
 
     // ── workspace ──────────────────────────────────────────────────────
     workspace: {
@@ -1259,6 +1371,67 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         };
       },
 
+      // ── Phase I: custom editors ──────────────────────────────────
+      registerCustomEditorProvider(viewType: string, provider: any, options?: any) {
+        rpcRequest('customEditor/registerProvider', { viewType, options: options || {} }).catch(() => {});
+        // We track a minimal in-shim record so resolveCustomEditor can
+        // route incoming open requests; the bridge mounts the iframe
+        // panel and round-trips fileToWebviewMessage / webviewToFile.
+        const inst = { viewType, provider };
+        _customEditorProviders.set(viewType, inst);
+        return { dispose() { _customEditorProviders.delete(viewType); rpcRequest('customEditor/disposeProvider', { viewType }).catch(() => {}); } };
+      },
+      registerFileDecorationProvider(provider: any) {
+        // File decorations (badges in the file explorer). Phase I v1
+        // just acknowledges; rendering is wired in extension-decorations
+        // as a follow-up.
+        rpcRequest('fileDecorations/registerProvider', {}).catch(() => {});
+        void provider;
+        return { dispose: () => {} };
+      },
+
+      // ── Phase E.E2: terminal ─────────────────────────────────────
+      onDidOpenTerminal: onDidOpenTerminal.event,
+      onDidCloseTerminal: onDidCloseTerminal.event,
+      get terminals() { return [..._terminals.values()]; },
+      get activeTerminal() {
+        const arr = [..._terminals.values()];
+        return arr.length > 0 ? arr[arr.length - 1] : undefined;
+      },
+      createTerminal(nameOrOptions: any, shellPath?: string, shellArgs?: string[]) {
+        const opts = typeof nameOrOptions === 'string'
+          ? { name: nameOrOptions, shellPath, shellArgs }
+          : (nameOrOptions || {});
+        const tid = `term-${_nextTerminalId++}`;
+        const term: any = {
+          name: opts.name || 'extension',
+          processId: Promise.resolve(undefined),
+          creationOptions: opts,
+          exitStatus: undefined,
+          state: { isInteractedWith: false },
+          shellIntegration: undefined,
+          sendText(text: string, addNewLine = true) {
+            rpcRequest('terminal/sendText', { id: tid, text, addNewLine }).catch(() => {});
+          },
+          show(preserveFocus?: boolean) {
+            rpcRequest('terminal/show', { id: tid, preserveFocus }).catch(() => {});
+          },
+          hide() { rpcRequest('terminal/hide', { id: tid }).catch(() => {}); },
+          dispose() {
+            _terminals.delete(tid);
+            rpcRequest('terminal/dispose', { id: tid }).catch(() => {});
+            onDidCloseTerminal.fire(term);
+          },
+        };
+        _terminals.set(tid, term);
+        rpcRequest('terminal/create', {
+          id: tid, name: term.name, cwd: opts.cwd,
+          shellPath: opts.shellPath, shellArgs: opts.shellArgs, env: opts.env,
+        }).catch(() => {});
+        onDidOpenTerminal.fire(term);
+        return term;
+      },
+
       // Phase A.A2: decoration type registration. The extension calls
       // this once with a set of render options; we allocate an opaque
       // typeId and tell the bridge to translate the options into the
@@ -1399,6 +1572,357 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       openExternal: (uri: Uri) => rpcRequest('env/openExternal', { uri: uri.toString() }),
     },
 
+    // ── Phase D: debug ──────────────────────────────────────────────────
+    debug: {
+      get activeDebugSession() { return _activeDebugSession; },
+      get activeDebugConsole() {
+        return {
+          append(value: string) {
+            rpcRequest('debug/consoleAppend', { value, line: false }).catch(() => {});
+          },
+          appendLine(value: string) {
+            rpcRequest('debug/consoleAppend', { value, line: true }).catch(() => {});
+          },
+        };
+      },
+      get breakpoints() { return _breakpoints; },
+      onDidStartDebugSession: onDidStartDebugSession.event,
+      onDidTerminateDebugSession: onDidTerminateDebugSession.event,
+      onDidChangeActiveDebugSession: onDidChangeActiveDebugSession.event,
+      onDidChangeBreakpoints: onDidChangeBreakpoints.event,
+      onDidReceiveDebugSessionCustomEvent: onDidReceiveDebugSessionCustomEvent.event,
+      registerDebugAdapterDescriptorFactory(type: string, factory: any) {
+        _debugAdapterFactories.set(type, { type, factory });
+        rpcRequest('debug/registerAdapterFactory', { type }).catch(() => {});
+        return { dispose: () => { _debugAdapterFactories.delete(type); } };
+      },
+      registerDebugConfigurationProvider(type: string, provider: any, triggerKind?: number) {
+        const list = _debugConfigProviders.get(type) || [];
+        list.push({ type, provider, trigger: triggerKind });
+        _debugConfigProviders.set(type, list);
+        return { dispose: () => {
+          const arr = _debugConfigProviders.get(type) || [];
+          _debugConfigProviders.set(type, arr.filter((p) => p.provider !== provider));
+        } };
+      },
+      async startDebugging(_folder: any, nameOrConfig: any): Promise<boolean> {
+        // Resolve config: if a string, look up in launch.json; if an object, use directly.
+        const config = typeof nameOrConfig === 'string'
+          ? await rpcRequest('debug/resolveLaunchConfig', { name: nameOrConfig }).catch(() => null)
+          : nameOrConfig;
+        if (!config?.type) return false;
+        // Walk through registered providers' resolveDebugConfiguration hooks.
+        let resolved = config;
+        const providers = _debugConfigProviders.get(config.type) || [];
+        for (const p of providers) {
+          if (p.provider?.resolveDebugConfiguration) {
+            try {
+              const r = await Promise.resolve(p.provider.resolveDebugConfiguration(_folder, resolved));
+              if (r) resolved = r;
+            } catch { /* ignore */ }
+          }
+        }
+        // Resolve adapter descriptor via factory if present.
+        let descriptor: any = null;
+        const factory = _debugAdapterFactories.get(resolved.type);
+        if (factory?.factory?.createDebugAdapterDescriptor) {
+          try {
+            descriptor = await Promise.resolve(factory.factory.createDebugAdapterDescriptor({ id: 'transient', type: resolved.type, name: resolved.name, configuration: resolved }, undefined));
+          } catch (e: any) {
+            bridge.log(`debug.createDebugAdapterDescriptor(${resolved.type}) failed: ${e?.message || e}`);
+          }
+        }
+        // Forward to the bridge which spawns via dap.rs and creates the
+        // session record.
+        const result = await rpcRequest('debug/startSession', {
+          config: resolved,
+          descriptor: descriptor ? {
+            kind: descriptor instanceof DebugAdapterServer ? 'server'
+                 : descriptor instanceof DebugAdapterNamedPipeServer ? 'pipe'
+                 : descriptor instanceof DebugAdapterInlineImplementation ? 'inline'
+                 : 'executable',
+            command: descriptor?.command,
+            args: descriptor?.args,
+            options: descriptor?.options,
+            port: descriptor?.port,
+            host: descriptor?.host,
+            path: descriptor?.path,
+          } : null,
+        }).catch(() => null);
+        if (result?.sessionId) {
+          const session: any = {
+            id: result.sessionId,
+            type: resolved.type,
+            name: resolved.name || resolved.type,
+            workspaceFolder: _folder,
+            configuration: resolved,
+            customRequest: (cmd: string, args?: any) =>
+              rpcRequest('debug/customRequest', { sessionId: result.sessionId, command: cmd, args })
+                .catch(() => null),
+            getDebugProtocolBreakpoint: () => Promise.resolve(undefined),
+          };
+          _activeDebugSessions.set(result.sessionId, session);
+          _activeDebugSession = session;
+          onDidStartDebugSession.fire(session);
+          onDidChangeActiveDebugSession.fire(session);
+          return true;
+        }
+        return false;
+      },
+      async stopDebugging(session?: any): Promise<void> {
+        const id = session?.id ?? _activeDebugSession?.id;
+        if (!id) return;
+        await rpcRequest('debug/stopSession', { sessionId: id }).catch(() => {});
+        const s = _activeDebugSessions.get(id);
+        if (s) {
+          _activeDebugSessions.delete(id);
+          onDidTerminateDebugSession.fire(s);
+          if (_activeDebugSession?.id === id) {
+            _activeDebugSession = _activeDebugSessions.size > 0 ? _activeDebugSessions.values().next().value : undefined;
+            onDidChangeActiveDebugSession.fire(_activeDebugSession);
+          }
+        }
+      },
+      addBreakpoints(breakpoints: any[]) {
+        _breakpoints.push(...breakpoints);
+        rpcRequest('debug/addBreakpoints', { breakpoints: serializeBreakpoints(breakpoints) }).catch(() => {});
+        onDidChangeBreakpoints.fire({ added: breakpoints, removed: [], changed: [] });
+      },
+      removeBreakpoints(breakpoints: any[]) {
+        for (const bp of breakpoints) {
+          const i = _breakpoints.indexOf(bp);
+          if (i >= 0) _breakpoints.splice(i, 1);
+        }
+        rpcRequest('debug/removeBreakpoints', { breakpoints: serializeBreakpoints(breakpoints) }).catch(() => {});
+        onDidChangeBreakpoints.fire({ added: [], removed: breakpoints, changed: [] });
+      },
+      asDebugSourceUri(source: any) {
+        return Uri.parse(`debug:${source?.path || source}`);
+      },
+    },
+
+    // ── Phase E.E1: tasks ───────────────────────────────────────────────
+    tasks: {
+      registerTaskProvider(type: string, provider: any) {
+        _taskProviders.set(type, { type, provider });
+        rpcRequest('tasks/registerProvider', { type }).catch(() => {});
+        return { dispose: () => { _taskProviders.delete(type); } };
+      },
+      async fetchTasks(filter?: any): Promise<any[]> {
+        const all: any[] = [];
+        for (const inst of _taskProviders.values()) {
+          if (filter?.type && inst.type !== filter.type) continue;
+          try {
+            const t = await Promise.resolve(inst.provider.provideTasks?.({ isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) }));
+            if (Array.isArray(t)) all.push(...t);
+          } catch { /* ignore */ }
+        }
+        return all;
+      },
+      async executeTask(task: any): Promise<any> {
+        const result = await rpcRequest('tasks/execute', {
+          name: task?.name,
+          source: task?.source,
+          definition: task?.definition,
+          execution: task?.execution ? {
+            command: task.execution.commandLine || task.execution.command,
+            args: task.execution.args,
+            cwd: task.execution.options?.cwd,
+            env: task.execution.options?.env,
+          } : null,
+        }).catch(() => null);
+        const exec = {
+          task,
+          terminate: () => {
+            if (result?.executionId) rpcRequest('tasks/terminate', { executionId: result.executionId }).catch(() => {});
+          },
+        };
+        onDidStartTask.fire({ execution: exec });
+        return exec;
+      },
+      taskExecutions: [] as any[],
+      onDidStartTask: onDidStartTask.event,
+      onDidEndTask: onDidEndTask.event,
+      onDidStartTaskProcess: new VSCodeEvent<any>('onDidStartTaskProcess').event,
+      onDidEndTaskProcess: new VSCodeEvent<any>('onDidEndTaskProcess').event,
+    },
+
+    // ── Phase F: scm ────────────────────────────────────────────────────
+    scm: {
+      createSourceControl(id: string, label: string, rootUri?: any) {
+        const inst: SourceControlInst = {
+          id, label, rootUri,
+          resourceGroups: new Map(),
+          inputBox: {
+            value: '',
+            placeholder: '',
+            visible: true,
+          },
+          count: 0,
+        };
+        _sourceControls.set(id, inst);
+        rpcRequest('scm/createSourceControl', { id, label, rootUri: rootUri?.toString?.() }).catch(() => {});
+        return {
+          id, label, rootUri,
+          get inputBox() { return inst.inputBox; },
+          set count(v: number) { inst.count = v; rpcRequest('scm/setCount', { id, count: v }).catch(() => {}); },
+          set quickDiffProvider(v: any) { inst.quickDiffProvider = v; },
+          set statusBarCommands(v: any[]) { inst.statusBarCommands = v; rpcRequest('scm/setStatusBar', { id, commands: v }).catch(() => {}); },
+          createResourceGroup(groupId: string, groupLabel: string) {
+            const groupKey = `${id}:${groupId}:${_nextScmGroupId++}`;
+            const group = {
+              id: groupId, label: groupLabel, hideWhenEmpty: false,
+              resourceStates: [] as any[],
+              dispose() {
+                inst.resourceGroups.delete(groupKey);
+                rpcRequest('scm/disposeGroup', { groupKey }).catch(() => {});
+              },
+            };
+            inst.resourceGroups.set(groupKey, group);
+            rpcRequest('scm/createGroup', { id, groupId, groupLabel, groupKey }).catch(() => {});
+            // Define a setter via Object.defineProperty so assigning
+            // resourceStates pushes to the bridge.
+            Object.defineProperty(group, 'resourceStates', {
+              get() { return (this as any)._states || []; },
+              set(v: any[]) {
+                (this as any)._states = v;
+                rpcRequest('scm/setResourceStates', {
+                  groupKey,
+                  resources: (v || []).map((s: any) => ({
+                    resourceUri: s?.resourceUri?.toString?.(),
+                    decorations: s?.decorations,
+                    contextValue: s?.contextValue,
+                    command: s?.command,
+                  })),
+                }).catch(() => {});
+              },
+            });
+            return group;
+          },
+          dispose() {
+            _sourceControls.delete(id);
+            rpcRequest('scm/disposeSourceControl', { id }).catch(() => {});
+          },
+        };
+      },
+    },
+
+    // ── Phase G: tests ──────────────────────────────────────────────────
+    tests: {
+      createTestController(id: string, label: string) {
+        const inst: TestControllerInst = {
+          id, label,
+          items: new Map(),
+          runProfiles: new Map(),
+        };
+        _testControllers.set(id, inst);
+        rpcRequest('tests/createController', { id, label }).catch(() => {});
+        const controller = {
+          id, label,
+          items: {
+            add: (item: any) => { inst.items.set(item.id, item); rpcRequest('tests/addItem', { controllerId: id, item: serializeTestItem(item) }).catch(() => {}); },
+            delete: (itemId: string) => { inst.items.delete(itemId); rpcRequest('tests/removeItem', { controllerId: id, itemId }).catch(() => {}); },
+            replace: (items: any[]) => {
+              inst.items.clear();
+              for (const it of items) inst.items.set(it.id, it);
+              rpcRequest('tests/replaceItems', { controllerId: id, items: items.map(serializeTestItem) }).catch(() => {});
+            },
+            get: (itemId: string) => inst.items.get(itemId),
+            forEach: (cb: (it: any) => void) => { inst.items.forEach(cb); },
+            size: inst.items.size,
+            [Symbol.iterator]: () => inst.items.values(),
+          },
+          createTestItem(itemId: string, itemLabel: string, uri?: any) {
+            const item: any = {
+              id: itemId, label: itemLabel, uri,
+              children: { add: () => {}, delete: () => {}, replace: () => {}, get: () => undefined, forEach: () => {}, size: 0 },
+              parent: undefined,
+              tags: [],
+              canResolveChildren: false,
+              busy: false,
+              description: undefined,
+              error: undefined,
+              range: undefined,
+              sortText: undefined,
+            };
+            return item;
+          },
+          createRunProfile(profileLabel: string, kind: number, runHandler: any, isDefault?: boolean) {
+            const profileId = `prof-${_nextTestProfileId++}`;
+            const profile: any = { label: profileLabel, kind, runHandler, isDefault, profileId,
+              configureHandler: undefined, tag: undefined, supportsContinuousRun: false,
+              dispose() { inst.runProfiles.delete(profileId); rpcRequest('tests/disposeRunProfile', { controllerId: id, profileId }).catch(() => {}); },
+            };
+            inst.runProfiles.set(profileId, profile);
+            rpcRequest('tests/createRunProfile', { controllerId: id, profileId, label: profileLabel, kind, isDefault }).catch(() => {});
+            return profile;
+          },
+          createTestRun(request: any, name?: string, persist?: boolean) {
+            const runId = `run-${_nextTestRunId++}`;
+            rpcRequest('tests/startRun', { controllerId: id, runId, name }).catch(() => {});
+            return {
+              name: name || 'test run',
+              isPersisted: !!persist,
+              token: { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) },
+              enqueued: (test: any) => rpcRequest('tests/runState', { runId, testId: test?.id, state: 'enqueued' }).catch(() => {}),
+              started: (test: any) => rpcRequest('tests/runState', { runId, testId: test?.id, state: 'started' }).catch(() => {}),
+              skipped: (test: any) => rpcRequest('tests/runState', { runId, testId: test?.id, state: 'skipped' }).catch(() => {}),
+              passed: (test: any, duration?: number) => rpcRequest('tests/runState', { runId, testId: test?.id, state: 'passed', duration }).catch(() => {}),
+              failed: (test: any, message: any, duration?: number) => rpcRequest('tests/runState', { runId, testId: test?.id, state: 'failed', message, duration }).catch(() => {}),
+              errored: (test: any, message: any, duration?: number) => rpcRequest('tests/runState', { runId, testId: test?.id, state: 'errored', message, duration }).catch(() => {}),
+              appendOutput: (output: string, _location?: any, _test?: any) => rpcRequest('tests/runOutput', { runId, output }).catch(() => {}),
+              end: () => rpcRequest('tests/endRun', { runId }).catch(() => {}),
+            };
+          },
+          set refreshHandler(v: any) { inst.refreshHandler = v; },
+          set resolveHandler(v: any) { inst.resolveHandler = v; },
+          dispose() {
+            _testControllers.delete(id);
+            rpcRequest('tests/disposeController', { controllerId: id }).catch(() => {});
+          },
+        };
+        return controller;
+      },
+    },
+
+    // ── Phase H: notebooks ──────────────────────────────────────────────
+    notebooks: {
+      createNotebookController(id: string, viewType: string, label: string, handler?: any) {
+        const inst: NotebookControllerInst = { id, viewType, label, executeHandler: handler };
+        _notebookControllers.set(id, inst);
+        rpcRequest('notebooks/createController', { id, viewType, label }).catch(() => {});
+        const controller: any = {
+          id, viewType, label,
+          set executeHandler(v: any) { inst.executeHandler = v; },
+          set interruptHandler(v: any) { inst.interruptHandler = v; },
+          set supportedLanguages(v: string[]) { inst.supportedLanguages = v; rpcRequest('notebooks/updateController', { id, supportedLanguages: v }).catch(() => {}); },
+          set supportsExecutionOrder(v: boolean) { inst.supportsExecutionOrder = v; },
+          createNotebookCellExecution(cell: any) {
+            const start = Date.now();
+            return {
+              executionOrder: undefined,
+              start: (startTime?: number) => rpcRequest('notebooks/cellExecStart', { id, cellIndex: cell?.index, startTime: startTime || start }).catch(() => {}),
+              end: (success?: boolean, endTime?: number) => rpcRequest('notebooks/cellExecEnd', { id, cellIndex: cell?.index, success, endTime: endTime || Date.now() }).catch(() => {}),
+              clearOutput: () => rpcRequest('notebooks/cellClearOutput', { id, cellIndex: cell?.index }).catch(() => {}),
+              replaceOutput: (out: any) => rpcRequest('notebooks/cellReplaceOutput', { id, cellIndex: cell?.index, output: serializeNotebookOutput(out) }).catch(() => {}),
+              appendOutput: (out: any) => rpcRequest('notebooks/cellAppendOutput', { id, cellIndex: cell?.index, output: serializeNotebookOutput(out) }).catch(() => {}),
+              token: { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) },
+            };
+          },
+          dispose() {
+            _notebookControllers.delete(id);
+            rpcRequest('notebooks/disposeController', { id }).catch(() => {});
+          },
+        };
+        return controller;
+      },
+      registerNotebookSerializer(notebookType: string, serializer: any) {
+        _notebookSerializers.set(notebookType, serializer);
+        rpcRequest('notebooks/registerSerializer', { notebookType }).catch(() => {});
+        return { dispose: () => { _notebookSerializers.delete(notebookType); } };
+      },
+    },
+
     // ── Phase B.B1: chat ────────────────────────────────────────────────
     // Chat participants register themselves here. OPIDE's chat panel
     // surfaces them as `@<id>` mentions; user prompts are dispatched
@@ -1480,7 +2004,11 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
                 })),
                 options: options || {},
               });
-              const text = chunks.length > 0 ? chunks.join('') : (result?.text || '');
+              // If no streaming chunks were emitted, fall back to the
+              // final text the bridge returned. Either way, expose
+              // both `text` (async iterable of strings) and `stream`
+              // for compatibility with extensions that read either.
+              if (chunks.length === 0 && result?.text) chunks.push(result.text);
               const asyncIter = {
                 async *[Symbol.asyncIterator]() {
                   for (const c of chunks) yield c;
@@ -1491,9 +2019,9 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
                 stream: asyncIter,
               };
             } finally {
-              // bridge.onMessage doesn't return an unsubscribe; the
-              // listener stays attached but is harmless after the
-              // request completes (we filter by requestId).
+              // CC1 fix: detach the chunk listener so we don't leak
+              // handlers across LM calls.
+              bridge.offMessage(onChunk);
             }
           },
           async countTokens(text: string): Promise<number> {
@@ -1561,6 +2089,58 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     },
   };
 
+  // ── Helper serializers ─────────────────────────────────────────────
+  function serializeBreakpoints(bps: any[]): any[] {
+    return (bps || []).map((bp: any) => {
+      if (bp instanceof SourceBreakpoint) {
+        return {
+          kind: 'source',
+          uri: bp.location?.uri?.toString?.(),
+          line: bp.location?.range?.start?.line ?? 0,
+          column: bp.location?.range?.start?.character ?? 0,
+          enabled: bp.enabled,
+          condition: bp.condition,
+          hitCondition: bp.hitCondition,
+          logMessage: bp.logMessage,
+        };
+      }
+      if (bp instanceof FunctionBreakpoint) {
+        return {
+          kind: 'function',
+          functionName: bp.functionName,
+          enabled: bp.enabled,
+          condition: bp.condition,
+          hitCondition: bp.hitCondition,
+          logMessage: bp.logMessage,
+        };
+      }
+      return { kind: 'unknown' };
+    });
+  }
+  function serializeTestItem(it: any): any {
+    return {
+      id: it?.id,
+      label: it?.label,
+      uri: it?.uri?.toString?.(),
+      description: it?.description,
+      busy: it?.busy,
+      canResolveChildren: it?.canResolveChildren,
+      tags: (it?.tags || []).map((t: any) => t?.id ?? String(t)),
+      range: it?.range,
+    };
+  }
+  function serializeNotebookOutput(out: any): any {
+    if (!out) return out;
+    if (Array.isArray(out)) return out.map(serializeNotebookOutput);
+    return {
+      id: out.id,
+      items: (out.items || []).map((item: any) => ({
+        mime: item.mime,
+        data: typeof item.data === 'string' ? item.data : Buffer.from(item.data || []).toString('base64'),
+      })),
+      metadata: out.metadata,
+    };
+  }
   return api;
 }
 

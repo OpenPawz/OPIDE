@@ -131,13 +131,85 @@ async function main() {
     bridge.log(`  ${ext.id} — main: ${ext.main ? 'yes' : 'no (web-only)'}`);
   }
 
-  // Activate all extensions with '*' activation event
+  // ── CC1: Activation events ───────────────────────────────────────────
+  //
+  // VS Code activates extensions lazily based on `activationEvents` in
+  // their package.json. The classic events:
+  //   - "*"                       → on startup (deprecated but common)
+  //   - "onStartupFinished"       → after workbench finishes loading
+  //   - "onLanguage:python"       → when a file of that language opens
+  //   - "onCommand:foo.bar"       → when foo.bar is invoked
+  //   - "onView:treeId"           → when a view becomes visible
+  //   - "workspaceContains:**/*.x"→ when a file matching pattern exists
+  //   - "onDebug" / "onDebugResolve:python" → debug-related triggers
+  //   - "onChat:participantId"    → OPIDE-specific: when a chat
+  //     participant is mentioned (Phase B.B1).
+  //
+  // Phase v1 covers `*`, `onStartupFinished`, `workspaceContains:`, and
+  // `onLanguage:` (with the language list driven by file extensions on
+  // workspace contents). Lazy `onCommand:` activation runs through the
+  // 'commands/execute' handler below — if the command is owned by an
+  // unactivated extension we activate first.
+  // -------------------------------------------------------------------
+
+  function matchesEager(ae: string): boolean {
+    if (ae === '*' || ae === 'onStartupFinished' || ae === 'onUri') return true;
+    if (ae.startsWith('workspaceContains:')) return matchesWorkspaceContains(ae.split(':', 2)[1] || '');
+    if (ae === 'onDebug') return false; // wait for actual debug session
+    return false;
+  }
+
+  function matchesWorkspaceContains(pattern: string): boolean {
+    if (!workspacePath || !pattern) return false;
+    // Cheap glob check: split pattern on '/' and walk; for the '**/*.ext'
+    // common case we just look for a file with that extension anywhere.
+    try {
+      const fs = require('fs');
+      const pathLib = require('path');
+      const extMatch = pattern.match(/\*\.([a-zA-Z0-9]+)/);
+      const targetExt = extMatch ? `.${extMatch[1]}` : null;
+      function walk(dir: string, depth: number): boolean {
+        if (depth > 4) return false;
+        let entries: any[] = [];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return false; }
+        for (const ent of entries) {
+          if (ent.name.startsWith('.') || ent.name === 'node_modules') continue;
+          const full = pathLib.join(dir, ent.name);
+          if (ent.isDirectory()) {
+            if (walk(full, depth + 1)) return true;
+          } else if (targetExt && ent.name.endsWith(targetExt)) {
+            return true;
+          } else if (ent.name === pattern) {
+            return true;
+          }
+        }
+        return false;
+      }
+      return walk(workspacePath, 0);
+    } catch {
+      return false;
+    }
+  }
+
   const eagerExtensions = extensions.filter((ext) =>
-    ext.activationEvents.includes('*') || ext.activationEvents.includes('onStartupFinished')
+    ext.activationEvents.some(matchesEager),
   );
 
   for (const ext of eagerExtensions) {
     await activateExtension(ext, vsCodeApi, bridge);
+  }
+
+  /** Activate every extension whose activationEvents match an event
+   * the user just triggered (onLanguage, onCommand, onView, etc).
+   * Idempotent — already-activated extensions are no-ops. */
+  async function activateMatching(eventName: string): Promise<void> {
+    for (const ext of extensions) {
+      if (activatedExtensions.has(ext.id)) continue;
+      const matched = ext.activationEvents.some((ae) => ae === eventName);
+      if (matched) {
+        await activateExtension(ext, vsCodeApi, bridge);
+      }
+    }
   }
 
   // Handle incoming RPC from OPIDE
@@ -146,6 +218,11 @@ async function main() {
     if (msg.method === 'commands/execute' && msg.id) {
       const { command, args } = msg.params || {};
       try {
+        // CC1: lazy onCommand activation. If no extension has registered
+        // the command yet but a scanned extension declares
+        // onCommand:<command> in activationEvents, activate it before
+        // dispatching.
+        await activateMatching(`onCommand:${command}`);
         const result = await vsCodeApi.commands.executeCommand(command, ...(args || []));
         bridge.send({ jsonrpc: '2.0', id: msg.id, result: result ?? null });
       } catch (err: any) {
@@ -155,6 +232,32 @@ async function main() {
           error: { code: -1, message: err.message || 'Command failed' },
         });
       }
+      return;
+    }
+
+    // CC1: language activation — fired by the workbench when a file
+    // opens. We call activateMatching with onLanguage:<id> so any
+    // language-targeted extensions activate before the file's first
+    // syntax/lint pass.
+    if (msg.method === 'activation/onLanguage' && msg.params?.languageId) {
+      await activateMatching(`onLanguage:${msg.params.languageId}`);
+      if (msg.id) bridge.send({ jsonrpc: '2.0', id: msg.id, result: null });
+      return;
+    }
+    if (msg.method === 'activation/onView' && msg.params?.viewId) {
+      await activateMatching(`onView:${msg.params.viewId}`);
+      if (msg.id) bridge.send({ jsonrpc: '2.0', id: msg.id, result: null });
+      return;
+    }
+    if (msg.method === 'activation/onChat' && msg.params?.participantId) {
+      await activateMatching(`onChat:${msg.params.participantId}`);
+      if (msg.id) bridge.send({ jsonrpc: '2.0', id: msg.id, result: null });
+      return;
+    }
+    if (msg.method === 'activation/onDebug') {
+      await activateMatching('onDebug');
+      if (msg.params?.type) await activateMatching(`onDebugResolve:${msg.params.type}`);
+      if (msg.id) bridge.send({ jsonrpc: '2.0', id: msg.id, result: null });
       return;
     }
 

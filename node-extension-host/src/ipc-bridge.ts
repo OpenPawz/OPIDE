@@ -21,6 +21,11 @@ export class IpcBridge {
     this.handlers.push(handler);
   }
 
+  offMessage(handler: MessageHandler): void {
+    const i = this.handlers.indexOf(handler);
+    if (i >= 0) this.handlers.splice(i, 1);
+  }
+
   send(msg: any): void {
     const json = JSON.stringify(msg);
     const header = `Content-Length: ${Buffer.byteLength(json, 'utf-8')}\r\n\r\n`;

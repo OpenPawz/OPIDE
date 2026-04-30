@@ -22,6 +22,7 @@ import {
   registerCustomView,
   ViewContainerLocation,
 } from '@codingame/monaco-vscode-workbench-service-override'
+import { notifyViewActivated } from './extension-bridge.ts'
 
 interface TreeNodeUI {
   nodeId: string
@@ -217,6 +218,9 @@ export function registerTreeProvider(
       location: ViewContainerLocation.AuxiliaryBar,
       icon: 'list-tree',
       renderBody: (root: HTMLElement) => {
+        // CC1: tell the sidecar a view became visible so onView:<id>
+        // extensions activate just-in-time. Cheap fire-and-forget.
+        notifyViewActivated(viewId)
         buildTreePanel(inst, root)
         return {
           dispose() {

@@ -18,6 +18,7 @@ import {
   registerCustomView,
   ViewContainerLocation,
 } from '@codingame/monaco-vscode-workbench-service-override'
+import { notifyViewActivated } from './extension-bridge.ts'
 
 interface WebviewViewInst {
   viewId: string
@@ -135,6 +136,7 @@ export function registerWebviewView(
       location: ViewContainerLocation.AuxiliaryBar,
       icon: 'browser',
       renderBody: (root: HTMLElement) => {
+        notifyViewActivated(viewId)
         buildBody(inst, root)
         return {
           dispose() {

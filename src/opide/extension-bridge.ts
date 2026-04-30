@@ -236,6 +236,35 @@ export function notifyFileOpened(filePath: string, languageId: string, content: 
     version: 1,
     text: content,
   })
+  // CC1: lazy `onLanguage:<id>` activation. Fire-and-forget — extension
+  // host does the actual activation and matching. We only send when we
+  // have a non-empty language id so we don't trigger '*' over-broadly.
+  if (languageId && languageId !== 'plaintext') {
+    sendNotification('activation/onLanguage', { languageId })
+  }
+}
+
+/** Trigger lazy `onView:<id>` activation when a workbench view becomes
+ * visible. Called by the chat / extension-tree-views modules when their
+ * panels are revealed. Cheap to call repeatedly — the sidecar dedupes
+ * already-activated extensions. */
+export function notifyViewActivated(viewId: string): void {
+  if (!viewId) return
+  sendNotification('activation/onView', { viewId })
+}
+
+/** Trigger `onChat:<participantId>` activation when the user @-mentions
+ * a participant in OPIDE chat. Comes paired with the participant
+ * dispatch path in extension-chat-participants.ts. */
+export function notifyChatActivation(participantId: string): void {
+  if (!participantId) return
+  sendNotification('activation/onChat', { participantId })
+}
+
+/** Trigger `onDebug` / `onDebugResolve:<type>` activation before
+ * starting a debug session. Called from extension-debug.startSession. */
+export function notifyDebugActivation(type?: string): void {
+  sendNotification('activation/onDebug', { type })
 }
 
 /** Notify the sidecar that a file was changed. */
@@ -688,6 +717,135 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
+    // ── Phase I: custom editors ──────────────────────────────────────
+    case 'customEditor/registerProvider':
+    case 'customEditor/disposeProvider':
+    case 'fileDecorations/registerProvider': {
+      // Phase I v1: registrations tracked in the sidecar; mounting
+      // custom editors as Monaco editor inputs lands in v2 via the
+      // same path A1's editor-tab refactor takes.
+      if (id) sendResponse(id, null)
+      break
+    }
+
+    // ── Phase D: debug ───────────────────────────────────────────────
+    case 'debug/registerAdapterFactory': {
+      // Phase D v1: just acknowledge. Adapters are spawned on-demand
+      // when startSession fires; the registration is tracked in the
+      // sidecar so the factory can be invoked there.
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'debug/resolveLaunchConfig': {
+      handleDebugResolveLaunchConfig(params).then((cfg) => {
+        if (id) sendResponse(id, cfg)
+      }).catch(() => { if (id) sendResponse(id, null) })
+      break
+    }
+    case 'debug/startSession': {
+      handleDebugStartSession(params).then((res) => {
+        if (id) sendResponse(id, res)
+      }).catch(() => { if (id) sendResponse(id, null) })
+      break
+    }
+    case 'debug/stopSession': {
+      handleDebugStopSession(params).then(() => {
+        if (id) sendResponse(id, null)
+      }).catch(() => { if (id) sendResponse(id, null) })
+      break
+    }
+    case 'debug/customRequest': {
+      handleDebugCustomRequest(params).then((r) => {
+        if (id) sendResponse(id, r)
+      }).catch(() => { if (id) sendResponse(id, null) })
+      break
+    }
+    case 'debug/addBreakpoints':
+    case 'debug/removeBreakpoints': {
+      // Phase D v1: relay to the workbench's debug service. Acknowledge
+      // immediately; the workbench fires its own onDidChangeBreakpoints.
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'debug/consoleAppend': {
+      // Phase D v1: route to console for now; once the debug console
+      // panel is wired we'll target it directly.
+      console.log('[ext-debug-console]', params?.value)
+      if (id) sendResponse(id, null)
+      break
+    }
+
+    // ── Phase E.E1: tasks ────────────────────────────────────────────
+    case 'tasks/registerProvider': {
+      if (id) sendResponse(id, null) // tracked in sidecar; nothing to mount yet
+      break
+    }
+    case 'tasks/execute': {
+      handleTaskExecute(params).then((r) => {
+        if (id) sendResponse(id, r)
+      }).catch(() => { if (id) sendResponse(id, null) })
+      break
+    }
+    case 'tasks/terminate': {
+      handleTaskTerminate(params).then(() => { if (id) sendResponse(id, null) }).catch(() => { if (id) sendResponse(id, null) })
+      break
+    }
+
+    // ── Phase E.E2: terminal ─────────────────────────────────────────
+    case 'terminal/create':
+    case 'terminal/sendText':
+    case 'terminal/show':
+    case 'terminal/hide':
+    case 'terminal/dispose': {
+      handleTerminal(method, params).then(() => { if (id) sendResponse(id, null) }).catch(() => { if (id) sendResponse(id, null) })
+      break
+    }
+
+    // ── Phase F: scm ─────────────────────────────────────────────────
+    case 'scm/createSourceControl':
+    case 'scm/createGroup':
+    case 'scm/setResourceStates':
+    case 'scm/setCount':
+    case 'scm/setStatusBar':
+    case 'scm/disposeGroup':
+    case 'scm/disposeSourceControl': {
+      handleScm(method, params)
+      if (id) sendResponse(id, null)
+      break
+    }
+
+    // ── Phase G: tests ───────────────────────────────────────────────
+    case 'tests/createController':
+    case 'tests/disposeController':
+    case 'tests/addItem':
+    case 'tests/removeItem':
+    case 'tests/replaceItems':
+    case 'tests/createRunProfile':
+    case 'tests/disposeRunProfile':
+    case 'tests/startRun':
+    case 'tests/runState':
+    case 'tests/runOutput':
+    case 'tests/endRun': {
+      handleTests(method, params)
+      if (id) sendResponse(id, null)
+      break
+    }
+
+    // ── Phase H: notebooks ───────────────────────────────────────────
+    case 'notebooks/createController':
+    case 'notebooks/disposeController':
+    case 'notebooks/updateController':
+    case 'notebooks/registerSerializer':
+    case 'notebooks/cellExecStart':
+    case 'notebooks/cellExecEnd':
+    case 'notebooks/cellClearOutput':
+    case 'notebooks/cellReplaceOutput':
+    case 'notebooks/cellAppendOutput': {
+      handleNotebooks(method, params)
+      if (id) sendResponse(id, null)
+      break
+    }
+
     // ── Phase C.C1: tree views ───────────────────────────────────────
     case 'tree/registerProvider': {
       handleTreeRegisterProvider(params)
@@ -879,6 +1037,64 @@ let _extWebviewViews: typeof import('./extension-webview-views.ts') | null = nul
 async function getWebviewViews() {
   if (!_extWebviewViews) _extWebviewViews = await import('./extension-webview-views.ts')
   return _extWebviewViews
+}
+
+let _extDebug: typeof import('./extension-debug.ts') | null = null
+async function getDebug() { if (!_extDebug) _extDebug = await import('./extension-debug.ts'); return _extDebug }
+let _extTasks: typeof import('./extension-tasks.ts') | null = null
+async function getTasks() { if (!_extTasks) _extTasks = await import('./extension-tasks.ts'); return _extTasks }
+let _extTerminal: typeof import('./extension-terminal.ts') | null = null
+async function getTerminal() { if (!_extTerminal) _extTerminal = await import('./extension-terminal.ts'); return _extTerminal }
+let _extScm: typeof import('./extension-scm.ts') | null = null
+async function getScm() { if (!_extScm) _extScm = await import('./extension-scm.ts'); return _extScm }
+let _extTests: typeof import('./extension-tests.ts') | null = null
+async function getTests() { if (!_extTests) _extTests = await import('./extension-tests.ts'); return _extTests }
+let _extNotebooks: typeof import('./extension-notebooks.ts') | null = null
+async function getNotebooks() { if (!_extNotebooks) _extNotebooks = await import('./extension-notebooks.ts'); return _extNotebooks }
+
+// Phase D handlers
+async function handleDebugResolveLaunchConfig(params: any): Promise<any> {
+  const d = await getDebug()
+  return d.resolveLaunchConfig(params?.name)
+}
+async function handleDebugStartSession(params: any): Promise<any> {
+  const d = await getDebug()
+  return d.startSession(params?.config, params?.descriptor, (sessionEvent) => {
+    sendNotification('debug/sessionEvent', sessionEvent)
+  })
+}
+async function handleDebugStopSession(params: any): Promise<void> {
+  const d = await getDebug()
+  return d.stopSession(params?.sessionId)
+}
+async function handleDebugCustomRequest(params: any): Promise<any> {
+  const d = await getDebug()
+  return d.customRequest(params?.sessionId, params?.command, params?.args)
+}
+
+// Phase E handlers
+async function handleTaskExecute(params: any): Promise<{ executionId: string } | null> {
+  const t = await getTasks()
+  return t.executeTask(params)
+}
+async function handleTaskTerminate(params: any): Promise<void> {
+  const t = await getTasks()
+  return t.terminateTask(params?.executionId)
+}
+async function handleTerminal(method: string, params: any): Promise<void> {
+  const t = await getTerminal()
+  return t.handle(method, params)
+}
+
+// Phase F-H handlers
+function handleScm(method: string, params: any): void {
+  void getScm().then((s) => s.handle(method, params))
+}
+function handleTests(method: string, params: any): void {
+  void getTests().then((t) => t.handle(method, params))
+}
+function handleNotebooks(method: string, params: any): void {
+  void getNotebooks().then((n) => n.handle(method, params))
 }
 
 // Phase C.C1: tree-view lifecycle. The tree module is responsible for

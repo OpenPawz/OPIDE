@@ -22,6 +22,7 @@ import { markRunCompleted } from './streaming.ts'
 import { gatherIdeContext as _gatherIdeContext, getWorkspace } from '../ide-context.ts'
 import { buildSystemPrompt } from './system-prompt.ts'
 import { detectMention, dispatchToParticipant } from '../extension-chat-participants.ts'
+import { notifyChatActivation } from '../extension-bridge.ts'
 
 export { buildSystemPrompt }
 
@@ -306,6 +307,13 @@ export async function doAbort(): Promise<void> {
 // which case doSend continues with the regular OPIDE engine flow.
 
 async function dispatchToExtensionParticipantIfMatched(content: string): Promise<boolean> {
+  // First: try to lazy-activate any extension with onChat:<id>. The
+  // sidecar matches and activates synchronously; we then re-check
+  // detectMention because the freshly-activated extension may have just
+  // registered the participant.
+  const earlyMatch = content.trimStart().match(/^@([a-zA-Z0-9._\-]+)/)
+  if (earlyMatch) notifyChatActivation(earlyMatch[1])
+
   const mention = detectMention(content)
   if (!mention) return false
   if (!S.textarea) return false
