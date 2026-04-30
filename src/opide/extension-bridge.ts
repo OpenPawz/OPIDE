@@ -657,11 +657,110 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
+    // ── Phase A: webview panels ──────────────────────────────────────
+    case 'webview/create': {
+      handleWebviewCreate(params).then(() => {
+        if (id) sendResponse(id, null)
+      }).catch((e) => {
+        console.warn('[ext-bridge] webview/create failed:', e)
+        if (id) sendResponse(id, null)
+      })
+      break
+    }
+    case 'webview/setHtml': {
+      handleWebviewSetHtml(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'webview/postMessage': {
+      handleWebviewPostMessage(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'webview/reveal': {
+      handleWebviewReveal(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'webview/dispose': {
+      handleWebviewDispose(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+
+    // ── Phase A: text editor decorations ─────────────────────────────
+    case 'decorations/createType': {
+      handleDecorationCreateType(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'decorations/setDecorations': {
+      handleDecorationSet(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'decorations/disposeType': {
+      handleDecorationDisposeType(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+
     default:
       console.log(`[ext-bridge] Unhandled notification: ${method}`)
       if (id) sendResponse(id, null)
       break
   }
+}
+
+// ─── Phase A handler imports ───────────────────────────────────────────────
+// Lazy-imported on first use so the modules don't load before the workbench
+// is ready (circular-import safety).
+let _extWebviews: typeof import('./extension-webviews.ts') | null = null
+async function getWebviews() {
+  if (!_extWebviews) _extWebviews = await import('./extension-webviews.ts')
+  return _extWebviews
+}
+let _extDecorations: typeof import('./extension-decorations.ts') | null = null
+async function getDecorations() {
+  if (!_extDecorations) _extDecorations = await import('./extension-decorations.ts')
+  return _extDecorations
+}
+
+async function handleWebviewCreate(params: any): Promise<void> {
+  const wv = await getWebviews()
+  wv.createWebviewPanel(params, (panelId, message) => {
+    // Webview → extension. Wire the iframe's outgoing postMessage events
+    // back through the JSON-RPC notification stream.
+    sendNotification('webview/messageFromWebview', { panelId, message })
+  }, (panelId) => {
+    sendNotification('webview/didDispose', { panelId })
+  }, (panelId, viewState) => {
+    sendNotification('webview/didChangeViewState', { panelId, ...viewState })
+  })
+}
+function handleWebviewSetHtml(params: any): void {
+  void getWebviews().then((wv) => wv.setWebviewHtml(params?.panelId, params?.html ?? ''))
+}
+function handleWebviewPostMessage(params: any): void {
+  void getWebviews().then((wv) => wv.postMessageToWebview(params?.panelId, params?.message))
+}
+function handleWebviewReveal(params: any): void {
+  void getWebviews().then((wv) => wv.revealWebviewPanel(params?.panelId))
+}
+function handleWebviewDispose(params: any): void {
+  void getWebviews().then((wv) => wv.disposeWebviewPanel(params?.panelId))
+}
+
+function handleDecorationCreateType(params: any): void {
+  void getDecorations().then((d) => d.createDecorationType(params?.typeId, params?.options))
+}
+function handleDecorationSet(params: any): void {
+  void getDecorations().then((d) =>
+    d.setDecorations(params?.uri, params?.typeId, params?.ranges || []),
+  )
+}
+function handleDecorationDisposeType(params: any): void {
+  void getDecorations().then((d) => d.disposeDecorationType(params?.typeId))
 }
 
 // ─── In-memory secret store ─────────────────────────────────────────────────

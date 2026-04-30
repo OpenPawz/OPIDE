@@ -295,6 +295,17 @@ enum CompletionItemKind {
   Constant = 20, Struct = 21, Event = 22, Operator = 23, TypeParameter = 24,
 }
 
+// Phase A: decoration enums. These are passed by value through the IPC and
+// translated to Monaco constants in the bridge; we just need to expose the
+// numeric values that match the public VS Code API contract.
+enum OverviewRulerLane { Left = 1, Center = 2, Right = 4, Full = 7 }
+enum DecorationRangeBehavior {
+  OpenOpen = 0, ClosedClosed = 1, OpenClosed = 2, ClosedOpen = 3,
+}
+enum TextEditorCursorStyle {
+  Line = 1, Block = 2, Underline = 3, LineThin = 4, BlockOutline = 5, UnderlineThin = 6,
+}
+
 // ─── Build the API ───────────────────────────────────────────────────────────
 
 let _nextRequestId = 1;
@@ -357,6 +368,33 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   // Current active editor state
   let _activeTextEditor: any = undefined;
 
+  // ── Phase A registries ────────────────────────────────────────────────
+  // Decoration type registry. Each createTextEditorDecorationType allocates
+  // a unique key the bridge uses to identify the decoration type when we
+  // call setDecorations later.
+  const _decorationTypes = new Map<string, any>();
+  let _nextDecorationTypeId = 1;
+
+  // Webview panel registry. Each createWebviewPanel allocates a panelId
+  // the bridge uses to address that panel. Reverse direction (webview →
+  // extension) routes through 'webview/messageFromWebview' notifications
+  // tagged with the same panelId.
+  interface WebviewPanelInst {
+    panelId: string;
+    viewType: string;
+    title: string;
+    htmlValue: string;
+    onDidReceiveMessageEvent: VSCodeEvent<any>;
+    onDidDisposeEvent: VSCodeEvent<void>;
+    onDidChangeViewStateEvent: VSCodeEvent<any>;
+    disposed: boolean;
+    visible: boolean;
+    active: boolean;
+    extPath: string;
+  }
+  const _webviewPanels = new Map<string, WebviewPanelInst>();
+  let _nextPanelId = 1;
+
   function handleNotification(method: string, params: any) {
     switch (method) {
       case 'textDocument/didOpen': {
@@ -394,6 +432,39 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         onDidChangeConfig.fire(params);
         break;
 
+      // Phase A: round-trip messages from the webview iframe back to the
+      // extension. The bridge fires this with { panelId, message } so we
+      // can dispatch to the panel's onDidReceiveMessage event emitter.
+      case 'webview/messageFromWebview': {
+        const panel = _webviewPanels.get(params?.panelId);
+        if (panel && !panel.disposed) {
+          panel.onDidReceiveMessageEvent.fire(params?.message);
+        }
+        break;
+      }
+      // Bridge tells us the user closed the panel UI (X button etc).
+      case 'webview/didDispose': {
+        const panel = _webviewPanels.get(params?.panelId);
+        if (panel && !panel.disposed) {
+          panel.disposed = true;
+          panel.onDidDisposeEvent.fire(undefined as any);
+        }
+        break;
+      }
+      // View-state changes (visible / focused) for chrome management.
+      case 'webview/didChangeViewState': {
+        const panel = _webviewPanels.get(params?.panelId);
+        if (panel && !panel.disposed) {
+          panel.visible = !!params?.visible;
+          panel.active = !!params?.active;
+          panel.onDidChangeViewStateEvent.fire({
+            webviewPanel: panel,
+            visible: panel.visible,
+            active: panel.active,
+          });
+        }
+        break;
+      }
       case 'editor/didChangeActive': {
         if (!params?.uri) {
           _activeTextEditor = undefined;
@@ -458,7 +529,33 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
             return true;
           },
           revealRange: () => {},
-          setDecorations: () => {},
+          // Phase A: wire decoration application. Bridge translates the
+          // ranges + decorationType key into Monaco deltaDecorations on
+          // the editor's model. Called from extensions on every render
+          // pass (some extensions call this on every edit), so we keep
+          // the API fire-and-forget; failures are logged but don't throw.
+          setDecorations(decorationType: any, rangesOrOptions: any[]) {
+            const typeId = decorationType?._opideTypeId;
+            if (!typeId) return;
+            const ranges = (rangesOrOptions || []).map((r: any) => {
+              const range = r.range || r; // accept either DecorationOptions or Range
+              const hover = r.hoverMessage;
+              const renderOptions = r.renderOptions;
+              return {
+                range: {
+                  start: { line: range.start.line, character: range.start.character },
+                  end: { line: range.end.line, character: range.end.character },
+                },
+                hoverMessage: hover,
+                renderOptions,
+              };
+            });
+            rpcRequest('decorations/setDecorations', {
+              uri: params.uri,
+              typeId,
+              ranges,
+            }).catch((e) => bridge.log(`setDecorations failed: ${e}`));
+          },
         };
 
         bridge.log(`activeTextEditor set: ${params.uri} (${doc.lineCount} lines, ${doc.languageId})`);
@@ -485,6 +582,10 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     CompletionItemKind,
     TextEdit,
     TextDocument,
+    // Phase A: decoration enums
+    OverviewRulerLane,
+    DecorationRangeBehavior,
+    TextEditorCursorStyle,
 
     // ── workspace ──────────────────────────────────────────────────────
     workspace: {
@@ -618,11 +719,36 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         outputChannels.set(name, lines);
         return {
           name,
-          append(value: string) { lines.push(value); bridge.log(`[output:${name}] ${value}`); },
-          appendLine(value: string) { lines.push(value + '\n'); bridge.log(`[output:${name}] ${value}`); },
-          clear() { lines.length = 0; },
+          append(value: string) {
+            lines.push(value);
+            // Stream incremental output to the panel so it scrolls live
+            // instead of only filling on show(). Most extensions append
+            // continuously while a long task runs (lint, build, test).
+            rpcRequest('window/showOutputChannel', {
+              name, content: value, append: true, show: false,
+            }).catch(() => {});
+          },
+          appendLine(value: string) {
+            const line = value + '\n';
+            lines.push(line);
+            rpcRequest('window/showOutputChannel', {
+              name, content: line, append: true, show: false,
+            }).catch(() => {});
+          },
+          clear() {
+            lines.length = 0;
+            rpcRequest('window/showOutputChannel', {
+              name, content: '', append: false, show: false,
+            }).catch(() => {});
+          },
           show() {
-            rpcRequest('window/showOutputChannel', { name, content: lines.join('') }).catch(() => {});
+            // Phase A.A3: pass show: true so the bridge actually opens
+            // the Output panel pinned to this channel. Previously the
+            // bridge received the message but had no `show` flag set,
+            // so it silently no-op'd.
+            rpcRequest('window/showOutputChannel', {
+              name, content: lines.join(''), append: false, show: true,
+            }).catch(() => {});
           },
           hide() {},
           dispose() { outputChannels.delete(name); },
@@ -659,15 +785,131 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         return rpcRequest('window/showTextDocument', { uri: doc?.uri?.fsPath || doc, column });
       },
 
+      // Phase A.A1: real webview panel backed by an iframe in the OPIDE
+      // workbench. The bridge mounts the iframe, injects html, and routes
+      // postMessage in both directions. Each panel gets a unique panelId
+      // we use as the addressing key for all RPC calls.
       createWebviewPanel(viewType: string, title: string, showOptions: any, options?: any) {
-        bridge.log(`createWebviewPanel not yet implemented: ${viewType}`);
-        return {
-          webview: { html: '', onDidReceiveMessage: () => ({ dispose: () => {} }), postMessage: () => {} },
-          dispose: () => {},
-          onDidDispose: () => ({ dispose: () => {} }),
-          reveal: () => {},
-          title,
+        const panelId = `panel-${_nextPanelId++}`;
+        const onDidReceiveMessageEvent = new VSCodeEvent<any>('webview/messageFromWebview');
+        const onDidDisposeEvent = new VSCodeEvent<void>('webview/didDispose');
+        const onDidChangeViewStateEvent = new VSCodeEvent<any>('webview/didChangeViewState');
+
+        const panel: WebviewPanelInst = {
+          panelId,
           viewType,
+          title,
+          htmlValue: '',
+          onDidReceiveMessageEvent,
+          onDidDisposeEvent,
+          onDidChangeViewStateEvent,
+          disposed: false,
+          visible: true,
+          active: true,
+          extPath: extensionPath,
+        };
+        _webviewPanels.set(panelId, panel);
+
+        // Tell the bridge to create the iframe panel. showOptions can be
+        // a ViewColumn or a {viewColumn, preserveFocus} record.
+        const viewColumn = typeof showOptions === 'number'
+          ? showOptions
+          : (showOptions?.viewColumn ?? ViewColumn.One);
+        const preserveFocus = typeof showOptions === 'object'
+          ? !!showOptions?.preserveFocus
+          : false;
+
+        rpcRequest('webview/create', {
+          panelId,
+          viewType,
+          title,
+          viewColumn,
+          preserveFocus,
+          options: options || {},
+          extensionPath,
+        }).catch((e) => bridge.log(`webview/create failed: ${e}`));
+
+        const webview = {
+          // The html setter pushes the new html to the bridge; the bridge
+          // injects it into the iframe via srcdoc with appropriate sandbox
+          // attributes derived from `options`.
+          get html() { return panel.htmlValue; },
+          set html(v: string) {
+            panel.htmlValue = v;
+            rpcRequest('webview/setHtml', { panelId, html: v }).catch((e) =>
+              bridge.log(`webview/setHtml failed: ${e}`),
+            );
+          },
+          // Extension-provided options { enableScripts, retainContextWhenHidden, ... }
+          options: options?.webviewOptions || {},
+          // postMessage extension → webview. Returns Promise<boolean> per
+          // VS Code contract; we resolve to true on dispatch.
+          postMessage: (message: any): Promise<boolean> => {
+            return rpcRequest('webview/postMessage', { panelId, message })
+              .then(() => true)
+              .catch(() => false);
+          },
+          // Extensions register a listener; the bridge fires events when
+          // the iframe sends `window.parent.postMessage(...)`.
+          onDidReceiveMessage: onDidReceiveMessageEvent.event,
+          // asWebviewUri converts a local fs URI to one the webview can
+          // load. Until we have a custom protocol handler we map fs paths
+          // to a `vscode-resource://` style URI; the bridge intercepts.
+          asWebviewUri(uri: Uri) {
+            return Uri.parse(`vscode-resource://${uri.fsPath}`);
+          },
+          // CSP source that the extension can include in its <meta http-equiv="Content-Security-Policy">
+          cspSource: 'vscode-resource:',
+        };
+
+        const wp = {
+          webview,
+          viewType,
+          title,
+          options: options || {},
+          viewColumn,
+          active: true,
+          visible: true,
+          onDidDispose: onDidDisposeEvent.event,
+          onDidChangeViewState: onDidChangeViewStateEvent.event,
+          reveal(column?: ViewColumn, preserveFocusFlag?: boolean) {
+            rpcRequest('webview/reveal', {
+              panelId,
+              viewColumn: column,
+              preserveFocus: !!preserveFocusFlag,
+            }).catch((e) => bridge.log(`webview/reveal failed: ${e}`));
+          },
+          dispose() {
+            if (panel.disposed) return;
+            panel.disposed = true;
+            _webviewPanels.delete(panelId);
+            rpcRequest('webview/dispose', { panelId }).catch(() => {});
+            onDidDisposeEvent.fire(undefined as any);
+          },
+        };
+
+        return wp;
+      },
+
+      // Phase A.A2: decoration type registration. The extension calls
+      // this once with a set of render options; we allocate an opaque
+      // typeId and tell the bridge to translate the options into the
+      // Monaco IModelDeltaDecoration shape on first setDecorations call.
+      createTextEditorDecorationType(options: any) {
+        const typeId = `dec-${_nextDecorationTypeId++}`;
+        _decorationTypes.set(typeId, options);
+        rpcRequest('decorations/createType', { typeId, options }).catch((e) =>
+          bridge.log(`decorations/createType failed: ${e}`),
+        );
+        return {
+          key: typeId,
+          // Internal key the editor's setDecorations reads to address
+          // the type when sending range data over RPC.
+          _opideTypeId: typeId,
+          dispose() {
+            _decorationTypes.delete(typeId);
+            rpcRequest('decorations/disposeType', { typeId }).catch(() => {});
+          },
         };
       },
     },
