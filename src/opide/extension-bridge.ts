@@ -2168,9 +2168,18 @@ function sendNotification(method: string, params: any): void {
 // Register a virtual extension that proxies ALL sidecar commands to the workbench.
 // Called once when extensionHost/ready arrives with the full command list.
 
+// Track which command ids we've already registered with the workbench
+// across the lifetime of THIS frontend page. Required because
+// restartExtensionHost re-runs registerAllCommandsInWorkbench but the
+// Monaco/codingame action service complains "Cannot register two
+// commands with the same id" if we try to register the same id twice.
+// We dedupe by id here; first registration wins, subsequent ready
+// events skip already-registered ids quietly.
+const _workbenchRegisteredCommands = new Set<string>()
+
 async function registerAllCommandsInWorkbench(): Promise<void> {
   const commands = [..._extensionCommands]
-  debugLog(`registerAllCommandsInWorkbench: ${commands.length} commands: ${commands.join(', ')}`)
+  debugLog(`registerAllCommandsInWorkbench: ${commands.length} commands (already-registered: ${_workbenchRegisteredCommands.size})`)
   if (commands.length === 0) return
 
   try {
@@ -2188,6 +2197,11 @@ async function registerAllCommandsInWorkbench(): Promise<void> {
     }
 
     for (const cmd of commands) {
+      // Skip already-registered ids without spamming the log. The
+      // sidecar restart path goes through here on every install /
+      // uninstall; without this guard each restart logs N "Cannot
+      // register two commands with the same id" errors.
+      if (_workbenchRegisteredCommands.has(cmd)) continue
       try {
         const prefix = cmd.includes('.') ? cmd.split('.')[0] : ''
         const suffix = cmd
@@ -2213,6 +2227,7 @@ async function registerAllCommandsInWorkbench(): Promise<void> {
             await sendRequest('commands/execute', { command: cmd, args: [] })
           }
         })
+        _workbenchRegisteredCommands.add(cmd)
         debugLog(`palette action: ${cmd} → "${title}"`)
       } catch (cmdErr) {
         debugLog(`skipped ${cmd}: ${cmdErr}`)

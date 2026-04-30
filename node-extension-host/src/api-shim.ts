@@ -318,6 +318,44 @@ enum TextEditorCursorStyle {
   Line = 1, Block = 2, Underline = 3, LineThin = 4, BlockOutline = 5, UnderlineThin = 6,
 }
 
+// Phase H surface: NotebookCellOutputItem is a top-level class even
+// for extensions that don't otherwise touch notebooks (Claude Code's
+// activation builds a sentinel value via
+// `NotebookCellOutputItem.error(Error("")).mime` to discover the
+// runtime's MIME type for serialised errors). Missing class throws
+// during activation; minimal shim with the static factories satisfies
+// the common access patterns.
+class NotebookCellOutputItem {
+  constructor(public data: Uint8Array, public mime: string) {}
+  static text(value: string, mime: string = 'text/plain'): NotebookCellOutputItem {
+    const buf = (typeof Buffer !== 'undefined')
+      ? Buffer.from(value, 'utf-8')
+      : new TextEncoder().encode(value);
+    return new NotebookCellOutputItem(buf as any, mime);
+  }
+  static json(value: any, mime: string = 'application/json'): NotebookCellOutputItem {
+    return NotebookCellOutputItem.text(JSON.stringify(value), mime);
+  }
+  static error(err: Error): NotebookCellOutputItem {
+    const payload = JSON.stringify({
+      name: err?.name ?? 'Error',
+      message: err?.message ?? '',
+      stack: err?.stack ?? '',
+    });
+    return NotebookCellOutputItem.text(payload, 'application/vnd.code.notebook.error');
+  }
+  static stdout(value: string): NotebookCellOutputItem {
+    return NotebookCellOutputItem.text(value, 'application/vnd.code.notebook.stdout');
+  }
+  static stderr(value: string): NotebookCellOutputItem {
+    return NotebookCellOutputItem.text(value, 'application/vnd.code.notebook.stderr');
+  }
+}
+
+class NotebookCellOutput {
+  constructor(public items: NotebookCellOutputItem[], public metadata?: any) {}
+}
+
 // Phase D: debug enums + descriptor types
 enum DebugConsoleMode { Separate = 0, MergeWithParent = 1 }
 class DebugAdapterExecutable {
@@ -1125,6 +1163,9 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     DebugConsoleMode,
     SourceBreakpoint,
     FunctionBreakpoint,
+    // Phase H: notebook value classes accessed at activation time
+    NotebookCellOutputItem,
+    NotebookCellOutput,
 
     // ── workspace ──────────────────────────────────────────────────────
     workspace: {
