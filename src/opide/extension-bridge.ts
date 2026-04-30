@@ -116,7 +116,37 @@ const _pendingRequests = new Map<
 // Registered extension commands (from sidecar → can be invoked from workbench)
 const _extensionCommands = new Set<string>()
 
+// Cache the args of the most recent successful start so restartExtensionHost
+// can re-spawn the sidecar without forcing the caller to remember the
+// workspace path. Set inside startExtensionHost; cleared on stop.
+let _lastStartArgs: { workspacePath: string; extensionsPath?: string } | null = null
+
 // ─── Public API ──────────────────────────────────────────────────────────────
+
+/** Stop the current sidecar and start a new one with the same args.
+ * Used after extension install/uninstall so the new sidecar's scan
+ * picks up the freshly-added directory. The bridge's
+ * extensionHost/ready handler then re-runs registerAllContributedViews
+ * with the new extension list, pre-mounting its views.
+ *
+ * Idempotent: if no sidecar has been started yet (e.g. user never
+ * opened a workspace), this is a no-op. */
+export async function restartExtensionHost(): Promise<void> {
+  const args = _lastStartArgs
+  if (!args) {
+    debugLog('restartExtensionHost: no prior start args; skipping')
+    return
+  }
+  debugLog('restartExtensionHost: stopping current sidecar')
+  try { await stopExtensionHost() } catch (e) {
+    debugLog(`restartExtensionHost: stop threw (continuing): ${e}`)
+  }
+  // Brief pause so the OS reaps the killed process and Tauri's manager
+  // releases its slot before we ask for a new one.
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  debugLog(`restartExtensionHost: starting fresh sidecar (ws=${args.workspacePath})`)
+  await startExtensionHost(args.workspacePath, args.extensionsPath)
+}
 
 /** Start the extension host sidecar for the given workspace. */
 export async function startExtensionHost(
@@ -129,6 +159,10 @@ export async function startExtensionHost(
   }
 
   const extPath = extensionsPath || await getExtensionsDirAsync()
+
+  // Cache for restartExtensionHost. We do this on every successful
+  // start so the cache always reflects the most recent good args.
+  _lastStartArgs = { workspacePath, extensionsPath: extPath }
 
   debugLog(`startExtensionHost called: ws=${workspacePath} ext=${extPath}`)
 

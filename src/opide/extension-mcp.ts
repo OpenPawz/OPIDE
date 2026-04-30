@@ -402,6 +402,20 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
     // Check for matching MCP adapter and register
     await registerAdapterForExtension(extensionId, extDir)
 
+    // The Node sidecar scanned ~/.opide/extensions ONCE at startup. To
+    // pick up an extension that was installed AFTER the sidecar started,
+    // we have to bounce the sidecar so its scanner re-runs. Without
+    // this, the freshly-installed extension never activates and its
+    // contributed views never pre-mount — symptom is "I installed it
+    // but nothing shows in the sidebar."
+    try {
+      await log(`Restarting extension host so ${extensionId} activates…`)
+      const { restartExtensionHost } = await import('./extension-bridge.ts')
+      await restartExtensionHost()
+    } catch (e) {
+      await log(`Extension host restart failed (non-fatal): ${e}`)
+    }
+
     return true
   } catch (e) {
     invoke('ext_host_log', { message: `[install] FAILED: ${e}` }).catch(() => {})
@@ -631,6 +645,15 @@ export async function uninstallExtension(extensionId: string): Promise<boolean> 
     }) as any
     if ((verifyResult?.stdout || '').trim() === 'removed') {
       await log(`Extension ${extensionId} uninstalled successfully`)
+      // Bounce the sidecar so its in-memory extension list drops the
+      // removed entry. Otherwise the host keeps a stale reference and
+      // the next activation event for that id would fail oddly.
+      try {
+        const { restartExtensionHost } = await import('./extension-bridge.ts')
+        await restartExtensionHost()
+      } catch (e) {
+        await log(`Extension host restart failed (non-fatal): ${e}`)
+      }
       return true
     } else {
       await log(`Failed to remove ${extDir}`)
