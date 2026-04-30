@@ -298,9 +298,47 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
     try {
       const metadata = JSON.parse(stdout)
       version = metadata.version || 'latest'
-      downloadUrl = metadata.files?.download
-        || `https://open-vsx.org/api/${publisher}/${name}/${version}/file/${extensionId}-${version}.vsix`
-      await log(`Found: ${metadata.displayName || name} v${version}`)
+
+      // Some extensions (Claude Code, ripgrep-based extensions, native
+      // binary wrappers) ship platform-specific VSIXes. The metadata's
+      // `files.download` is whatever the publisher uploaded LAST, which
+      // may not match our host architecture, and `metadata.targetPlatform`
+      // tells you which platform the response itself is keyed to.
+      // Re-fetch the platform-specific endpoint when our host platform
+      // doesn't match what the API returned, then pull download from there.
+      let targetPlatform = ''
+      try {
+        targetPlatform = await invoke<string>('get_target_platform')
+      } catch { /* unknown host — fall through to publisher default */ }
+
+      const responsePlatform: string = metadata.targetPlatform || ''
+      if (targetPlatform && responsePlatform && responsePlatform !== targetPlatform) {
+        // The default response was for the wrong platform; re-fetch ours.
+        // URL shape: /api/{publisher}/{name}/{targetPlatform}/{version}
+        await log(`Default API response is for ${responsePlatform}; re-fetching ${targetPlatform}...`)
+        try {
+          const platStdout = await invoke('ext_fetch_url_text', {
+            url: `https://open-vsx.org/api/${publisher}/${name}/${targetPlatform}/${version}`,
+          }) as string
+          const platMeta = JSON.parse(platStdout)
+          if (platMeta?.files?.download) {
+            downloadUrl = platMeta.files.download
+            version = platMeta.version || version
+          }
+        } catch (e) {
+          await log(`Platform-specific fetch failed (${e}); falling back to default VSIX.`)
+        }
+      }
+
+      // Either we already had the right platform, or the platform-specific
+      // re-fetch failed. Use whatever metadata.files.download is, falling
+      // back to a constructed /latest/file/ URL for extensions that don't
+      // populate the file map (rare).
+      if (!downloadUrl) {
+        downloadUrl = metadata.files?.download
+          || `https://open-vsx.org/api/${publisher}/${name}/${version}/file/${extensionId}-${version}.vsix`
+      }
+      await log(`Found: ${metadata.displayName || name} v${version}${targetPlatform ? ` (${targetPlatform})` : ''}`)
     } catch {
       downloadUrl = `https://open-vsx.org/api/${publisher}/${name}/latest/file/${extensionId}-latest.vsix`
       await log(`Metadata parse failed, trying direct download`)

@@ -57,6 +57,31 @@ async fn open_new_window(app: tauri::AppHandle, folder_path: Option<String>) -> 
     Ok(window_id)
 }
 
+/// Return the Open-VSX target-platform string for the current host
+/// (e.g. "darwin-arm64", "linux-x64"). Used by the extension installer
+/// to pick the right VSIX for extensions that ship native binaries
+/// per platform — Claude Code being the canonical example.
+///
+/// Open-VSX targetPlatform values match VS Code's marketplace:
+/// {linux,darwin,win32,alpine}-{x64,arm64}. Anything else falls
+/// through; the installer's fallback path handles unknown platforms
+/// by using the publisher's default `files.download`.
+#[tauri::command]
+fn get_target_platform() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "win32",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Increase tokio worker thread stack size from 2MB to 8MB.
@@ -270,6 +295,7 @@ pub fn run() {
             opide_ai::engine::frontend_bridge::ide_tool_response,
             opide_ai::engine::frontend_bridge::ide_edit_review_response,
             open_new_window,
+            get_target_platform,
             opide_shell::ide_mcp::ide_read_file,
             opide_shell::ide_mcp::ide_write_file,
             opide_shell::ide_mcp::ide_delete_file,
