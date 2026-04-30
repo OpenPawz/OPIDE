@@ -688,6 +688,60 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
+    // ── Phase C.C1: tree views ───────────────────────────────────────
+    case 'tree/registerProvider': {
+      handleTreeRegisterProvider(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'tree/disposeProvider': {
+      handleTreeDisposeProvider(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'tree/refresh': {
+      handleTreeRefresh(params)
+      break
+    }
+    case 'tree/childrenResponse': {
+      handleTreeChildrenResponse(params)
+      break
+    }
+    case 'tree/reveal': {
+      // Phase C v1: just acknowledge — selection-driven reveal needs
+      // tracking of which sidebar slot the view is mounted in. Land in
+      // v2 once we hook the workbench's view show/hide signals.
+      if (id) sendResponse(id, null)
+      break
+    }
+
+    // ── Phase C.C2: webview views (sidebar webviews) ────────────────
+    case 'webviewView/registerProvider': {
+      handleWebviewViewRegisterProvider(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'webviewView/disposeProvider': {
+      handleWebviewViewDisposeProvider(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'webviewView/setHtml': {
+      handleWebviewViewSetHtml(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'webviewView/postMessage': {
+      handleWebviewViewPostMessage(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'webviewView/reveal': {
+      handleWebviewViewReveal(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+
     // ── Phase B.B1: chat participants ────────────────────────────────
     case 'chat/registerParticipant': {
       handleChatRegisterParticipant(params)
@@ -814,6 +868,65 @@ let _extAuth: typeof import('./extension-auth.ts') | null = null
 async function getAuth() {
   if (!_extAuth) _extAuth = await import('./extension-auth.ts')
   return _extAuth
+}
+
+let _extTreeViews: typeof import('./extension-tree-views.ts') | null = null
+async function getTreeViews() {
+  if (!_extTreeViews) _extTreeViews = await import('./extension-tree-views.ts')
+  return _extTreeViews
+}
+let _extWebviewViews: typeof import('./extension-webview-views.ts') | null = null
+async function getWebviewViews() {
+  if (!_extWebviewViews) _extWebviewViews = await import('./extension-webview-views.ts')
+  return _extWebviewViews
+}
+
+// Phase C.C1: tree-view lifecycle. The tree module is responsible for
+// mounting the sidebar slot and lazily fetching children via the
+// callback we pass in (which round-trips through tree/getChildren).
+function handleTreeRegisterProvider(params: any): void {
+  void getTreeViews().then((tv) => tv.registerTreeProvider(
+    params?.viewId,
+    (parentNodeId, requestId) => {
+      sendNotification('tree/getChildren', {
+        viewId: params?.viewId, parentNodeId, requestId,
+      })
+    },
+    (nodeId) => {
+      sendNotification('tree/nodeClicked', { viewId: params?.viewId, nodeId })
+    },
+  ))
+}
+function handleTreeDisposeProvider(params: any): void {
+  void getTreeViews().then((tv) => tv.disposeTreeProvider(params?.viewId))
+}
+function handleTreeRefresh(params: any): void {
+  void getTreeViews().then((tv) => tv.refreshTree(params?.viewId))
+}
+function handleTreeChildrenResponse(params: any): void {
+  void getTreeViews().then((tv) => tv.deliverChildren(params?.requestId, params?.items || []))
+}
+
+// Phase C.C2: webview view lifecycle. Reuses the iframe rendering
+// helpers from extension-webview-views which mounts in a sidebar slot.
+function handleWebviewViewRegisterProvider(params: any): void {
+  void getWebviewViews().then((wv) => wv.registerWebviewView(params?.viewId, params?.options || {}, () => {
+    sendNotification('webviewView/resolve', { viewId: params?.viewId })
+  }, (message) => {
+    sendNotification('webviewView/messageFromWebview', { viewId: params?.viewId, message })
+  }))
+}
+function handleWebviewViewDisposeProvider(params: any): void {
+  void getWebviewViews().then((wv) => wv.disposeWebviewView(params?.viewId))
+}
+function handleWebviewViewSetHtml(params: any): void {
+  void getWebviewViews().then((wv) => wv.setWebviewViewHtml(params?.viewId, params?.html ?? ''))
+}
+function handleWebviewViewPostMessage(params: any): void {
+  void getWebviewViews().then((wv) => wv.postMessageToWebviewView(params?.viewId, params?.message))
+}
+function handleWebviewViewReveal(params: any): void {
+  void getWebviewViews().then((wv) => wv.revealWebviewView(params?.viewId))
 }
 
 // Phase B.B1: chat participant lifecycle. The participant module owns

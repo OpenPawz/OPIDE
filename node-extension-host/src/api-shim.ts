@@ -36,6 +36,18 @@ class VSCodeEvent<T> {
       };
     };
   }
+
+  dispose(): void {
+    this.emitter.removeAllListeners();
+  }
+}
+
+// Phase C: VS Code's public EventEmitter has the same surface as our
+// internal VSCodeEvent — fire(data), event (function-shaped subscriber),
+// dispose(). Expose a class so extensions that do
+// `new vscode.EventEmitter<T>()` get a working object back.
+class VSCodeEventEmitter<T> extends VSCodeEvent<T> {
+  constructor() { super('extension'); }
 }
 
 // ─── Core data types ─────────────────────────────────────────────────────────
@@ -306,6 +318,17 @@ enum TextEditorCursorStyle {
   Line = 1, Block = 2, Underline = 3, LineThin = 4, BlockOutline = 5, UnderlineThin = 6,
 }
 
+// Phase C: tree view + webview view enums
+enum TreeItemCollapsibleState { None = 0, Collapsed = 1, Expanded = 2 }
+class ThemeIcon {
+  constructor(public readonly id: string, public readonly color?: any) {}
+  static readonly File = new ThemeIcon('file');
+  static readonly Folder = new ThemeIcon('folder');
+}
+class ThemeColor {
+  constructor(public readonly id: string) {}
+}
+
 // ─── Build the API ───────────────────────────────────────────────────────────
 
 let _nextRequestId = 1;
@@ -374,6 +397,30 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   // call setDecorations later.
   const _decorationTypes = new Map<string, any>();
   let _nextDecorationTypeId = 1;
+
+  // ── Phase C registries ────────────────────────────────────────────────
+  // Tree data providers keyed by view id (from contributes.views).
+  // Each holds the provider instance + a serialized cache of its current
+  // tree so the bridge can avoid round-tripping for unchanged subtrees.
+  interface TreeProviderInst {
+    viewId: string;
+    provider: any;
+    onChangeListener?: (e: any) => void;
+  }
+  const _treeProviders = new Map<string, TreeProviderInst>();
+  // Track tree items by a synthetic node id so the bridge can request
+  // children of a specific parent without us having to serialize every
+  // node identity. Items are reused across getChildren calls; we keep
+  // them alive until the next refresh.
+  const _treeItems = new Map<string, { provider: TreeProviderInst; element: any; item: any }>();
+  let _nextTreeNodeId = 1;
+  // Webview view providers (sidebar webviews) keyed by view id.
+  interface WebviewViewProvider {
+    viewId: string;
+    provider: any;
+    options: any;
+  }
+  const _webviewViews = new Map<string, WebviewViewProvider>();
 
   // ── Phase B registries ────────────────────────────────────────────────
   // Chat participants: extensions register handlers here; OPIDE's chat
@@ -447,6 +494,133 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       case 'configuration/didChange':
         onDidChangeConfig.fire(params);
         break;
+
+      // ── Phase C: tree-view children request ────────────────────────
+      // The OPIDE sidebar asks for nodes under a parent (or root if
+      // parentNodeId is undefined). We resolve through the matching
+      // provider's getChildren / getTreeItem and reply via the request
+      // id the bridge supplied.
+      case 'tree/getChildren': {
+        (async () => {
+          const { viewId, parentNodeId, requestId } = params || {};
+          const inst = _treeProviders.get(viewId);
+          if (!inst) {
+            bridge.send({
+              jsonrpc: '2.0', method: 'tree/childrenResponse',
+              params: { requestId, items: [] },
+            });
+            return;
+          }
+          let parentElement: any = undefined;
+          if (parentNodeId && _treeItems.has(parentNodeId)) {
+            parentElement = _treeItems.get(parentNodeId)!.element;
+          }
+          let children: any[] = [];
+          try {
+            const r = inst.provider.getChildren?.(parentElement);
+            children = (await Promise.resolve(r)) || [];
+          } catch (e: any) {
+            bridge.log(`tree.getChildren(${viewId}) failed: ${e?.message || e}`);
+          }
+          const items = await Promise.all(children.map(async (el: any) => {
+            let treeItem: any = {};
+            try {
+              treeItem = (await Promise.resolve(inst.provider.getTreeItem?.(el))) || {};
+            } catch (e: any) {
+              bridge.log(`tree.getTreeItem(${viewId}) failed: ${e?.message || e}`);
+            }
+            const nodeId = `tree-${_nextTreeNodeId++}`;
+            _treeItems.set(nodeId, { provider: inst, element: el, item: treeItem });
+            return {
+              nodeId,
+              label: typeof treeItem.label === 'string' ? treeItem.label : (treeItem.label?.label ?? String(el)),
+              description: typeof treeItem.description === 'string' ? treeItem.description : undefined,
+              tooltip: typeof treeItem.tooltip === 'string' ? treeItem.tooltip : (treeItem.tooltip?.value),
+              collapsibleState: treeItem.collapsibleState ?? 0,
+              iconPath: treeItem.iconPath?.id ?? (typeof treeItem.iconPath === 'string' ? treeItem.iconPath : undefined),
+              contextValue: treeItem.contextValue,
+              command: treeItem.command ? {
+                command: treeItem.command.command,
+                title: treeItem.command.title,
+                arguments: treeItem.command.arguments,
+              } : undefined,
+              resourceUri: treeItem.resourceUri?.toString?.(),
+            };
+          }));
+          bridge.send({
+            jsonrpc: '2.0', method: 'tree/childrenResponse',
+            params: { requestId, items },
+          });
+        })();
+        break;
+      }
+      // Tree node click → run any command attached to the item, OR fire
+      // the provider's onDidChangeSelection if it's wired.
+      case 'tree/nodeClicked': {
+        const node = _treeItems.get(params?.nodeId);
+        if (!node) break;
+        const cmd = node.item?.command;
+        if (cmd?.command) {
+          // Dispatch through our local command registry (or bridge to
+          // the workbench if it's a built-in).
+          if (commandRegistry.has(cmd.command)) {
+            try { commandRegistry.get(cmd.command)!(...(cmd.arguments || [])); } catch { /* ignore */ }
+          } else {
+            rpcRequest('commands/execute', { command: cmd.command, args: cmd.arguments || [] }).catch(() => {});
+          }
+        }
+        break;
+      }
+      // ── Phase C: webview view (sidebar) lifecycle hooks ────────────
+      // The bridge tells us a sidebar webview has opened or been
+      // resolved; we call the extension's resolveWebviewView so it can
+      // inject html / hook events.
+      case 'webviewView/resolve': {
+        const inst = _webviewViews.get(params?.viewId);
+        if (!inst) break;
+        const onDidReceiveMessageEvent = new VSCodeEvent<any>('webviewView/messageFromWebview');
+        const onDidDisposeEvent = new VSCodeEvent<void>('webviewView/didDispose');
+        const view = {
+          viewType: params?.viewId,
+          webview: {
+            html: '',
+            options: inst.options?.webviewOptions || {},
+            cspSource: 'vscode-resource:',
+            asWebviewUri(uri: Uri) { return Uri.parse(`vscode-resource://${uri.fsPath}`); },
+            postMessage(msg: any) {
+              return rpcRequest('webviewView/postMessage', { viewId: params?.viewId, message: msg })
+                .then(() => true).catch(() => false);
+            },
+            onDidReceiveMessage: onDidReceiveMessageEvent.event,
+          },
+          onDidDispose: onDidDisposeEvent.event,
+          onDidChangeVisibility: new VSCodeEvent<void>('webviewView/visibility').event,
+          show: () => rpcRequest('webviewView/reveal', { viewId: params?.viewId }).catch(() => {}),
+          title: '',
+          description: '',
+          visible: true,
+          badge: undefined,
+        };
+        // Wire html setter
+        Object.defineProperty(view.webview, 'html', {
+          get() { return (view as any)._html || ''; },
+          set(v: string) {
+            (view as any)._html = v;
+            rpcRequest('webviewView/setHtml', { viewId: params?.viewId, html: v }).catch(() => {});
+          },
+        });
+        try {
+          inst.provider.resolveWebviewView?.(view, { state: undefined }, { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) });
+        } catch (e: any) {
+          bridge.log(`webviewView.resolve(${params?.viewId}) failed: ${e?.message || e}`);
+        }
+        break;
+      }
+      case 'webviewView/messageFromWebview': {
+        // No registry yet for individual view emitters — the bridge
+        // already routed it; we just log unknown views.
+        break;
+      }
 
       // ── Phase B: chat participant dispatch ────────────────────────
       // OPIDE's chat panel sends this when the user types `@<id> ...`.
@@ -707,6 +881,11 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     OverviewRulerLane,
     DecorationRangeBehavior,
     TextEditorCursorStyle,
+    // Phase C: tree + theming helpers
+    TreeItemCollapsibleState,
+    ThemeIcon,
+    ThemeColor,
+    EventEmitter: VSCodeEventEmitter,
 
     // ── workspace ──────────────────────────────────────────────────────
     workspace: {
@@ -1010,6 +1189,74 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         };
 
         return wp;
+      },
+
+      // Phase C.C1: Tree data providers. The view id must match a
+      // contributes.views entry from package.json so OPIDE can host
+      // the tree in the right sidebar slot. We register the provider
+      // and fire a refresh event whenever the extension calls
+      // emitter.fire(); the bridge re-fetches children from the root.
+      registerTreeDataProvider(viewId: string, provider: any) {
+        const inst: TreeProviderInst = { viewId, provider };
+        _treeProviders.set(viewId, inst);
+        rpcRequest('tree/registerProvider', { viewId }).catch(() => {});
+        if (provider.onDidChangeTreeData?.event ?? provider.onDidChangeTreeData) {
+          const eventEmitter: any = provider.onDidChangeTreeData?.event
+            ? provider.onDidChangeTreeData
+            : provider.onDidChangeTreeData;
+          // VS Code's TreeDataProvider exposes onDidChangeTreeData as a
+          // function; calling it with a listener subscribes. We forward
+          // changes by signalling the bridge to refresh from root.
+          if (typeof eventEmitter === 'function') {
+            inst.onChangeListener = eventEmitter((_e: any) => {
+              rpcRequest('tree/refresh', { viewId }).catch(() => {});
+            });
+          }
+        }
+        return {
+          dispose: () => {
+            _treeProviders.delete(viewId);
+            // Also drop any cached items belonging to this provider so
+            // they don't leak across re-registrations.
+            for (const [nid, rec] of _treeItems) {
+              if (rec.provider === inst) _treeItems.delete(nid);
+            }
+            rpcRequest('tree/disposeProvider', { viewId }).catch(() => {});
+          },
+        };
+      },
+
+      // Phase C.C2: Sidebar webview views. Same iframe infrastructure
+      // as createWebviewPanel (Phase A.A1) but mounted in a sidebar
+      // slot keyed by viewId. The bridge calls webviewView/resolve
+      // when the user reveals the view; the extension fills it in.
+      registerWebviewViewProvider(viewId: string, provider: any, options?: any) {
+        _webviewViews.set(viewId, { viewId, provider, options });
+        rpcRequest('webviewView/registerProvider', { viewId, options: options || {} }).catch(() => {});
+        return {
+          dispose: () => {
+            _webviewViews.delete(viewId);
+            rpcRequest('webviewView/disposeProvider', { viewId }).catch(() => {});
+          },
+        };
+      },
+
+      // VS Code also exposes createTreeView as a more advanced wrapper.
+      // For v1 this is a thin shim around registerTreeDataProvider that
+      // returns a TreeView-like object (refresh, reveal stubs).
+      createTreeView(viewId: string, options: any) {
+        const provider = options?.treeDataProvider;
+        const sub = provider ? this.registerTreeDataProvider(viewId, provider) : { dispose: () => {} };
+        return {
+          visible: true,
+          selection: [] as any[],
+          onDidChangeSelection: new VSCodeEvent<any>('onDidChangeSelection').event,
+          onDidChangeVisibility: new VSCodeEvent<any>('onDidChangeVisibility').event,
+          onDidExpandElement: new VSCodeEvent<any>('onDidExpandElement').event,
+          onDidCollapseElement: new VSCodeEvent<any>('onDidCollapseElement').event,
+          reveal: async () => { rpcRequest('tree/reveal', { viewId }).catch(() => {}); },
+          dispose: () => sub.dispose(),
+        };
       },
 
       // Phase A.A2: decoration type registration. The extension calls
