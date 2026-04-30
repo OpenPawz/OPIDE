@@ -356,6 +356,12 @@ async function main() {
   });
 
   // Send ready notification to OPIDE
+  // Includes the contributed view containers + view slots so the
+  // workbench can pre-mount them BEFORE the extension activates
+  // (VS Code's two-phase contribution model). The bridge wires
+  // activity-bar icons and reserves view slots; the extension's
+  // registerWebviewViewProvider / registerTreeDataProvider then
+  // attach to the existing slot when the user reveals the view.
   bridge.send({
     jsonrpc: '2.0',
     method: 'extensionHost/ready',
@@ -367,6 +373,8 @@ async function main() {
         hasMain: !!ext.main,
         activationEvents: ext.activationEvents,
         commands: (ext.contributes.commands || []).map((c) => c.command),
+        contributedViewContainers: ext.contributedViewContainers,
+        contributedViews: ext.contributedViews,
       })),
       activated: [...activatedExtensions.keys()],
     },

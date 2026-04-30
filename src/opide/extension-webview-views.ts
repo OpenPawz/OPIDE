@@ -19,6 +19,7 @@ import {
   ViewContainerLocation,
 } from '@codingame/monaco-vscode-workbench-service-override'
 import { notifyViewActivated } from './extension-bridge.ts'
+import { findPreMountedSlot, markSlotAttached } from './extension-contributed-views.ts'
 
 interface WebviewViewInst {
   viewId: string
@@ -128,6 +129,18 @@ export function registerWebviewView(
     onMessage,
   }
   _views.set(viewId, inst)
+
+  // Two-phase contribution model: if the view was pre-mounted from
+  // package.json contributes.views (P0), the slot already exists in
+  // the workbench. We attach to it here; we do NOT registerCustomView
+  // again because that would create a duplicate panel.
+  const preMounted = findPreMountedSlot(viewId)
+  if (preMounted && preMounted.type === 'webview') {
+    markSlotAttached(viewId, (root) => {
+      buildBody(inst, root)
+    })
+    return
+  }
 
   try {
     registerCustomView({

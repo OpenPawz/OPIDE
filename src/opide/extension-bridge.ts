@@ -57,6 +57,28 @@ interface ExtHostStatusEvent {
   detail: string
 }
 
+/** A view container declaration forwarded from the sidecar's
+ * package.json scan. Keep the shape in sync with
+ * node-extension-host/src/extension-scanner.ts:ContributedViewContainer. */
+export interface ExtContributedViewContainer {
+  surface: string
+  id: string
+  title: string
+  iconPath?: string
+  codiconId?: string
+}
+
+/** A view slot declaration. Same sync rule as above. */
+export interface ExtContributedView {
+  containerId: string
+  id: string
+  name: string
+  type: 'tree' | 'webview'
+  when?: string
+  visibility?: string
+  contextualTitle?: string
+}
+
 interface ExtensionInfo {
   id: string
   name: string
@@ -64,6 +86,8 @@ interface ExtensionInfo {
   hasMain: boolean
   activationEvents: string[]
   commands: string[]
+  contributedViewContainers?: ExtContributedViewContainer[]
+  contributedViews?: ExtContributedView[]
 }
 
 interface ReadyParams {
@@ -365,6 +389,15 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       }
       // Now register the proxy extension with ALL commands at once
       registerAllCommandsInWorkbench()
+      // VS Code's two-phase contribution model: pre-mount activity
+      // bar entries and view slots NOW, before any extension's
+      // activate() runs. The extension's registerWebviewViewProvider
+      // / registerTreeDataProvider call will later attach to the
+      // existing slot. Without this, sidebar-based extensions
+      // (Continue, Claude Code, Cline, GitLens, Test Explorer) never
+      // appear because they activate on `onView:<id>` which only
+      // fires when the user clicks a slot that was never mounted.
+      void registerAllContributedViews(ready.extensions)
       for (const cb of _readyListeners) {
         cb(ready.extensions)
       }
@@ -1049,6 +1082,32 @@ let _extWebviewViews: typeof import('./extension-webview-views.ts') | null = nul
 async function getWebviewViews() {
   if (!_extWebviewViews) _extWebviewViews = await import('./extension-webview-views.ts')
   return _extWebviewViews
+}
+let _extContributedViews: typeof import('./extension-contributed-views.ts') | null = null
+async function getContributedViews() {
+  if (!_extContributedViews) _extContributedViews = await import('./extension-contributed-views.ts')
+  return _extContributedViews
+}
+
+/** Walk every extension's contributedViewContainers + contributedViews
+ * and pre-mount the activity bar entries / view slots. Idempotent —
+ * the contributed-views module dedupes by (extensionId, viewId). */
+async function registerAllContributedViews(extensions: ExtensionInfo[]): Promise<void> {
+  try {
+    const cv = await getContributedViews()
+    for (const ext of extensions) {
+      const containers = ext.contributedViewContainers || []
+      const views = ext.contributedViews || []
+      if (containers.length === 0 && views.length === 0) continue
+      cv.registerExtensionContributions(ext.id, containers, views, (viewId: string) => {
+        // onView:<id> activation trigger. Fires when the user reveals
+        // a view; the sidecar matches and activates the owning extension.
+        sendNotification('activation/onView', { viewId })
+      })
+    }
+  } catch (e) {
+    debugLog(`registerAllContributedViews failed: ${e}`)
+  }
 }
 
 let _extDebug: typeof import('./extension-debug.ts') | null = null
@@ -1917,6 +1976,23 @@ async function handleCommandExecute(params: any): Promise<any> {
   try {
     const { command, args } = params || {}
     if (!command) return null
+
+    // setContext is the canonical way extensions flip context keys
+    // that gate view visibility (`when` clauses). VS Code routes it
+    // through the command service AND the IContextKeyService; the
+    // contributed-views module reads from its own mirror because we
+    // don't yet bind monaco-vscode-api's context key service. P0:
+    // mirror the value in extension-contributed-views and let the
+    // command service path also fire so the workbench's own internal
+    // state (file explorer hide/show, etc) sees the change.
+    if (command === 'setContext' && Array.isArray(args) && args.length >= 2) {
+      try {
+        const cv = await import('./extension-contributed-views.ts')
+        cv.setContextKey(String(args[0]), args[1])
+      } catch { /* ignore */ }
+      // Fall through so the command service's setContext also runs;
+      // monaco-vscode-api may use it internally.
+    }
 
     const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
     const { ICommandService } = await import(

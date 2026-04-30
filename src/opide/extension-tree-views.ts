@@ -23,6 +23,7 @@ import {
   ViewContainerLocation,
 } from '@codingame/monaco-vscode-workbench-service-override'
 import { notifyViewActivated } from './extension-bridge.ts'
+import { findPreMountedSlot, markSlotAttached } from './extension-contributed-views.ts'
 
 interface TreeNodeUI {
   nodeId: string
@@ -207,10 +208,17 @@ export function registerTreeProvider(
   }
   _trees.set(viewId, inst)
 
-  // Mount in the auxiliary bar (right side panel) for now. Once we wire
-  // contributes.viewsContainers from package.json we can place views
-  // in the proper container the extension declared. For Phase C v1
-  // this gets the API working.
+  // P0 two-phase model: prefer the slot pre-mounted from package.json
+  // contributes.views. If found, attach to it; if not, register a new
+  // custom view (the dynamic-only path that some extensions use).
+  const preMounted = findPreMountedSlot(viewId)
+  if (preMounted && preMounted.type === 'tree') {
+    markSlotAttached(viewId, (root) => {
+      buildTreePanel(inst, root)
+    })
+    return
+  }
+
   try {
     registerCustomView({
       id: `opide-ext-tree-${viewId}`,
