@@ -318,6 +318,157 @@ enum TextEditorCursorStyle {
   Line = 1, Block = 2, Underline = 3, LineThin = 4, BlockOutline = 5, UnderlineThin = 6,
 }
 
+// ── Coding-agent API surface ────────────────────────────────────────────
+// These classes / enums / values are accessed at module-load time by every
+// modern coding-agent extension (Claude Code, Continue, Cline, Cody, Copilot,
+// Tabnine). Missing any of them throws synchronously inside activate() before
+// the extension can register anything. Comprehensive shim batch — built
+// against a static analysis of Anthropic.claude-code's extension.js plus the
+// next layer of common patterns Continue/Cline use.
+
+/** `vscode.Disposable` — extensions construct via `Disposable.from(...)` and
+ * subclass; we just need a class with a callable dispose. */
+class VsCodeDisposable {
+  constructor(private _onDispose?: () => void) {}
+  dispose(): void { try { this._onDispose?.() } catch { /* ignore */ } }
+  static from(...disposables: { dispose(): void }[]): VsCodeDisposable {
+    return new VsCodeDisposable(() => {
+      for (const d of disposables) { try { d.dispose() } catch { /* ignore */ } }
+    });
+  }
+}
+
+/** `vscode.FileType` and `FileChangeType` — bitflag enums used by the file
+ * system provider API. Values match the public VS Code API contract. */
+enum FileType { Unknown = 0, File = 1, Directory = 2, SymbolicLink = 64 }
+enum FileChangeType { Changed = 1, Created = 2, Deleted = 3 }
+
+/** `vscode.FileSystemError` — extensions construct these in their own fs
+ * provider implementations. The static factories return Error subclasses
+ * with a `.code` property the workbench introspects. */
+class FileSystemError extends Error {
+  code: string;
+  constructor(messageOrUri?: any, code: string = 'Unknown') {
+    super(typeof messageOrUri === 'string' ? messageOrUri : (messageOrUri?.toString?.() ?? code));
+    this.code = code;
+    this.name = 'FileSystemError';
+  }
+  static FileNotFound(messageOrUri?: any) { return new FileSystemError(messageOrUri, 'FileNotFound'); }
+  static FileExists(messageOrUri?: any) { return new FileSystemError(messageOrUri, 'FileExists'); }
+  static FileNotADirectory(messageOrUri?: any) { return new FileSystemError(messageOrUri, 'FileNotADirectory'); }
+  static FileIsADirectory(messageOrUri?: any) { return new FileSystemError(messageOrUri, 'FileIsADirectory'); }
+  static NoPermissions(messageOrUri?: any) { return new FileSystemError(messageOrUri, 'NoPermissions'); }
+  static Unavailable(messageOrUri?: any) { return new FileSystemError(messageOrUri, 'Unavailable'); }
+}
+
+/** `vscode.TabInputText`, `TabInputTextDiff`, etc — value classes the
+ * workbench's tab API exposes. Minimal stubs so `instanceof` checks
+ * extensions perform don't blow up. */
+class TabInputText { constructor(public uri: any) {} }
+class TabInputTextDiff { constructor(public original: any, public modified: any) {} }
+class TabInputCustom { constructor(public uri: any, public viewType: string) {} }
+class TabInputWebview { constructor(public viewType: string) {} }
+class TabInputNotebook { constructor(public uri: any, public notebookType: string) {} }
+class TabInputNotebookDiff { constructor(public original: any, public modified: any, public notebookType: string) {} }
+class TabInputTerminal {}
+
+enum LogLevel { Off = 0, Trace = 1, Debug = 2, Info = 3, Warning = 4, Error = 5 }
+
+/** `vscode.MarkdownString` — used for hover content / chat content. */
+class MarkdownString {
+  value: string;
+  isTrusted?: boolean;
+  supportThemeIcons?: boolean;
+  supportHtml?: boolean;
+  constructor(value = '', supportThemeIcons = false) {
+    this.value = value;
+    this.supportThemeIcons = supportThemeIcons;
+  }
+  appendText(value: string) { this.value += value; return this; }
+  appendMarkdown(value: string) { this.value += value; return this; }
+  appendCodeblock(code: string, language?: string) {
+    this.value += `\n\`\`\`${language || ''}\n${code}\n\`\`\`\n`;
+    return this;
+  }
+}
+
+/** `vscode.Hover` — returned by hover providers. */
+class Hover {
+  constructor(public contents: any[], public range?: any) {
+    if (!Array.isArray(contents)) this.contents = [contents];
+  }
+}
+
+/** `vscode.CodeActionKind` is a hierarchical category string-ish object.
+ * We model the common kinds as instances; constructor accepts a string. */
+class CodeActionKind {
+  constructor(public value: string) {}
+  append(parts: string): CodeActionKind { return new CodeActionKind(`${this.value}.${parts}`); }
+  intersects(other: CodeActionKind): boolean { return other.value.startsWith(this.value) || this.value.startsWith(other.value); }
+  contains(other: CodeActionKind): boolean { return other.value.startsWith(this.value); }
+  static readonly Empty = new CodeActionKind('');
+  static readonly QuickFix = new CodeActionKind('quickfix');
+  static readonly Refactor = new CodeActionKind('refactor');
+  static readonly RefactorExtract = new CodeActionKind('refactor.extract');
+  static readonly RefactorInline = new CodeActionKind('refactor.inline');
+  static readonly RefactorRewrite = new CodeActionKind('refactor.rewrite');
+  static readonly Source = new CodeActionKind('source');
+  static readonly SourceOrganizeImports = new CodeActionKind('source.organizeImports');
+  static readonly SourceFixAll = new CodeActionKind('source.fixAll');
+  static readonly Notebook = new CodeActionKind('notebook');
+}
+
+class CodeAction {
+  edit?: any; diagnostics?: any[]; command?: any; isPreferred?: boolean;
+  constructor(public title: string, public kind: CodeActionKind = CodeActionKind.Empty) {}
+}
+
+/** `vscode.SnippetString`, `vscode.WorkspaceEdit` — common refactor APIs. */
+class SnippetString {
+  value: string;
+  constructor(value = '') { this.value = value; }
+  appendText(s: string) { this.value += s.replace(/\$/g, '\\$'); return this; }
+  appendTabstop(n?: number) { this.value += `$${n ?? 0}`; return this; }
+  appendPlaceholder(value: string, n?: number) { this.value += `\${${n ?? 0}:${value}}`; return this; }
+  appendChoice(values: string[], n?: number) { this.value += `\${${n ?? 0}|${values.join(',')}|}`; return this; }
+  appendVariable(name: string, defaultValue?: string) {
+    this.value += defaultValue ? `\${${name}:${defaultValue}}` : `\${${name}}`;
+    return this;
+  }
+}
+
+class WorkspaceEdit {
+  private _edits: any[] = [];
+  replace(uri: any, range: any, newText: string) { this._edits.push({ kind: 'replace', uri, range, newText }); }
+  insert(uri: any, position: any, newText: string) { this._edits.push({ kind: 'insert', uri, position, newText }); }
+  delete(uri: any, range: any) { this._edits.push({ kind: 'delete', uri, range }); }
+  has(uri: any) { return this._edits.some((e) => e.uri === uri); }
+  get size(): number { return this._edits.length; }
+  entries() { return this._edits.map((e) => [e.uri, [e]]); }
+  set(uri: any, edits: any[]) { this._edits = this._edits.filter((e) => e.uri !== uri).concat(edits); }
+  get(uri: any) { return this._edits.filter((e) => e.uri === uri); }
+  createFile() { /* TODO */ }
+  deleteFile() { /* TODO */ }
+  renameFile() { /* TODO */ }
+}
+
+enum SymbolKind {
+  File = 0, Module = 1, Namespace = 2, Package = 3, Class = 4, Method = 5,
+  Property = 6, Field = 7, Constructor = 8, Enum = 9, Interface = 10,
+  Function = 11, Variable = 12, Constant = 13, String = 14, Number = 15,
+  Boolean = 16, Array = 17, Object = 18, Key = 19, Null = 20, EnumMember = 21,
+  Struct = 22, Event = 23, Operator = 24, TypeParameter = 25,
+}
+
+class SymbolInformation {
+  constructor(public name: string, public kind: SymbolKind, public containerName: string, public location: any) {}
+}
+
+class DocumentSymbol {
+  children: DocumentSymbol[] = [];
+  constructor(public name: string, public detail: string, public kind: SymbolKind, public range: any, public selectionRange: any) {}
+}
+
 // Phase H surface: NotebookCellOutputItem is a top-level class even
 // for extensions that don't otherwise touch notebooks (Claude Code's
 // activation builds a sentinel value via
@@ -1166,6 +1317,28 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     // Phase H: notebook value classes accessed at activation time
     NotebookCellOutputItem,
     NotebookCellOutput,
+    // Coding-agent surface: classes/enums extensions touch on activation
+    Disposable: VsCodeDisposable,
+    FileType,
+    FileChangeType,
+    FileSystemError,
+    TabInputText,
+    TabInputTextDiff,
+    TabInputCustom,
+    TabInputWebview,
+    TabInputNotebook,
+    TabInputNotebookDiff,
+    TabInputTerminal,
+    LogLevel,
+    MarkdownString,
+    Hover,
+    CodeAction,
+    CodeActionKind,
+    SnippetString,
+    WorkspaceEdit,
+    SymbolKind,
+    SymbolInformation,
+    DocumentSymbol,
 
     // ── workspace ──────────────────────────────────────────────────────
     workspace: {
@@ -1247,6 +1420,52 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       onDidCloseTextDocument: onDidCloseTextDoc.event,
       onDidSaveTextDocument: onDidSaveTextDoc.event,
       onDidChangeConfiguration: onDidChangeConfig.event,
+      // Coding-agent additions:
+      onWillSaveTextDocument: new VSCodeEvent<any>('onWillSaveTextDocument').event,
+      onDidChangeWorkspaceFolders: new VSCodeEvent<any>('onDidChangeWorkspaceFolders').event,
+      onDidCreateFiles: new VSCodeEvent<any>('onDidCreateFiles').event,
+      onDidDeleteFiles: new VSCodeEvent<any>('onDidDeleteFiles').event,
+      onDidRenameFiles: new VSCodeEvent<any>('onDidRenameFiles').event,
+      get textDocuments() { return [...openDocuments.values()]; },
+      asRelativePath(pathOrUri: any, includeWorkspaceFolder?: boolean): string {
+        const p = typeof pathOrUri === 'string' ? pathOrUri : (pathOrUri?.fsPath ?? String(pathOrUri ?? ''));
+        if (!workspacePath) return p;
+        if (p.startsWith(workspacePath)) {
+          const rel = p.slice(workspacePath.length).replace(/^[/\\]+/, '');
+          if (includeWorkspaceFolder && workspacePath) {
+            return `${path.basename(workspacePath)}/${rel}`;
+          }
+          return rel;
+        }
+        return p;
+      },
+      registerFileSystemProvider(_scheme: string, _provider: any, _options?: any) {
+        // Real fs-provider routing is a deeper integration. For now,
+        // accept the registration so extensions don't crash; the
+        // workbench's URI resolver will fall through to disk for
+        // file:// URIs which covers the 99% case for coding agents.
+        bridge.log(`workspace.registerFileSystemProvider stub for scheme: ${_scheme}`);
+        return new VsCodeDisposable();
+      },
+      registerTextDocumentContentProvider(_scheme: string, _provider: any) {
+        // VS Code lets extensions back custom URIs (output:, untitled:,
+        // etc) via providers. We don't yet route reads through them;
+        // accept the registration so activation doesn't crash.
+        bridge.log(`workspace.registerTextDocumentContentProvider stub for scheme: ${_scheme}`);
+        return new VsCodeDisposable();
+      },
+      applyEdit(_edit: WorkspaceEdit): Promise<boolean> {
+        // Forward to the bridge once we wire WorkspaceEdit application.
+        // Returning false means "edit didn't apply" — extensions handle this.
+        return Promise.resolve(false);
+      },
+      saveAll(): Promise<boolean> {
+        return rpcRequest('workspace/saveAll', {}).then(() => true).catch(() => false);
+      },
+      get name(): string | undefined { return workspacePath ? path.basename(workspacePath) : undefined; },
+      // rootPath is already declared as a data property above; we don't
+      // re-declare as accessor here.
+      isTrusted: true,
 
       fs: {
         async readFile(uri: Uri): Promise<Uint8Array> {
@@ -1277,6 +1496,34 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       set activeTextEditor(v: any) { _activeTextEditor = v; },
 
       onDidChangeActiveTextEditor: onDidChangeActiveEditor.event,
+      // Coding-agent additions:
+      onDidChangeTextEditorSelection: new VSCodeEvent<any>('onDidChangeTextEditorSelection').event,
+      onDidChangeVisibleTextEditors: new VSCodeEvent<any>('onDidChangeVisibleTextEditors').event,
+      onDidChangeTextEditorVisibleRanges: new VSCodeEvent<any>('onDidChangeTextEditorVisibleRanges').event,
+      onDidChangeWindowState: new VSCodeEvent<any>('onDidChangeWindowState').event,
+      get visibleTextEditors() { return _activeTextEditor ? [_activeTextEditor] : []; },
+      get state() { return { focused: true, active: true }; },
+      registerUriHandler(_handler: any) {
+        // Used for OAuth callbacks (e.g. Continue/Cody sign-in returns).
+        // Real handler routing comes with auth v2; accept the
+        // registration so activation completes.
+        return new VsCodeDisposable();
+      },
+      registerWebviewPanelSerializer(_viewType: string, _serializer: any) {
+        // Used by extensions that want to restore webview panels
+        // across IDE restarts. Accept the registration; serializer is
+        // never invoked because we don't persist webview state yet.
+        return new VsCodeDisposable();
+      },
+      tabGroups: {
+        all: [] as any[],
+        activeTabGroup: undefined as any,
+        onDidChangeTabs: new VSCodeEvent<any>('onDidChangeTabs').event,
+        onDidChangeTabGroups: new VSCodeEvent<any>('onDidChangeTabGroups').event,
+        async close(_tabOrTabs: any, _preserveFocus?: boolean): Promise<boolean> {
+          return true;
+        },
+      },
 
       showInformationMessage(message: string, ...items: string[]): Promise<string | undefined> {
         return rpcRequest('window/showMessage', { type: 'info', message, items });
@@ -1737,8 +1984,17 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       },
 
       getDiagnostics(resource?: Uri): any[] {
-        return [];
+        // Return all diagnostics across collections, or scoped to a uri.
+        const out: any[] = [];
+        for (const diags of diagnosticCollections.values()) {
+          for (const [uriPath, items] of diags) {
+            if (resource && resource.fsPath !== uriPath) continue;
+            out.push(...items);
+          }
+        }
+        return out;
       },
+      onDidChangeDiagnostics: new VSCodeEvent<any>('onDidChangeDiagnostics').event,
     },
 
     // ── extensions ─────────────────────────────────────────────────────
@@ -1748,6 +2004,23 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         return undefined; // Will be populated after activation
       },
       onDidChange: new VSCodeEvent<void>('onDidChange').event,
+    },
+
+    // ── version / l10n (top-level scalars expected by activation) ─────
+    // Many extensions branch on vscode.version. Reporting the engine
+    // we claim to be compatible with avoids "your VS Code is too old"
+    // bail-outs at activation time.
+    version: '1.97.0',
+    l10n: {
+      t(message: string, ...args: any[]): string {
+        // No catalog — return the source string with positional %0%, %1%
+        // substitution. Same fallback behaviour the official l10n
+        // module uses when no localization is loaded.
+        if (args.length === 0) return message;
+        return message.replace(/\{(\d+)\}/g, (_m, i) => String(args[i] ?? ''));
+      },
+      bundle: undefined,
+      uri: undefined,
     },
 
     // ── env ─────────────────────────────────────────────────────────────
