@@ -446,7 +446,7 @@ async function getExtensionsBase(): Promise<string> {
 }
 
 /** Check for a matching adapter and register it as an MCP server */
-async function registerAdapterForExtension(extensionId: string, extDir: string): Promise<void> {
+async function registerAdapterForExtension(extensionId: string, _extDir: string): Promise<void> {
   const log = (msg: string) => invoke('ext_host_log', { message: `[adapter] ${msg}` }).catch(() => {})
 
   // Check for pre-built adapter in extension-adapters/
@@ -484,78 +484,19 @@ async function registerAdapterForExtension(extensionId: string, extDir: string):
     _registeredServers.add(serverId)
     await log(`Adapter registered as MCP server: ${config.id}`)
   } else {
-    await log(`No pre-built adapter for ${extensionId}. Generating...`)
-
-    // Run the adapter generator
-    try {
-      const generatorPath = await resolveAdapterPath('extension-adapters/generate-adapter.cjs')
-      const wsPath = await getWorkspacePath()
-
-      // Get user's API config for cloud AI fallback. Pass via env vars (B65)
-      // instead of argv so the API key doesn't appear in the host's process
-      // table. The adapter generator must read OPIDE_API_KEY/OPIDE_API_URL/
-      // OPIDE_MODEL from process.env.
-      const env: Record<string, string> = {}
-      try {
-        const config = await invoke('engine_get_config') as any
-        await log(`Config: ${JSON.stringify({ providers: (config?.providers || []).map((p: any) => ({ id: p.id, has_key: !!p.api_key, base_url: p.base_url })), default_model: config?.default_model }).slice(0, 500)}`)
-        const providers = config?.providers || []
-        const defaultProvider = config?.default_provider || ''
-        const defaultModel = config?.default_model || ''
-
-        let provider = providers.find((p: any) => p.id === defaultProvider && p.api_key)
-        if (!provider) provider = providers.find((p: any) => p.api_key && p.id !== 'ollama')
-
-        if (provider) {
-          env.OPIDE_API_KEY = provider.api_key
-          env.OPIDE_API_URL = provider.base_url || 'https://api.openai.com/v1/chat/completions'
-          env.OPIDE_MODEL = defaultModel || 'gpt-4o-mini'
-          await log(`Using provider ${provider.id} for adapter generation (model: ${env.OPIDE_MODEL}, url: ${env.OPIDE_API_URL})`)
-        } else {
-          await log('No provider with API key found — Ollama only')
-        }
-      } catch (e) {
-        await log(`Config read failed: ${e}`)
-      }
-
-      const genResult = await invoke('ide_run_command', {
-        command: `node "${generatorPath}" "${extDir}" --workspace "${wsPath || '/tmp'}"`,
-        env,
-        cwd: '/',
-      }) as any
-
-      const generatedCode = (genResult?.stdout || '').trim()
-      if (generatedCode && generatedCode.includes('tools/list')) {
-        // Save the generated adapter
-        const generatedPath = adapterPath // Same location as pre-built
-        await invoke('ide_run_command', {
-          command: `cat > "${generatedPath}" << 'ADAPTER_EOF'\n${generatedCode}\nADAPTER_EOF`,
-          cwd: '/',
-        })
-
-        await log(`Adapter generated and saved: ${generatedPath}`)
-
-        // Register it
-        const config: McpServerConfig = {
-          id: `ext-${extensionId.replace(/\./g, '-')}`,
-          name: extensionId.split('.').pop() || extensionId,
-          transport: 'stdio',
-          command: 'node',
-          args: [generatedPath],
-          env: wsPath ? { OPIDE_WORKSPACE: wsPath } : {},
-          url: '',
-          enabled: true,
-        }
-        await invoke('engine_mcp_save_server', { server: config })
-        await invoke('engine_mcp_connect', { id: config.id })
-        await log(`Generated adapter registered as MCP server: ${config.id}`)
-      } else {
-        await log(`Adapter generation failed — no valid output`)
-        await log(`stderr: ${(genResult?.stderr || '').slice(0, 500)}`)
-      }
-    } catch (e) {
-      await log(`Adapter generation error: ${e}`)
-    }
+    // Phase A-I made the extension host load extensions natively. The
+    // legacy "generate an MCP adapter for this extension" path called
+    // an LLM (Moonshot, OpenAI, etc) to write a custom MCP wrapper for
+    // every fresh install. That predates the real extension host and
+    // is now dead weight: it blocks the install UI, hammers the user's
+    // API quota, and wraps extensions that already work without any
+    // wrapper. Skipped entirely.
+    //
+    // The extension itself is loaded into the workbench above via
+    // loadExtensionFromDisk (line ~397) and will activate when its
+    // activationEvents fire (CC1: onLanguage, onCommand, onView,
+    // onChat, onDebug, etc.). Nothing else needed.
+    await log(`No MCP adapter for ${extensionId} — extension host handles activation directly.`)
   }
 }
 
@@ -755,9 +696,10 @@ export async function scanAndRegisterInstalledExtensions(): Promise<void> {
         } catch (e) {
           await log(`Failed to register ${serverId}: ${e}`)
         }
-      } else {
-        await log(`No adapter for ${extId} — skipping (will generate on next install)`)
       }
+      // No-pre-built-adapter case is intentionally silent now. The
+      // extension host registers its own activation events for these
+      // (Phase A-I); we do not need an MCP wrapper.
     }
   } catch (e) {
     invoke('ext_host_log', { message: `[scan] FAILED: ${e}` }).catch(() => {})
