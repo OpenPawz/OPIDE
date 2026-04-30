@@ -19,7 +19,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
-interface TermRec { id: string; sessionId?: string }
+interface TermRec { id: string; terminalId?: string }
 const _terms = new Map<string, TermRec>()
 
 export async function handle(method: string, params: any): Promise<void> {
@@ -30,13 +30,18 @@ export async function handle(method: string, params: any): Promise<void> {
       const rec: TermRec = { id }
       _terms.set(id, rec)
       try {
-        const session = await invoke<any>('terminal_create', {
-          cwd: params?.cwd,
-          shell: params?.shellPath,
-          args: params?.shellArgs,
-          env: params?.env,
+        // terminal.rs returns { terminal_id, pid }; we keep terminal_id
+        // for downstream write/kill calls.
+        const result = await invoke<{ terminal_id: string }>('terminal_spawn', {
+          request: {
+            cwd: params?.cwd,
+            shell: params?.shellPath,
+            // terminal_spawn doesn't take args; the shell flag applies
+            // and the user can sendText() to drive further commands.
+            env: params?.env,
+          },
         }).catch(() => null)
-        rec.sessionId = session?.sessionId || session?.id || session
+        rec.terminalId = result?.terminal_id
       } catch (e) {
         console.warn(`[ext-terminal] create ${id} failed:`, e)
       }
@@ -44,10 +49,10 @@ export async function handle(method: string, params: any): Promise<void> {
     }
     case 'terminal/sendText': {
       const rec = _terms.get(id)
-      if (!rec?.sessionId) return
+      if (!rec?.terminalId) return
       const text = (params?.text ?? '') + (params?.addNewLine ? '\n' : '')
       await invoke('terminal_write', {
-        sessionId: rec.sessionId, data: text,
+        terminalId: rec.terminalId, data: text,
       }).catch((e) => console.warn(`[ext-terminal] sendText ${id} failed:`, e))
       break
     }
@@ -58,8 +63,8 @@ export async function handle(method: string, params: any): Promise<void> {
     }
     case 'terminal/dispose': {
       const rec = _terms.get(id)
-      if (rec?.sessionId) {
-        await invoke('terminal_close', { sessionId: rec.sessionId }).catch(() => {})
+      if (rec?.terminalId) {
+        await invoke('terminal_kill', { terminalId: rec.terminalId }).catch(() => {})
       }
       _terms.delete(id)
       break

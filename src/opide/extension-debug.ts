@@ -148,8 +148,10 @@ export async function startSession(
 async function sendDap(rec: SessionRecord, command: string, args: any): Promise<any> {
   const seq = rec.nextSeq++
   const msg = JSON.stringify({ seq, type: 'request', command, arguments: args })
+  // Tauri 2 converts top-level snake_case params to camelCase by default.
+  // dap_send(adapter_id, message) → JS uses { adapterId, message }.
   await invoke('dap_send', {
-    adapter_id: rec.adapterId,
+    adapterId: rec.adapterId,
     message: msg,
   })
   return new Promise((resolve, reject) => {
@@ -168,7 +170,7 @@ export async function stopSession(sessionId: string): Promise<void> {
   if (!rec) return
   try { await sendDap(rec, 'disconnect', { restart: false, terminateDebuggee: true }) } catch { /* ignore */ }
   try { rec.unlisten?.() } catch { /* ignore */ }
-  await invoke('dap_stop', { adapter_id: rec.adapterId }).catch(() => {})
+  await invoke('dap_stop', { adapterId: rec.adapterId }).catch(() => {})
   _sessions.delete(sessionId)
 }
 

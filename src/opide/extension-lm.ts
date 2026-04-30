@@ -120,17 +120,22 @@ export async function sendRequest(
     }))
 
     // Use a transient session to keep extension calls isolated from
-    // the user's main chat history. The engine will create one if not
-    // provided; we don't reuse across calls because that would let an
-    // extension contaminate the user's own thread.
+    // the user's main chat history. The engine creates one when the
+    // request omits session_id; we don't reuse across calls because
+    // that would let an extension contaminate the user's own thread.
+    // engine_chat_send takes a single `request` arg with snake_case
+    // fields per the existing chat-panel call shape.
     const result = await invoke<any>('engine_chat_send', {
-      sessionId: null,
-      prompt: opideMessages.map((m: any) => `${m.role}: ${m.content}`).join('\n\n'),
-      model: modelId,
-      // No tool execution for extension-driven LM calls in v1.
-      approvalMode: 'auto',
-      thinkingLevel: 'none',
-      planMode: false,
+      request: {
+        session_id: undefined,
+        message: opideMessages.map((m: any) => `${m.role}: ${m.content}`).join('\n\n'),
+        system_prompt: undefined,
+        model: modelId,
+        tools_enabled: false,
+        auto_approve_all: true,
+        thinking_level: 'none',
+        is_redirect: false,
+      },
     }).catch(() => null)
 
     // Engine returns a final message; if streaming events fired we have
