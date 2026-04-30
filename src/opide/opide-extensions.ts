@@ -10,6 +10,7 @@
 //   - Detail view with README rendering
 
 import { invoke } from '@tauri-apps/api/core'
+import { homeDir } from '@tauri-apps/api/path'
 import {
   registerCustomView,
   ViewContainerLocation,
@@ -68,35 +69,48 @@ const _extMetadataCache = new Map<string, OvsxExtension>()
 
 // ─── Open VSX API ────────────────────────────────────────────────────────────
 
+// All three of these previously shelled out to `curl` via `ide_run_command`,
+// which spawns `zsh -l -c <cmd>` — i.e. a login shell that re-sources
+// /etc/zprofile, ~/.zshenv, ~/.zshrc on every call. With nvm/pyenv/oh-my-zsh
+// in the user's profile, that's 300-800ms of pure shell startup before
+// curl even runs. Multiplied across search + detail + readme + installed-list
+// it made opening the Extensions panel feel sluggish.
+//
+// `ext_fetch_url_text` is the native reqwest-based command we shipped in
+// B63/B64 specifically to replace this curl pattern. It hits Open VSX
+// directly from Rust and skips the shell entirely.
 async function searchOpenVsx(query: string): Promise<OvsxExtension[]> {
   const q = encodeURIComponent(query || '')
   const url = query
     ? `https://open-vsx.org/api/-/search?query=${q}&size=30&sortBy=relevance&sortOrder=desc`
     : `https://open-vsx.org/api/-/search?size=30&sortBy=downloadCount&sortOrder=desc`
 
-  const result = await invoke('ide_run_command', {
-    command: `curl -sL "${url}"`,
-    cwd: '/',
-  }) as any
-
-  const data = JSON.parse(result?.stdout || '{}')
+  const text = await invoke<string>('ext_fetch_url_text', { url })
+  const data = JSON.parse(text || '{}')
   return (data.extensions || []).map(mapExtension)
 }
 
 async function fetchExtensionDetail(publisher: string, name: string): Promise<any> {
-  const result = await invoke('ide_run_command', {
-    command: `curl -sL "https://open-vsx.org/api/${publisher}/${name}"`,
-    cwd: '/',
-  }) as any
-  return JSON.parse(result?.stdout || '{}')
+  const text = await invoke<string>('ext_fetch_url_text', {
+    url: `https://open-vsx.org/api/${publisher}/${name}`,
+  })
+  return JSON.parse(text || '{}')
 }
 
 async function fetchReadme(url: string): Promise<string> {
-  const result = await invoke('ide_run_command', {
-    command: `curl -sL "${url}"`,
-    cwd: '/',
-  }) as any
-  return result?.stdout || ''
+  // Open VSX serves readme files from openvsxorg.blob.core.windows.net,
+  // which is in `ext_fetch_url_text`'s allowlist. If the URL ever points
+  // somewhere else (rare — extension manifest could in theory reference
+  // a third-party host), the call rejects and we surface the empty
+  // string so the UI just shows the "no readme" placeholder instead of
+  // hanging. We do NOT fall back to curl-via-shell because the slow
+  // login-shell startup is the exact thing this commit is fixing.
+  try {
+    return await invoke<string>('ext_fetch_url_text', { url })
+  } catch (e) {
+    console.warn('[opide-extensions] readme fetch failed:', e)
+    return ''
+  }
 }
 
 function mapExtension(ext: any): OvsxExtension {
@@ -149,14 +163,24 @@ function timeAgo(timestamp: string): string {
 }
 
 async function loadInstalledIds(): Promise<void> {
+  // Same motivation as the search/detail/readme swap above: previously
+  // this shelled out to `ls ~/.opide/extensions/ 2>/dev/null` through
+  // `zsh -l -c`, paying the full login-shell startup cost just to read
+  // a directory listing. Now we use Tauri's homeDir + ide_list_dir
+  // which goes through tokio::fs::read_dir directly.
   try {
-    const result = await invoke('ide_run_command', {
-      command: 'ls ~/.opide/extensions/ 2>/dev/null',
-      cwd: '/',
-    }) as any
-    const dirs = (result?.stdout || '').trim().split('\n').filter((d: string) => d.length > 0)
-    _installedIds = new Set(dirs)
+    const home = await homeDir()
+    const extDir = `${home.replace(/\/$/, '')}/.opide/extensions`
+    const result = await invoke<{ entries: { name: string; is_dir: boolean }[] }>('ide_list_dir', { path: extDir })
+    _installedIds = new Set(
+      (result?.entries ?? [])
+        .filter((e) => e.is_dir)
+        .map((e) => e.name),
+    )
   } catch {
+    // First-launch case: ~/.opide/extensions doesn't exist yet, which
+    // makes ide_list_dir reject. That's not an error from the user's
+    // perspective — they just have nothing installed.
     _installedIds = new Set()
   }
 }
