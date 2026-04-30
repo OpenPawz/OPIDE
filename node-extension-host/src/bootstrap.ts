@@ -152,43 +152,15 @@ async function main() {
   // unactivated extension we activate first.
   // -------------------------------------------------------------------
 
+  // Eager triggers only — anything cheap to evaluate at startup.
+  // workspaceContains: was here originally, but a synchronous fs walk
+  // PER PATTERN PER EXTENSION on every workspace open was hanging the
+  // host. It now runs in a deferred pass after the sidecar sends
+  // extensionHost/ready, with depth limits, dir skips, and a time
+  // budget so the IDE never waits on it.
   function matchesEager(ae: string): boolean {
     if (ae === '*' || ae === 'onStartupFinished' || ae === 'onUri') return true;
-    if (ae.startsWith('workspaceContains:')) return matchesWorkspaceContains(ae.split(':', 2)[1] || '');
-    if (ae === 'onDebug') return false; // wait for actual debug session
     return false;
-  }
-
-  function matchesWorkspaceContains(pattern: string): boolean {
-    if (!workspacePath || !pattern) return false;
-    // Cheap glob check: split pattern on '/' and walk; for the '**/*.ext'
-    // common case we just look for a file with that extension anywhere.
-    try {
-      const fs = require('fs');
-      const pathLib = require('path');
-      const extMatch = pattern.match(/\*\.([a-zA-Z0-9]+)/);
-      const targetExt = extMatch ? `.${extMatch[1]}` : null;
-      function walk(dir: string, depth: number): boolean {
-        if (depth > 4) return false;
-        let entries: any[] = [];
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return false; }
-        for (const ent of entries) {
-          if (ent.name.startsWith('.') || ent.name === 'node_modules') continue;
-          const full = pathLib.join(dir, ent.name);
-          if (ent.isDirectory()) {
-            if (walk(full, depth + 1)) return true;
-          } else if (targetExt && ent.name.endsWith(targetExt)) {
-            return true;
-          } else if (ent.name === pattern) {
-            return true;
-          }
-        }
-        return false;
-      }
-      return walk(workspacePath, 0);
-    } catch {
-      return false;
-    }
   }
 
   const eagerExtensions = extensions.filter((ext) =>
@@ -197,6 +169,98 @@ async function main() {
 
   for (const ext of eagerExtensions) {
     await activateExtension(ext, vsCodeApi, bridge);
+  }
+
+  /** Bounded, post-ready workspaceContains evaluator. Runs on a
+   * setImmediate so it never blocks startup. Walks at most
+   * MAX_DEPTH levels deep, skips heavy dirs, and stops after
+   * MAX_BUDGET_MS even if patterns remain unchecked.
+   *
+   * If a match is found, the extension activates lazily — same code
+   * path the activateMatching helper uses for onLanguage / onView. */
+  function evaluateWorkspaceContainsLater(): void {
+    const candidates = extensions.filter((ext) =>
+      !activatedExtensions.has(ext.id) &&
+      ext.activationEvents.some((ae) => ae.startsWith('workspaceContains:')),
+    );
+    if (candidates.length === 0 || !workspacePath) return;
+
+    setImmediate(() => {
+      const fs = require('fs');
+      const pathLib = require('path');
+      const MAX_DEPTH = 3;
+      const MAX_BUDGET_MS = 1500;
+      const SKIP = new Set([
+        'node_modules', 'target', 'dist', 'build', '.git', '.svn',
+        '.hg', 'venv', '.venv', '__pycache__', '.next', '.cache',
+        '.tauri', '.opide', 'vendor', 'Pods', 'DerivedData',
+      ]);
+      const startedAt = Date.now();
+
+      // Build the set of unique patterns we still care about, deduped
+      // so we walk the tree once even if N extensions share a pattern.
+      const patterns = new Map<string, Set<string>>(); // pattern → set of extension ids
+      for (const ext of candidates) {
+        for (const ae of ext.activationEvents) {
+          if (!ae.startsWith('workspaceContains:')) continue;
+          const p = ae.slice('workspaceContains:'.length);
+          if (!p) continue;
+          if (!patterns.has(p)) patterns.set(p, new Set());
+          patterns.get(p)!.add(ext.id);
+        }
+      }
+      if (patterns.size === 0) return;
+
+      const matches = new Set<string>(); // extension ids that hit
+      function patternHits(name: string): string[] {
+        const hits: string[] = [];
+        for (const [pat] of patterns) {
+          // Common forms: "**/*.ext", "**/foo.json", or a literal name.
+          const extMatch = pat.match(/\*\.([a-zA-Z0-9]+)$/);
+          if (extMatch && name.endsWith(`.${extMatch[1]}`)) hits.push(pat);
+          else if (name === pat) hits.push(pat);
+          else if (pat.endsWith(`/${name}`) || pat === name) hits.push(pat);
+        }
+        return hits;
+      }
+
+      function walk(dir: string, depth: number): void {
+        if (depth > MAX_DEPTH) return;
+        if (Date.now() - startedAt > MAX_BUDGET_MS) return;
+        let entries: any[] = [];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const ent of entries) {
+          if (Date.now() - startedAt > MAX_BUDGET_MS) return;
+          if (ent.name.startsWith('.') || SKIP.has(ent.name)) continue;
+          if (ent.isDirectory()) {
+            walk(pathLib.join(dir, ent.name), depth + 1);
+          } else {
+            const hits = patternHits(ent.name);
+            for (const h of hits) {
+              const owners = patterns.get(h);
+              if (owners) for (const id of owners) matches.add(id);
+              patterns.delete(h); // stop checking this pattern
+            }
+            if (patterns.size === 0) return;
+          }
+        }
+      }
+
+      try { walk(workspacePath, 0); } catch { /* swallow */ }
+
+      // Activate each matched extension lazily.
+      for (const ext of candidates) {
+        if (matches.has(ext.id) && !activatedExtensions.has(ext.id)) {
+          activateExtension(ext, vsCodeApi, bridge).catch((e) =>
+            bridge.log(`workspaceContains activation failed for ${ext.id}: ${e?.message || e}`),
+          );
+        }
+      }
+      bridge.log(
+        `workspaceContains scan: ${matches.size}/${candidates.length} matched, ` +
+        `${Date.now() - startedAt}ms elapsed${Date.now() - startedAt > MAX_BUDGET_MS ? ' (BUDGETED)' : ''}`,
+      );
+    });
   }
 
   /** Activate every extension whose activationEvents match an event
@@ -309,6 +373,12 @@ async function main() {
   });
 
   bridge.log('Extension host ready — waiting for messages');
+
+  // CC1: kick off the deferred workspaceContains scan AFTER the bridge
+  // has been told we're ready. The scan walks the workspace under a
+  // 1.5s budget and depth-3 cap; matched extensions activate lazily.
+  // No part of this blocks the user opening a folder.
+  evaluateWorkspaceContainsLater();
 
   // Keep process alive
   setInterval(() => {

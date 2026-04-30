@@ -937,19 +937,163 @@ export function registerOpideChat(): void {
       mentionBtn.textContent = '@'
       mentionBtn.addEventListener('click', () => pickAndAttach(true))
 
-      // Trigger file picker when user types @ at word boundary
+      // ── @-mention menu ───────────────────────────────────────────────
+      // Pre-Phase-B behaviour: typing `@` at a word boundary opened the
+      // file picker immediately. That left no room for chat participants
+      // (Continue, Claude Code, etc) which also use `@`. Now we show a
+      // small floating menu listing every registered participant plus a
+      // "Pick a file…" entry. If no participants are registered the menu
+      // skips itself and goes straight to the file picker for backward
+      // compatibility.
+      let _mentionMenu: HTMLDivElement | null = null
+      function dismissMentionMenu(): void {
+        if (_mentionMenu) { _mentionMenu.remove(); _mentionMenu = null }
+      }
+      async function openMentionMenu(): Promise<void> {
+        dismissMentionMenu()
+        const { listParticipants } = await import('../extension-chat-participants.ts')
+        const participants = listParticipants()
+        // No participants → preserve old behaviour, just open file picker.
+        if (participants.length === 0) { pickAndAttach(true); return }
+
+        const items: { kind: 'participant' | 'file'; id: string; label: string; hint?: string }[] = [
+          ...participants.map((p) => ({
+            kind: 'participant' as const,
+            id: p.id,
+            label: `@${p.id}`,
+            hint: p.fullName,
+          })),
+          { kind: 'file', id: 'file', label: 'Pick a file…', hint: 'Insert @<filename> from disk' },
+        ]
+
+        const menu = document.createElement('div')
+        menu.style.cssText =
+          'position:fixed;z-index:99999;background:var(--vscode-menu-background,#1e1e1e);' +
+          'border:1px solid var(--vscode-widget-border,#303031);border-radius:6px;' +
+          'box-shadow:0 4px 16px rgba(0,0,0,0.35);min-width:240px;max-width:380px;' +
+          'font-family:var(--vscode-font-family,system-ui);font-size:13px;' +
+          'color:var(--vscode-foreground,#cccccc);overflow:hidden;'
+        // Anchor the menu just above the textarea's caret. We use the
+        // textarea's bounding rect since the precise caret position
+        // would require a hidden mirror element; "above the input row"
+        // is good enough for v1.
+        const rect = textarea.getBoundingClientRect()
+        menu.style.left = `${Math.round(rect.left + 8)}px`
+        menu.style.bottom = `${Math.round(window.innerHeight - rect.top + 4)}px`
+
+        const header = document.createElement('div')
+        header.textContent = 'Insert mention'
+        header.style.cssText =
+          'padding:6px 10px;font-size:11px;letter-spacing:0.05em;text-transform:uppercase;' +
+          'color:var(--vscode-descriptionForeground,#9d9d9d);' +
+          'border-bottom:1px solid var(--vscode-widget-border,#303031);'
+        menu.appendChild(header)
+
+        let activeIdx = 0
+        const rows: HTMLDivElement[] = []
+        for (const [idx, item] of items.entries()) {
+          const row = document.createElement('div')
+          row.style.cssText = 'padding:6px 12px;cursor:pointer;display:flex;flex-direction:column;gap:1px;'
+          row.dataset.idx = String(idx)
+          const label = document.createElement('div')
+          label.textContent = item.label
+          label.style.cssText = 'color:var(--vscode-foreground,#cccccc);'
+          row.appendChild(label)
+          if (item.hint) {
+            const hint = document.createElement('div')
+            hint.textContent = item.hint
+            hint.style.cssText = 'color:var(--vscode-descriptionForeground,#9d9d9d);font-size:11px;'
+            row.appendChild(hint)
+          }
+          row.addEventListener('mouseenter', () => { setActive(idx) })
+          row.addEventListener('mousedown', (ev) => {
+            ev.preventDefault() // keep textarea focus
+            choose(idx)
+          })
+          rows.push(row)
+          menu.appendChild(row)
+        }
+        function setActive(i: number): void {
+          activeIdx = i
+          for (const [j, r] of rows.entries()) {
+            r.style.background = j === activeIdx
+              ? 'var(--vscode-list-activeSelectionBackground,#094771)'
+              : 'transparent'
+          }
+        }
+        setActive(0)
+
+        function choose(idx: number): void {
+          const it = items[idx]
+          if (!it) { dismissMentionMenu(); return }
+          if (it.kind === 'file') {
+            dismissMentionMenu()
+            // Strip the trailing @ that the user just typed; pickAndAttach
+            // re-inserts an @<filename> mention so we don't end up with @@.
+            const pos = textarea.selectionStart
+            if (textarea.value.slice(pos - 1, pos) === '@') {
+              textarea.value = textarea.value.slice(0, pos - 1) + textarea.value.slice(pos)
+              textarea.setSelectionRange(pos - 1, pos - 1)
+            }
+            pickAndAttach(true)
+          } else {
+            // Insert participant id in place of the bare @.
+            dismissMentionMenu()
+            const pos = textarea.selectionStart
+            const before = textarea.value.slice(0, pos)
+            const after = textarea.value.slice(pos)
+            // The user just typed `@`; replace that with `@<id> ` so the
+            // dispatch path in send.ts catches it as a participant.
+            const replaced = before.endsWith('@')
+              ? `${before.slice(0, -1)}@${it.id} `
+              : `${before}@${it.id} `
+            textarea.value = replaced + after
+            const newPos = replaced.length
+            textarea.setSelectionRange(newPos, newPos)
+            textarea.dispatchEvent(new Event('input'))
+            textarea.focus()
+          }
+        }
+
+        document.body.appendChild(menu)
+        _mentionMenu = menu
+
+        const onKey = (ev: KeyboardEvent) => {
+          if (!_mentionMenu) return
+          if (ev.key === 'ArrowDown') { ev.preventDefault(); setActive(Math.min(activeIdx + 1, items.length - 1)) }
+          else if (ev.key === 'ArrowUp') { ev.preventDefault(); setActive(Math.max(activeIdx - 1, 0)) }
+          else if (ev.key === 'Enter') { ev.preventDefault(); choose(activeIdx) }
+          else if (ev.key === 'Escape') { ev.preventDefault(); dismissMentionMenu(); cleanup() }
+          else if (ev.key === ' ' || ev.key === 'Tab') {
+            // Letting the user keep typing dismisses the menu.
+            dismissMentionMenu(); cleanup()
+          }
+        }
+        const onBlur = () => { dismissMentionMenu(); cleanup() }
+        function cleanup(): void {
+          textarea.removeEventListener('keydown', onKey, true)
+          textarea.removeEventListener('blur', onBlur)
+        }
+        textarea.addEventListener('keydown', onKey, true)
+        textarea.addEventListener('blur', onBlur)
+      }
+
+      // Trigger the menu when user types @ at a word boundary.
       textarea.addEventListener('keydown', (e) => {
         if (e.key === '@') {
           const pos = textarea.selectionStart
           const before = textarea.value.slice(0, pos)
           if (before === '' || /[\s\n]$/.test(before)) {
-            e.preventDefault()
-            textarea.value = before + '@' + textarea.value.slice(pos)
-            textarea.setSelectionRange(pos + 1, pos + 1)
-            pickAndAttach(true)
+            // Allow the @ to land in the textarea first; opening the
+            // menu is async (loads the participants module), and we
+            // want the caret position to already include the @.
+            requestAnimationFrame(() => { void openMentionMenu() })
           }
         }
       })
+
+      // The "@" toolbar button keeps its old behaviour (file picker)
+      // for users who still want a one-click file mention.
 
       // Attach file button (paperclip)
       const attachBtn = document.createElement('button')
