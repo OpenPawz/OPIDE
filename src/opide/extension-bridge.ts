@@ -524,6 +524,21 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
+    // P1: inline completions. Carries providerId + languages so the
+    // sidecar can route provideInlineCompletionItems back to the
+    // matching provider; Monaco's inline-completion provider on this
+    // side does the live debounced request loop.
+    case 'languages/registerInlineCompletionProvider': {
+      handleRegisterInlineCompletion(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/disposeInlineCompletionProvider': {
+      handleDisposeInlineCompletion(params)
+      if (id) sendResponse(id, null)
+      break
+    }
+
     // ── Configuration ────────────────────────────────────────────
     case 'configuration/update': {
       handleConfigurationUpdate(params)
@@ -1269,6 +1284,74 @@ async function handleAuthGetSession(params: any): Promise<any | null> {
     forceNewSession: params?.forceNewSession,
     clearSessionPreference: params?.clearSessionPreference,
   })
+}
+
+// ─── P1: Inline completion provider registration ─────────────────────────
+// Tracks per-provider registrations across (re)activations so we can
+// dispose Monaco providers when an extension goes away. Each provider
+// can target multiple languages; we register one Monaco provider per
+// language (Monaco's API takes a single language id per call).
+const _inlineCompletionDisposables = new Map<string, Array<{ dispose(): void }>>()
+
+async function handleRegisterInlineCompletion(params: any): Promise<void> {
+  const { providerId, languages } = params || {}
+  if (!providerId || !Array.isArray(languages) || languages.length === 0) return
+
+  try {
+    const monacoMod = await import('monaco-editor') as any
+    const monaco = monacoMod.default || monacoMod
+
+    const disposables: Array<{ dispose(): void }> = []
+
+    for (const lang of languages) {
+      const target = lang === '*' ? '*' : lang
+      const d = monaco.languages.registerInlineCompletionsProvider(target, {
+        provideInlineCompletions: async (model: any, position: any, _context: any, token: any) => {
+          if (token?.isCancellationRequested) return undefined
+          try {
+            const result = await sendRequest('languages/provideInlineCompletionItems', {
+              providerId,
+              uri: model.uri.fsPath || model.uri.path,
+              position: { line: position.lineNumber - 1, character: position.column - 1 },
+              languageId: lang,
+              context: {
+                // Most Copilot/Tabnine-style providers ignore the
+                // trigger context; passing the kind is enough.
+                triggerKind: 0,
+              },
+            })
+            const items = (result?.items || []).map((it: any) => ({
+              insertText: it.insertText || '',
+              range: it.range ? {
+                startLineNumber: (it.range.start?.line ?? 0) + 1,
+                startColumn: (it.range.start?.character ?? 0) + 1,
+                endLineNumber: (it.range.end?.line ?? 0) + 1,
+                endColumn: (it.range.end?.character ?? 0) + 1,
+              } : undefined,
+              command: it.command,
+            }))
+            return { items }
+          } catch (e) {
+            debugLog(`inline completion request failed: ${e}`)
+            return { items: [] }
+          }
+        },
+        freeInlineCompletions: () => { /* nothing to free; we don't keep state */ },
+      })
+      disposables.push(d)
+    }
+
+    _inlineCompletionDisposables.set(providerId, disposables)
+    debugLog(`inline completion provider ${providerId} registered for ${languages.join(', ')}`)
+  } catch (e) {
+    debugLog(`registerInlineCompletionProvider failed: ${e}`)
+  }
+}
+
+function handleDisposeInlineCompletion(params: any): void {
+  const list = _inlineCompletionDisposables.get(params?.providerId) || []
+  for (const d of list) { try { d.dispose() } catch { /* ignore */ } }
+  _inlineCompletionDisposables.delete(params?.providerId)
 }
 
 async function handleWebviewCreate(params: any): Promise<void> {

@@ -418,7 +418,108 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       // These are events pushed from the frontend
       handleNotification(msg.method, msg.params);
     }
+
+    // P1: incoming requests from the workbench. Used by language
+    // providers that proxy to extensions — e.g. Monaco asks the
+    // sidecar for inline completions, the sidecar dispatches to the
+    // registered provider, and we reply on the same id.
+    if (msg.method && msg.id && !pendingRequests.has(msg.id)) {
+      handleRequest(msg.method, msg.params, msg.id).catch((err: any) => {
+        bridge.send({
+          jsonrpc: '2.0', id: msg.id,
+          error: { code: -1, message: err?.message || 'request failed' },
+        });
+      });
+    }
   });
+
+  /** Dispatch an incoming bridge → sidecar request. Currently handles
+   * the inline-completion callback; future extensions of this list
+   * can wire other language providers (completion / hover /
+   * definition / etc) end-to-end. */
+  async function handleRequest(method: string, params: any, id: number): Promise<void> {
+    if (method === 'languages/provideInlineCompletionItems') {
+      const items = await provideInlineCompletions(params);
+      bridge.send({ jsonrpc: '2.0', id, result: { items } });
+      return;
+    }
+    // Unknown — respond with null so the caller doesn't time out.
+    bridge.send({ jsonrpc: '2.0', id, result: null });
+  }
+
+  /** Walk every registered inline completion provider whose selector
+   * matches the requested language, call its provideInlineCompletionItems
+   * with a faux TextDocument + Position, and merge the results.
+   *
+   * Returns an array of { insertText, range, command? } shaped to what
+   * Monaco's InlineCompletionProvider expects after the bridge unwraps. */
+  async function provideInlineCompletions(params: any): Promise<any[]> {
+    const { uri, position, languageId, context } = params || {};
+    const merged: any[] = [];
+    for (const rec of _inlineCompletionProviders.values()) {
+      const matches =
+        rec.languages.includes(languageId) || rec.languages.includes('*');
+      if (!matches) continue;
+
+      // Build minimal vscode.TextDocument + Position for the call.
+      let doc = openDocuments.get(uri);
+      if (!doc) {
+        // Fall back: read from disk via OPIDE's fs/readFile RPC.
+        try {
+          const text = await rpcRequest('fs/readFile', { path: uri });
+          const decoded = typeof text === 'string'
+            ? Buffer.from(text, 'base64').toString('utf-8')
+            : '';
+          doc = new TextDocument(Uri.file(uri), languageId || 'plaintext', 1, decoded);
+          openDocuments.set(uri, doc);
+        } catch {
+          continue;
+        }
+      }
+      const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+      const cancel = {
+        isCancellationRequested: false,
+        onCancellationRequested: () => ({ dispose: () => {} }),
+      };
+      try {
+        const r = await Promise.resolve(
+          rec.provider.provideInlineCompletionItems?.(doc, pos, context || {}, cancel),
+        );
+        const list = Array.isArray(r) ? r : (r?.items || []);
+        for (const item of list) {
+          merged.push({
+            insertText: typeof item.insertText === 'string'
+              ? item.insertText
+              : (item.insertText?.value || ''),
+            range: serializeRange(item.range, pos),
+            command: item.command ? {
+              command: item.command.command,
+              title: item.command.title,
+              arguments: item.command.arguments,
+            } : undefined,
+          });
+        }
+      } catch (e: any) {
+        bridge.log(`inline completion provider failed: ${e?.message || e}`);
+      }
+    }
+    return merged;
+  }
+
+  /** Serialize a Range to the wire shape the bridge expects, defaulting
+   * to a zero-width range at the cursor if the provider didn't supply one. */
+  function serializeRange(range: any, fallbackPos: any): any {
+    if (range?.start && range?.end) {
+      return {
+        start: { line: range.start.line, character: range.start.character },
+        end: { line: range.end.line, character: range.end.character },
+      };
+    }
+    return {
+      start: { line: fallbackPos.line, character: fallbackPos.character },
+      end: { line: fallbackPos.line, character: fallbackPos.character },
+    };
+  }
 
   // Event dispatchers
   const onDidChangeTextDoc = new VSCodeEvent<any>('onDidChangeTextDocument');
@@ -440,6 +541,32 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   // call setDecorations later.
   const _decorationTypes = new Map<string, any>();
   let _nextDecorationTypeId = 1;
+
+  // ── P1 registries ─────────────────────────────────────────────────────
+  interface InlineCompletionProviderRec {
+    provider: any;
+    languages: string[];
+    selector: any;
+  }
+  const _inlineCompletionProviders = new Map<string, InlineCompletionProviderRec>();
+  let _nextInlineCompletionId = 1;
+
+  /** VS Code DocumentSelector accepts strings, arrays, or objects with
+   * `language`, `scheme`, `pattern`. We flatten into a list of language
+   * IDs so the bridge can register Monaco providers per language; '*'
+   * means "all languages" and is preserved through. */
+  function selectorToLanguageIds(selector: any): string[] {
+    if (typeof selector === 'string') return [selector];
+    if (Array.isArray(selector)) {
+      const out: string[] = [];
+      for (const s of selector) out.push(...selectorToLanguageIds(s));
+      return out;
+    }
+    if (selector && typeof selector === 'object' && selector.language) {
+      return [selector.language];
+    }
+    return ['*'];
+  }
 
   // ── Phase D registries ────────────────────────────────────────────────
   interface DebugAdapterFactoryInst { type: string; factory: any }
@@ -1537,6 +1664,31 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       registerDocumentFormattingEditProvider(selector: any, provider: any) {
         rpcRequest('languages/registerFormattingProvider', { selector }).catch(() => {});
         return { dispose: () => {} };
+      },
+
+      // P1: vscode.languages.registerInlineCompletionItemProvider —
+      // the API Copilot, Tabnine, Codeium, Continue, Cody-completions,
+      // and friends all use to deliver ghost-text suggestions as the
+      // user types. We register the provider locally AND tell the
+      // bridge to wire a Monaco inline-completion provider; when the
+      // user pauses typing, Monaco calls back through the bridge to
+      // 'languages/provideInlineCompletionItems', which we route to
+      // the stored provider.
+      registerInlineCompletionItemProvider(selector: any, provider: any) {
+        const id = `icp-${_nextInlineCompletionId++}`;
+        const langs = selectorToLanguageIds(selector);
+        _inlineCompletionProviders.set(id, { provider, languages: langs, selector });
+        rpcRequest('languages/registerInlineCompletionProvider', {
+          providerId: id,
+          languages: langs,
+          selector,
+        }).catch(() => {});
+        return {
+          dispose() {
+            _inlineCompletionProviders.delete(id);
+            rpcRequest('languages/disposeInlineCompletionProvider', { providerId: id }).catch(() => {});
+          },
+        };
       },
 
       match(selector: any, document: any): number {
