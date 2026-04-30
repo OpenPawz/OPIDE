@@ -312,7 +312,12 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
       } catch { /* unknown host — fall through to publisher default */ }
 
       const responsePlatform: string = metadata.targetPlatform || ''
-      if (targetPlatform && responsePlatform && responsePlatform !== targetPlatform) {
+      // 'universal' means the publisher uploaded a single VSIX that runs
+      // on every platform — that's what we want regardless of host arch,
+      // so no re-fetch needed. Same when the API returned no platform tag
+      // at all (the extension only ships one build).
+      const isUniversal = !responsePlatform || responsePlatform === 'universal'
+      if (targetPlatform && !isUniversal && responsePlatform !== targetPlatform) {
         // The default response was for the wrong platform; re-fetch ours.
         // URL shape: /api/{publisher}/{name}/{targetPlatform}/{version}
         await log(`Default API response is for ${responsePlatform}; re-fetching ${targetPlatform}...`)

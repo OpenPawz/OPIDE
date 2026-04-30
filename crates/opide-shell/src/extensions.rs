@@ -79,10 +79,17 @@ pub async fn ext_download_url_to_path(url: String, dest_path: String) -> Result<
         .parent()
         .map(|p| p.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    let temp_ok = dest_parent.starts_with("/tmp/")
-        || dest_parent.starts_with("/var/folders/")
-        || dest_parent.starts_with("/private/tmp/")
-        || dest_parent.starts_with("/private/var/tmp/")
+    // The previous matcher required `starts_with("/tmp/")` etc., which
+    // failed when the file lived directly in `/tmp` because the parent
+    // is just `"/tmp"` (no trailing slash). Now we accept either form.
+    fn under(parent: &str, root: &str) -> bool {
+        parent == root || parent.starts_with(&format!("{root}/"))
+    }
+    let temp_ok = under(&dest_parent, "/tmp")
+        || under(&dest_parent, "/var/folders")
+        || under(&dest_parent, "/private/tmp")
+        || under(&dest_parent, "/private/var/tmp")
+        || under(&dest_parent, "/var/tmp")
         || dirs::cache_dir()
             .map(|c| dest.starts_with(&c))
             .unwrap_or(false);
