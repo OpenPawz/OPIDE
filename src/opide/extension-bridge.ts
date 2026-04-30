@@ -203,13 +203,21 @@ export async function startExtensionHost(
     }
   })
 
-  // Start the sidecar
-  await invoke('ext_host_start', {
-    request: {
-      extensions_path: extPath,
-      workspace_path: workspacePath,
-    },
-  })
+  // Start the sidecar. If invoke rejects we want to see it in
+  // OPIDE.log, not just dev tools — workbench.ts's caller catches
+  // the throw with `.catch(console.warn)` which is invisible to
+  // anyone tailing the log file.
+  try {
+    await invoke('ext_host_start', {
+      request: {
+        extensions_path: extPath,
+        workspace_path: workspacePath,
+      },
+    })
+  } catch (e) {
+    debugLog(`ext_host_start FAILED: ${String((e as Error)?.message || e)}`)
+    throw e
+  }
 
   _running = true
   debugLog('Extension host started, waiting for ready message...')
