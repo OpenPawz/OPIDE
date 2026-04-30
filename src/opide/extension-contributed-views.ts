@@ -28,6 +28,7 @@
 //   they attach the iframe / tree to that slot instead of creating a
 //   duplicate.
 
+import { invoke } from '@tauri-apps/api/core'
 import {
   registerCustomView,
   ViewContainerLocation,
@@ -37,6 +38,16 @@ import type {
   ExtContributedView,
   ExtContributedViewContainer,
 } from './extension-bridge.ts'
+
+/** Send a line through ext_host_log so it lands in OPIDE.log next to
+ * the install / activation messages. We deliberately don't import the
+ * bridge's debugLog because that would create a runtime cycle. */
+function logToFile(msg: string): void {
+  try {
+    invoke('ext_host_log', { message: `[ext-contrib-views] ${msg}` }).catch(() => {})
+  } catch { /* never throw in logging */ }
+  console.warn(`[ext-contrib-views] ${msg}`)
+}
 
 // ─── Public registry ───────────────────────────────────────────────────
 
@@ -161,7 +172,12 @@ export function registerExtensionContributions(
   if (_registeredExtensions.has(extensionId)) return
   _registeredExtensions.add(extensionId)
 
-  injectStyle()
+  try { injectStyle() } catch (e) {
+    logToFile(`injectStyle failed: ${String((e as Error)?.message || e)}`)
+  }
+  logToFile(
+    `pre-mounting for ${extensionId}: ${containers.length} container(s), ${views.length} view(s)`,
+  )
 
   // Build a quick lookup so each view knows which surface its
   // container lives on. Built-in containers (explorer, scm, debug,
@@ -194,6 +210,12 @@ export function registerExtensionContributions(
     // viewId as the workbench id so the user can identify which
     // extension's view they're looking at; collisions across
     // extensions would already be a manifest-level conflict.
+    //
+    // Defensive: any single bad contribution (malformed icon path,
+    // duplicate view id, monaco-vscode-api throwing inside the
+    // workbench layout service) is caught so it can't take down the
+    // whole pre-mount loop. Failures land in OPIDE.log via
+    // ext_host_log so the user can see them when tailing.
     try {
       registerCustomView({
         id: `opide-ext-cv-${v.id}`,
@@ -202,29 +224,42 @@ export function registerExtensionContributions(
         icon: container?.codiconId || iconCodiconForView(v.type),
         renderBody: (root: HTMLElement) => {
           slot.rootEl = root
-          // Honour `when` clauses. If the expression is currently
-          // false we show a placeholder; we don't unregister the view
-          // because context keys can flip later (extensions toggle
-          // them via setContext).
-          if (!evalWhen(v.when)) {
-            renderHidden(root, v.name, 'View hidden by `when` clause.')
-            return { dispose() { slot.rootEl = null } }
-          }
-          // Trigger lazy onView:<id> activation. Whatever extension
-          // owns this view will activate; its registerWebviewView /
-          // registerTreeDataProvider call attaches to the slot via
-          // markSlotAttached, then the slot's body gets re-rendered.
-          onViewActivated(v.id)
-          if (slot.bodyMounter) {
-            try { slot.bodyMounter(root) } catch (e) {
-              renderError(root, v.name, String((e as Error)?.message || e))
+          try {
+            // Honour `when` clauses. If the expression is currently
+            // false we show a placeholder; we don't unregister the
+            // view because context keys can flip later (extensions
+            // toggle them via setContext).
+            if (!evalWhen(v.when)) {
+              renderHidden(root, v.name, 'View hidden by `when` clause.')
+              return { dispose() { slot.rootEl = null } }
             }
-          } else {
-            // Show a small "loading" affordance until activation
-            // completes. Most extensions take 50-300ms to wire up
-            // their provider; if it never attaches we leave the
-            // affordance — better than a blank panel.
-            renderLoading(root, v.name, extensionId)
+            // Trigger lazy onView:<id> activation. Whatever extension
+            // owns this view will activate; its registerWebviewView /
+            // registerTreeDataProvider call attaches to the slot via
+            // markSlotAttached, then the slot's body gets re-rendered.
+            try { onViewActivated(v.id) } catch (actErr) {
+              logToFile(`onViewActivated(${v.id}) threw: ${String((actErr as Error)?.message || actErr)}`)
+            }
+            if (slot.bodyMounter) {
+              try { slot.bodyMounter(root) } catch (e) {
+                renderError(root, v.name, String((e as Error)?.message || e))
+              }
+            } else {
+              // Show a small "loading" affordance until activation
+              // completes. Most extensions take 50-300ms to wire up
+              // their provider; if it never attaches we leave the
+              // affordance — better than a blank panel.
+              renderLoading(root, v.name, extensionId)
+            }
+          } catch (renderErr) {
+            // Catch-all so a bad render can't take the workbench
+            // layout down. The slot stays registered; the user can
+            // close + reopen it after the cause is fixed.
+            logToFile(
+              `renderBody for ${v.id} (${extensionId}) threw: ` +
+              String((renderErr as Error)?.message || renderErr),
+            )
+            try { renderError(root, v.name, String((renderErr as Error)?.message || renderErr)) } catch { /* ignore */ }
           }
           return {
             dispose() {
@@ -234,7 +269,10 @@ export function registerExtensionContributions(
         },
       })
     } catch (e) {
-      console.warn(`[ext-contributed-views] registerCustomView ${v.id} failed:`, e)
+      logToFile(
+        `registerCustomView for ${v.id} (${extensionId}) failed: ` +
+        String((e as Error)?.message || e),
+      )
       _slots.delete(v.id)
     }
   }
