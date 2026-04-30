@@ -370,9 +370,17 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
     }
 
     // Verify package.json exists via the existing read_file tool.
+    // ide_read_file returns { content, language, size, ... } not a raw
+    // string; the previous `as string` cast was a TypeScript lie that
+    // crashed at runtime when extracting Claude Code (the first
+    // extension whose install actually got this far). Pull the
+    // content field out before string-checking.
     let pkgContent = ''
     try {
-      pkgContent = await invoke('ide_read_file', { path: `${extDir}/package.json` }) as string
+      const r = await invoke<{ content?: string }>('ide_read_file', {
+        path: `${extDir}/package.json`,
+      })
+      pkgContent = r?.content ?? ''
     } catch {
       // ignore — handled by the `includes` check below
     }
