@@ -521,28 +521,36 @@ export async function initializeDeferredFeatures(): Promise<void> {
       stopExtensionHost().catch(() => {})
     })
 
-    // Start the extension host if we have a workspace
+    // Always start the extension host. Extensions are user-global
+    // (~/.opide/extensions/), not workspace-specific. Some extensions
+    // (Claude Code, Continue, Copilot Chat) activate on
+    // onStartupFinished and want to register UI immediately, before
+    // the user picks a folder. Previously the host only started when
+    // a workspace existed, so any user who opened OPIDE without a
+    // folder saw nothing extension-related — symptom: "I installed
+    // Claude Code and the panel never showed up." When a folder
+    // opens later, the workbench reload re-bootstraps and we restart
+    // the host with the new workspace path.
     const ws = getWorkspace()
-    console.log('[opide] Extension host: workspace =', ws)
-    if (ws) {
-      // Use Tauri's homeDir() — works cross-platform without parsing the
-      // workspace path or shelling out (B25, B36, B47).
-      let extDir: string | undefined
-      try {
-        const { homeDir } = await import('@tauri-apps/api/path')
-        const home = (await homeDir()).replace(/[\\/]+$/, '')
-        if (home) extDir = `${home}/.opide/extensions`
-      } catch (e2) {
-        console.warn('[opide] Could not resolve home dir:', e2)
-      }
-
-      console.log('[opide] Extension host: extDir =', extDir)
-      startExtensionHost(ws, extDir).catch((e) => {
-        console.warn('[opide] Extension host failed to start:', e)
-      })
-    } else {
-      console.log('[opide] Extension host: no workspace, skipping')
+    console.log('[opide] Extension host: workspace =', ws ?? '(none, using user-home)')
+    let extDir: string | undefined
+    try {
+      const { homeDir } = await import('@tauri-apps/api/path')
+      const home = (await homeDir()).replace(/[\\/]+$/, '')
+      if (home) extDir = `${home}/.opide/extensions`
+    } catch (e2) {
+      console.warn('[opide] Could not resolve home dir:', e2)
     }
+    // Pass an empty string when no folder is open. The Node sidecar
+    // accepts this (workspaceContains: scans short-circuit on empty
+    // path, file-event hooks no-op without a workspace), and any
+    // extension that calls vscode.workspace.workspaceFolders gets the
+    // empty array we already return in that case.
+    const wsForHost = ws || ''
+    console.log('[opide] Extension host: extDir =', extDir)
+    startExtensionHost(wsForHost, extDir).catch((e) => {
+      console.warn('[opide] Extension host failed to start:', e)
+    })
   } catch (e) {
     console.warn('[opide] Extension bridge setup failed:', e)
   }
