@@ -1541,16 +1541,25 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         return rpcRequest('window/showInputBox', { options });
       },
 
-      createOutputChannel(name: string) {
+      // VS Code's createOutputChannel has two shapes:
+      //   createOutputChannel(name)                        → OutputChannel
+      //   createOutputChannel(name, { log: true })         → LogOutputChannel
+      //   createOutputChannel(name, languageId)            → LanguageOutputChannel
+      // Claude Code, Continue, and most coding agents pass `{ log: true }`
+      // and then call .info() / .warn() / .error() / .trace() / .debug().
+      // Without the LogOutputChannel branch their activate() throws
+      // immediately when they try to log anything, before they can
+      // register UI. We detect the options arg and return the right
+      // shape; all flavours share the underlying lines buffer.
+      createOutputChannel(name: string, optionsOrLanguageId?: any) {
         const lines: string[] = [];
         outputChannels.set(name, lines);
-        return {
+        const isLog = !!(optionsOrLanguageId && typeof optionsOrLanguageId === 'object' && optionsOrLanguageId.log === true);
+
+        const base = {
           name,
           append(value: string) {
             lines.push(value);
-            // Stream incremental output to the panel so it scrolls live
-            // instead of only filling on show(). Most extensions append
-            // continuously while a long task runs (lint, build, test).
             rpcRequest('window/showOutputChannel', {
               name, content: value, append: true, show: false,
             }).catch(() => {});
@@ -1568,11 +1577,14 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
               name, content: '', append: false, show: false,
             }).catch(() => {});
           },
+          replace(value: string) {
+            lines.length = 0;
+            lines.push(value);
+            rpcRequest('window/showOutputChannel', {
+              name, content: value, append: false, show: false,
+            }).catch(() => {});
+          },
           show() {
-            // Phase A.A3: pass show: true so the bridge actually opens
-            // the Output panel pinned to this channel. Previously the
-            // bridge received the message but had no `show` flag set,
-            // so it silently no-op'd.
             rpcRequest('window/showOutputChannel', {
               name, content: lines.join(''), append: false, show: true,
             }).catch(() => {});
@@ -1580,6 +1592,45 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           hide() {},
           dispose() { outputChannels.delete(name); },
         };
+
+        if (!isLog) return base;
+
+        // LogOutputChannel: levelled logging methods. Each fans out to
+        // appendLine with a [LEVEL] prefix so the rendered text shows
+        // the level. Format args through util-style sprintf-lite: %s
+        // gets stringified, %j JSON-stringified, others coerced.
+        function fmt(template: string, ...args: any[]): string {
+          if (args.length === 0) return template;
+          let i = 0;
+          return template.replace(/%[sdjifoO%]/g, (m) => {
+            if (m === '%%') return '%';
+            const v = args[i++];
+            if (m === '%s') return String(v);
+            if (m === '%d' || m === '%i') return String(Number(v));
+            if (m === '%f') return String(parseFloat(v));
+            if (m === '%j' || m === '%o' || m === '%O') {
+              try { return JSON.stringify(v); } catch { return String(v); }
+            }
+            return String(v);
+          });
+        }
+        function logAt(level: string, msg: any, ...args: any[]): void {
+          // Accept Error objects (most agents pass `err` directly).
+          let text: string;
+          if (msg instanceof Error) text = `${msg.message}\n${msg.stack ?? ''}`;
+          else if (typeof msg === 'string') text = fmt(msg, ...args);
+          else text = String(msg);
+          base.appendLine(`[${level}] ${text}${args.length && typeof msg !== 'string' ? ' ' + args.map(String).join(' ') : ''}`);
+        }
+        return Object.assign(base, {
+          logLevel: 3, // LogLevel.Info
+          onDidChangeLogLevel: new VSCodeEvent<any>('onDidChangeLogLevel').event,
+          trace: (msg: any, ...args: any[]) => logAt('TRACE', msg, ...args),
+          debug: (msg: any, ...args: any[]) => logAt('DEBUG', msg, ...args),
+          info: (msg: any, ...args: any[]) => logAt('INFO', msg, ...args),
+          warn: (msg: any, ...args: any[]) => logAt('WARN', msg, ...args),
+          error: (msg: any, ...args: any[]) => logAt('ERROR', msg, ...args),
+        });
       },
 
       createStatusBarItem(alignment?: StatusBarAlignment, priority?: number) {
