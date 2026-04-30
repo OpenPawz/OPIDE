@@ -178,10 +178,23 @@ function injectScripts(html: string): string {
     if (m) return `opide-ext://localhost/${encodeURIComponent(m[1])}/${m[2].split(/[\\/]/).map(encodeURIComponent).join('/')}${term}`
     return `opide-ext://localhost/${path}${term}`
   })
-  if (/<body[^>]*>/i.test(rewritten)) {
-    return rewritten.replace(/<body([^>]*)>/i, `<body$1>${errorCaptureScript}${vsCodeApiShim}${readyScript}`)
+  // Inject the error-capture FIRST in <head> so it catches errors
+  // that happen during the parse/load of Claude Code's own scripts
+  // (which usually live in <head>). Body scripts run after head
+  // scripts; if the listener only attaches in body, we miss any
+  // throws from the bundle's initial evaluation.
+  if (/<head[^>]*>/i.test(rewritten)) {
+    rewritten = rewritten.replace(/<head([^>]*)>/i, `<head$1>${errorCaptureScript}`)
+  } else if (/<html[^>]*>/i.test(rewritten)) {
+    rewritten = rewritten.replace(/<html([^>]*)>/i, `<html$1><head>${errorCaptureScript}</head>`)
+  } else {
+    rewritten = `<!doctype html><html><head>${errorCaptureScript}</head>${rewritten}`
   }
-  return `<!doctype html><html><head></head><body>${errorCaptureScript}${vsCodeApiShim}${readyScript}${rewritten}</body></html>`
+  // The other shim + ready handshake still go at the start of body.
+  if (/<body[^>]*>/i.test(rewritten)) {
+    return rewritten.replace(/<body([^>]*)>/i, `<body$1>${vsCodeApiShim}${readyScript}`)
+  }
+  return `<!doctype html>${rewritten}<body>${vsCodeApiShim}${readyScript}</body>`
 }
 
 // ─── Public API ────────────────────────────────────────────────────────
