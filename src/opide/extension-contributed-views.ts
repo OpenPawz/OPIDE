@@ -242,13 +242,16 @@ export function registerExtensionContributions(
         location,
         icon: container?.codiconId || iconCodiconForView(v.type),
         renderBody: (root: HTMLElement) => {
+          logToFile(`renderBody fired for ${v.id} (ext=${extensionId}), bodyMounter=${slot.bodyMounter ? 'set' : 'null'}, when=${v.when ?? 'none'}`)
           slot.rootEl = root
           try {
             // Honour `when` clauses. If the expression is currently
             // false we show a placeholder; we don't unregister the
             // view because context keys can flip later (extensions
             // toggle them via setContext).
-            if (!evalWhen(v.when)) {
+            const whenOk = evalWhen(v.when)
+            logToFile(`renderBody ${v.id} when="${v.when ?? ''}" → ${whenOk}`)
+            if (!whenOk) {
               renderHidden(root, v.name, 'View hidden by `when` clause.')
               return { dispose() { slot.rootEl = null } }
             }

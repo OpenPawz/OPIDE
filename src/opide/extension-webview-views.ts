@@ -14,12 +14,18 @@
 //   5. extension's resolveWebviewView fills in webview.html
 //   6. that html arrives via webviewView/setHtml and we update the iframe
 
+import { invoke } from '@tauri-apps/api/core'
 import {
   registerCustomView,
   ViewContainerLocation,
 } from '@codingame/monaco-vscode-workbench-service-override'
 import { notifyViewActivated } from './extension-bridge.ts'
 import { findPreMountedSlot, markSlotAttached } from './extension-contributed-views.ts'
+
+/** Pipe debug into OPIDE.log so we can trace what fires when. */
+function logToFile(msg: string): void {
+  try { invoke('ext_host_log', { message: `[ext-webview-views] ${msg}` }).catch(() => {}) } catch { /* ignore */ }
+}
 
 interface WebviewViewInst {
   viewId: string
@@ -62,6 +68,7 @@ function ensureMessageListener(): void {
 }
 
 function buildBody(inst: WebviewViewInst, root: HTMLElement): void {
+  logToFile(`buildBody START for ${inst.viewId}, pendingHtml=${inst.pendingHtml ? `len=${inst.pendingHtml.length}` : 'null'}`)
   inst.container = root
   root.style.cssText = 'display:flex;flex-direction:column;height:100%;width:100%;background:var(--vscode-sideBar-background);'
 
@@ -79,12 +86,15 @@ function buildBody(inst: WebviewViewInst, root: HTMLElement): void {
   // First-mount: ask the extension to fill the html via resolveWebviewView.
   if (!inst.resolved) {
     inst.resolved = true
+    logToFile(`buildBody calling onResolve for ${inst.viewId}`)
     inst.onResolve()
   }
   // If html arrived before we mounted, apply it now.
   if (inst.pendingHtml != null) {
+    logToFile(`buildBody applying pendingHtml for ${inst.viewId}, len=${inst.pendingHtml.length}`)
     setWebviewViewHtml(inst.viewId, inst.pendingHtml)
   }
+  logToFile(`buildBody DONE for ${inst.viewId}`)
 }
 
 function injectScripts(html: string): string {
@@ -237,14 +247,19 @@ export function disposeWebviewView(viewId: string): void {
 
 export function setWebviewViewHtml(viewId: string, html: string): void {
   const inst = _views.get(viewId)
-  if (!inst) return
+  if (!inst) {
+    logToFile(`setWebviewViewHtml: NO inst for ${viewId} (registration race?)`)
+    return
+  }
   if (!inst.iframe) {
     // Cache until the view is mounted; buildBody will apply it.
     inst.pendingHtml = html
+    logToFile(`setWebviewViewHtml: queued for ${viewId} (iframe not yet built), len=${html.length}`)
     return
   }
   inst.ready = false
   inst.iframe.srcdoc = injectScripts(html)
+  logToFile(`setWebviewViewHtml: applied to ${viewId}, len=${html.length}`)
 }
 
 export function postMessageToWebviewView(viewId: string, message: any): void {
@@ -262,42 +277,11 @@ export function postMessageToWebviewView(viewId: string, message: any): void {
 }
 
 export function revealWebviewView(viewId: string): void {
-  // Try to open the matching custom view via monaco-vscode-api. The
-  // pre-mounted slot's id is `opide-ext-cv-<viewId>` (from
-  // extension-contributed-views) and the legacy fallback's id is
-  // `opide-ext-wvview-<viewId>`. We try both — whichever is registered
-  // wins.
-  void (async () => {
-    try {
-      const { StandaloneServices, getService } = await import('@codingame/monaco-vscode-api/services')
-      // Internal monaco-vscode-api path. Same import style every other
-      // file in the codebase uses (see ambient declarations in
-      // src/types/vscode-internals.d.ts). Vite resolves these at the
-      // package level even though the literal `vscode/vs` directory
-      // doesn't exist on disk.
-      const viewsServiceModule = await import(
-        '@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service'
-      ).catch(() => null as any)
-      const IViewsService = viewsServiceModule?.IViewsService
-      if (!IViewsService) {
-        console.warn(`[ext-webview-views] reveal: IViewsService not available; ${viewId} not opened`)
-        return
-      }
-      const svc = (getService ? await getService(IViewsService) : StandaloneServices.get(IViewsService)) as any
-      if (!svc?.openView) {
-        console.warn(`[ext-webview-views] reveal: openView not on IViewsService; ${viewId} not opened`)
-        return
-      }
-      // Try contributed-view ids first, then the legacy.
-      for (const id of [`opide-ext-cv-${viewId}`, `opide-ext-wvview-${viewId}`]) {
-        try {
-          const view = await svc.openView(id, /* focus= */ true)
-          if (view) return
-        } catch { /* try next */ }
-      }
-      console.warn(`[ext-webview-views] reveal: no view registered for ${viewId}`)
-    } catch (e) {
-      console.warn(`[ext-webview-views] reveal failed for ${viewId}:`, e)
-    }
-  })()
+  // No-op for now. Programmatic reveal via IViewsService.openView was
+  // tried but suspected of contributing to a folder-open hang; until
+  // we have a clean repro path the user clicks the tab manually.
+  // Honest stub.
+  void invoke('ext_host_log', {
+    message: `[ext-webview-views] reveal request for ${viewId} (manual click required)`,
+  }).catch(() => {})
 }
