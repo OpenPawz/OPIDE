@@ -48,6 +48,14 @@ function logToFile(msg: string): void {
   } catch { /* never throw in logging */ }
   console.warn(`[ext-contrib-views] ${msg}`)
 }
+/** High-volume diagnostic logs (per-view renderBody fires, pre-mount
+ * announcements). Goes to console only when window.OPIDE_VERBOSE_VIEWS
+ * is set — keeps OPIDE.log readable. */
+function traceLog(msg: string): void {
+  if ((globalThis as any).OPIDE_VERBOSE_VIEWS) {
+    console.log(`[ext-contrib-views] ${msg}`)
+  }
+}
 
 // ─── Public registry ───────────────────────────────────────────────────
 
@@ -175,7 +183,7 @@ export function registerExtensionContributions(
   try { injectStyle() } catch (e) {
     logToFile(`injectStyle failed: ${String((e as Error)?.message || e)}`)
   }
-  logToFile(
+  traceLog(
     `pre-mounting for ${extensionId}: ${containers.length} container(s), ${views.length} view(s)`,
   )
 
@@ -242,7 +250,7 @@ export function registerExtensionContributions(
         location,
         icon: container?.codiconId || iconCodiconForView(v.type),
         renderBody: (root: HTMLElement) => {
-          logToFile(`renderBody fired for ${v.id} (ext=${extensionId}), bodyMounter=${slot.bodyMounter ? 'set' : 'null'}, when=${v.when ?? 'none'}`)
+          traceLog(`renderBody fired for ${v.id} (ext=${extensionId}), bodyMounter=${slot.bodyMounter ? 'set' : 'null'}, when=${v.when ?? 'none'}`)
           slot.rootEl = root
           try {
             // Honour `when` clauses. If the expression is currently
@@ -250,7 +258,7 @@ export function registerExtensionContributions(
             // view because context keys can flip later (extensions
             // toggle them via setContext).
             const whenOk = evalWhen(v.when)
-            logToFile(`renderBody ${v.id} when="${v.when ?? ''}" → ${whenOk}`)
+            traceLog(`renderBody ${v.id} when="${v.when ?? ''}" → ${whenOk}`)
             if (!whenOk) {
               renderHidden(root, v.name, 'View hidden by `when` clause.')
               return { dispose() { slot.rootEl = null } }

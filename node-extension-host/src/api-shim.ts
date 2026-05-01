@@ -2191,16 +2191,42 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     env: {
       appName: 'OPIDE',
       appRoot: workspacePath,
+      // Real VS Code values: 'desktop' | 'web' | 'serverless'. Roo,
+      // Cline, Continue all branch on this — saying 'desktop' lets
+      // them take the desktop code paths (terminal access, fs writes).
+      appHost: 'desktop',
       language: 'en',
       machineId: 'opide-local',
       sessionId: `opide-${Date.now()}`,
       uriScheme: 'opide',
+      // Path to the user's preferred shell. Used when extensions spawn
+      // their own terminals (Roo, Cline). $SHELL on unix, COMSPEC on
+      // windows; bash fallback so we never return empty.
+      shell: process.env.SHELL || process.env.COMSPEC || '/bin/bash',
+      // VS Code's UIKind enum value: 1=Desktop, 2=Web. Same role as
+      // appHost but exposed as the enum extensions expect.
+      uiKind: 1,
       clipboard: {
         readText: () => rpcRequest('env/clipboardRead', {}),
         writeText: (text: string) => rpcRequest('env/clipboardWrite', { text }),
       },
       openExternal: (uri: Uri) => rpcRequest('env/openExternal', { uri: uri.toString() }),
+      // For local-only OPIDE there's no remote→external transform; just
+      // round-trip the URI. Extensions use this to safely hand URIs to
+      // browsers (Roo's auth callbacks).
+      asExternalUri: (uri: Uri) => Promise.resolve(uri),
     },
+    UIKind: { Desktop: 1, Web: 2 },
+    /** vscode.ExtensionMode — Roo / Cline / Continue all branch on this
+     * to enable dev features (test endpoints, debug logging). Real values:
+     * Production=1, Development=2, Test=3. We expose the enum so
+     * `vscode.ExtensionMode.Development` resolves; the actual mode lives
+     * on context.extensionMode (currently always 1=Production). */
+    ExtensionMode: { Production: 1, Development: 2, Test: 3 },
+    /** vscode.ExtensionKind — distinguishes UI extensions (run on the
+     * client) from Workspace extensions (run on the remote). Local-only
+     * OPIDE always reports UI=1. */
+    ExtensionKind: { UI: 1, Workspace: 2 },
 
     // ── Phase D: debug ──────────────────────────────────────────────────
     debug: {

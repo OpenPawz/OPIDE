@@ -18,7 +18,14 @@ use std::path::{Path, PathBuf};
 
 const ALLOWED_HOSTS: &[&str] = &[
     "open-vsx.org",
+    // Open VSX storage backends — extensions get redirected here for
+    // the actual VSIX bytes. eclipsecontent.org is the new (Eclipse
+    // Foundation) backend; the blob.core.windows.net one was used by
+    // older releases. Without these in the allowlist the install
+    // works for some extensions and 403s on others (Cline lands on
+    // eclipsecontent, Claude Code lands on the blob backend).
     "openvsxorg.blob.core.windows.net",
+    "openvsx.eclipsecontent.org",
     "marketplace.visualstudio.com",
     "vscode.gallerycdn.vsassets.io",
 ];

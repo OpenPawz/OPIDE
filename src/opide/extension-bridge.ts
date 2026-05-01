@@ -29,9 +29,20 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 // We still console.log for fast local feedback in dev tools when they're
 // open. Both paths are best-effort — failures in the IPC call are swallowed
 // so a misconfigured extension can't break the bridge's logging.
+/** Verbose-only logs go through `traceLog` — surfaced in the dev console
+ * but NOT piped to OPIDE.log. Lifecycle events that matter for support
+ * (start, stop, errors) still go through `debugLog` and reach the file.
+ *
+ * Set window.OPIDE_VERBOSE_BRIDGE = true in DevTools to watch the JSON-RPC
+ * firehose live; the default is silent so OPIDE.log stays readable. */
 function debugLog(msg: string): void {
   console.log(`[ext-bridge] ${msg}`)
   invoke('ext_host_log', { message: `[ext-bridge] ${msg}` }).catch(() => {})
+}
+function traceLog(msg: string): void {
+  if ((globalThis as any).OPIDE_VERBOSE_BRIDGE) {
+    console.log(`[ext-bridge] ${msg}`)
+  }
 }
 
 // ─── Centralised extensions-dir resolution (B36) ────────────────────────────
@@ -168,7 +179,10 @@ export async function startExtensionHost(
 
   // Listen for messages from the sidecar BEFORE starting it
   _unlistenMessage = await listen<ExtHostMessageEvent>('ext-host-message', (event) => {
-    debugLog(`ext-host-message received: ${event.payload.message.slice(0, 120)}...`)
+    // High-volume — every JSON-RPC message. Demoted to traceLog
+    // so OPIDE.log stays readable. Set window.OPIDE_VERBOSE_BRIDGE=true
+    // to watch live in DevTools.
+    traceLog(`ext-host-message received: ${event.payload.message.slice(0, 120)}...`)
     handleSidecarMessage(event.payload.message)
   })
 
@@ -176,7 +190,15 @@ export async function startExtensionHost(
 
   _unlistenStatus = await listen<ExtHostStatusEvent>('ext-host-status', (event) => {
     const { status, detail } = event.payload
-    debugLog(`ext-host-status: ${status} — ${detail}`)
+    // 'log' status mirrors sidecar stderr which already lands in
+    // OPIDE.log via the Rust shell. Logging it again at debugLog
+    // doubled every line. Demote 'log' to traceLog; lifecycle states
+    // (starting / ready / crashed / exited) still go to file.
+    if (status === 'log') {
+      traceLog(`ext-host-status: log — ${detail}`)
+    } else {
+      debugLog(`ext-host-status: ${status} — ${detail}`)
+    }
     for (const cb of _statusListeners) {
       cb(status, detail)
     }
@@ -2237,7 +2259,7 @@ async function registerAllCommandsInWorkbench(): Promise<void> {
           }
         })
         _workbenchRegisteredCommands.add(cmd)
-        debugLog(`palette action: ${cmd} → "${title}"`)
+        traceLog(`palette action: ${cmd} → "${title}"`)
       } catch (cmdErr) {
         debugLog(`skipped ${cmd}: ${cmdErr}`)
       }

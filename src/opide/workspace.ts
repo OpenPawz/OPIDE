@@ -42,18 +42,25 @@ function trackPath(s: Set<string>, path: string): void {
 }
 
 async function ensureServicesForPath(path: string): Promise<void> {
+  const tlog = (m: string) => {
+    console.log(m)
+    try { invoke('ext_host_log', { message: `[open-folder-trace] ${m}` }).catch(() => {}) } catch { /* ignore */ }
+  }
   if (_initializedPaths.has(path)) {
-    console.log('[opide-workspace] services already initialized for', path, '— skipping')
+    tlog(`ensureServicesForPath: already initialized for ${path} — skipping`)
     return
   }
   trackPath(_initializedPaths, path)
-  console.log('[opide-workspace] initializing SCM + search for', path)
+  tlog(`ensureServicesForPath: initializing SCM + search for ${path}`)
+  tlog('  initScmProvider start')
   try { await initScmProvider(path) } catch (e) {
-    console.warn('[opide-workspace] SCM init failed:', e)
+    tlog(`  initScmProvider threw: ${(e as Error)?.message || e}`)
   }
+  tlog('  initScmProvider done; registerSearchProviders start')
   try { await registerSearchProviders(path) } catch (e) {
-    console.warn('[opide-workspace] search init failed:', e)
+    tlog(`  registerSearchProviders threw: ${(e as Error)?.message || e}`)
   }
+  tlog('  registerSearchProviders done')
 }
 
 async function emitOpenWorkspaceOnce(path: string): Promise<void> {
@@ -147,46 +154,77 @@ export function createWorkspaceProvider() {
  * Show the native Tauri folder picker and open the selected folder.
  */
 export async function pickAndOpenFolder(): Promise<boolean> {
-  console.log('[opide-workspace] pickAndOpenFolder() called')
+  console.log('[opide-workspace] [step 1] pickAndOpenFolder() called')
+  // Pipe to OPIDE.log so we can see it without DevTools.
+  const tlog = (m: string) => {
+    console.log(m)
+    try { invoke('ext_host_log', { message: `[open-folder-trace] ${m}` }).catch(() => {}) } catch { /* ignore */ }
+  }
   try {
+    tlog('[step 2] awaiting open() dialog')
     const selected = await open({
       directory: true,
       multiple: false,
       title: 'Open Folder',
     })
-    console.log('[opide-workspace] dialog returned:', selected)
+    tlog(`[step 3] dialog returned: ${selected}`)
 
     if (!selected || typeof selected !== 'string') return false
 
     // Replace current workspace (remove existing folders, add new one)
     try {
+      tlog('[step 4] importing services')
       const { getService, IWorkspaceEditingService, IWorkspaceContextService } = await import(
         '@codingame/monaco-vscode-api/services'
       )
+      tlog('[step 5] resolving IWorkspaceEditingService')
       const editingService = (await getService(IWorkspaceEditingService)) as any
+      tlog('[step 6] resolving IWorkspaceContextService')
       const ctxService = (await getService(IWorkspaceContextService)) as any
+
+      // Hot-path detection: if there's no current workspace folder,
+      // monaco-vscode-api's addFolders throws "unsupported" (it can
+      // only add to an EXISTING workspace, not bootstrap one). Skip
+      // straight to the hash+reload path so the bootstrap reads the
+      // new folder from window.location.hash. Going through the throw
+      // looked like a hang because the reload happens AFTER the catch
+      // block runs synchronous fallback work.
+      const existing0 = ctxService?.getWorkspace?.()?.folders ?? []
+      if (existing0.length === 0) {
+        tlog(`[step 7-bypass] no current workspace — skipping addFolders, using hash+reload`)
+        window.location.hash = encodeURIComponent(selected)
+        window.location.reload()
+        return true
+      }
+
       if (editingService?.addFolders) {
         // Remove existing folders first
-        if (ctxService?.getWorkspace?.()?.folders && editingService?.removeFolders) {
-          const existing = ctxService.getWorkspace().folders
-          if (existing.length > 0) {
-            await editingService.removeFolders(existing.map((f: any) => f.uri))
-          }
+        if (existing0.length > 0 && editingService?.removeFolders) {
+          tlog(`[step 7] removeFolders count=${existing0.length}`)
+          await editingService.removeFolders(existing0.map((f: any) => f.uri))
+          tlog('[step 8] removeFolders done')
         }
+        tlog('[step 9] addFolders')
         await editingService.addFolders([{ uri: URI.file(selected) }])
+        tlog('[step 10] addFolders done')
         window.location.hash = encodeURIComponent(selected)
-        console.log('[opide-workspace] Workspace replaced with:', selected)
+        tlog(`[step 11] Workspace replaced with: ${selected}`)
 
         // Initialize workspace services (guarded — only runs once per path)
+        tlog('[step 12] ensureServicesForPath start')
         await ensureServicesForPath(selected)
+        tlog('[step 13] ensureServicesForPath done')
 
         // Notify backend to index the new workspace (guarded)
+        tlog('[step 14] emitOpenWorkspaceOnce start')
         await emitOpenWorkspaceOnce(selected)
+        tlog('[step 15] emitOpenWorkspaceOnce done — returning true')
 
         return true
       }
     } catch (e) {
       console.warn('[opide-workspace] addFolders failed in picker, falling back to reload:', e)
+      tlog(`[step ERR] addFolders flow threw: ${(e as Error)?.message || e}`)
     }
 
     // Fallback: reload (only if addFolders is unavailable)

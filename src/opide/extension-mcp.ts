@@ -351,9 +351,10 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
 
     // B63: download via native command (also allowlisted).
     const vsixPath = `/tmp/opide-${extensionId}.vsix`
-    await log(`Downloading .vsix...`)
+    await log(`Downloading .vsix from ${downloadUrl}...`)
     try {
       await invoke('ext_download_url_to_path', { url: downloadUrl, destPath: vsixPath })
+      await log(`Download complete (saved to ${vsixPath})`)
     } catch (e) {
       await log(`Download failed: ${e}`)
       return false
@@ -361,9 +362,10 @@ export async function installExtensionFromOpenVsx(extensionId: string): Promise<
 
     // B64: extract via native zip command. Skips entries whose names
     // contain `..` or absolute paths and confines extraction to extDir.
-    await log(`Extracting to ${extDir}...`)
+    await log(`Extracting to ${extDir} (vsix=${vsixPath})...`)
     try {
       await invoke('ext_extract_vsix', { vsixPath, targetDir: extDir })
+      await log(`Extraction complete`)
     } catch (e) {
       await log(`Extraction failed: ${e}`)
       return false

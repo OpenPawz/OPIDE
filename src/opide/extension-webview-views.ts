@@ -22,6 +22,15 @@ import { findPreMountedSlot, markSlotAttached } from './extension-contributed-vi
 function logToFile(msg: string): void {
   try { invoke('ext_host_log', { message: `[ext-webview-views] ${msg}` }).catch(() => {}) } catch { /* ignore */ }
 }
+/** High-volume per-event traces (buildWebview START/DONE, setHtml,
+ * reveal requests). Goes to console only when window.OPIDE_VERBOSE_VIEWS
+ * is set; off by default to keep OPIDE.log readable. Errors / race
+ * surprises still go through logToFile. */
+function traceLog(msg: string): void {
+  if ((globalThis as any).OPIDE_VERBOSE_VIEWS) {
+    console.log(`[ext-webview-views] ${msg}`)
+  }
+}
 
 interface WebviewViewInst {
   viewId: string
@@ -64,7 +73,7 @@ async function getActiveCodeWindow(): Promise<any> {
 }
 
 async function buildWebview(inst: WebviewViewInst, root: HTMLElement): Promise<void> {
-  logToFile(`buildWebview START for ${inst.viewId}, pendingHtml=${inst.pendingHtml ? `len=${inst.pendingHtml.length}` : 'null'}`)
+  traceLog(`buildWebview START for ${inst.viewId}, pendingHtml=${inst.pendingHtml ? `len=${inst.pendingHtml.length}` : 'null'}`)
   inst.container = root
   root.style.cssText = 'display:flex;flex-direction:column;height:100%;width:100%;background:var(--vscode-sideBar-background);'
 
@@ -109,25 +118,25 @@ async function buildWebview(inst: WebviewViewInst, root: HTMLElement): Promise<v
   // First-mount: ask the extension to fill the html via resolveWebviewView.
   if (!inst.resolved) {
     inst.resolved = true
-    logToFile(`buildWebview calling onResolve for ${inst.viewId}`)
+    traceLog(`buildWebview calling onResolve for ${inst.viewId}`)
     inst.onResolve()
   }
 
   // If html already arrived (sidecar fast-path), apply it now.
   if (inst.pendingHtml != null) {
-    logToFile(`buildWebview applying pendingHtml for ${inst.viewId}, len=${inst.pendingHtml.length}`)
+    traceLog(`buildWebview applying pendingHtml for ${inst.viewId}, len=${inst.pendingHtml.length}`)
     webview.setHtml(inst.pendingHtml)
     inst.pendingHtml = null
   }
   // Flush any queued postMessages.
   if (inst.pendingMessages.length) {
-    logToFile(`buildWebview flushing ${inst.pendingMessages.length} pending messages for ${inst.viewId}`)
+    traceLog(`buildWebview flushing ${inst.pendingMessages.length} pending messages for ${inst.viewId}`)
     for (const m of inst.pendingMessages) {
       try { webview.postMessage(m) } catch (e) { logToFile(`pending postMessage failed: ${e}`) }
     }
     inst.pendingMessages.length = 0
   }
-  logToFile(`buildWebview DONE for ${inst.viewId}`)
+  traceLog(`buildWebview DONE for ${inst.viewId}`)
 }
 
 // ─── Public API ────────────────────────────────────────────────────────
@@ -220,11 +229,11 @@ export function setWebviewViewHtml(viewId: string, html: string): void {
   }
   if (!inst.webview) {
     inst.pendingHtml = html
-    logToFile(`setWebviewViewHtml: queued for ${viewId} (webview not yet built), len=${html.length}`)
+    traceLog(`setWebviewViewHtml: queued for ${viewId} (webview not yet built), len=${html.length}`)
     return
   }
   inst.webview.setHtml(html)
-  logToFile(`setWebviewViewHtml: applied to ${viewId}, len=${html.length}`)
+  traceLog(`setWebviewViewHtml: applied to ${viewId}, len=${html.length}`)
 }
 
 export function postMessageToWebviewView(viewId: string, message: any): void {
@@ -244,8 +253,8 @@ export function postMessageToWebviewView(viewId: string, message: any): void {
 export function revealWebviewView(viewId: string): void {
   // The view is mounted by the workbench when its tab is activated;
   // we don't programmatically force-reveal here (caused folder-open
-  // hangs in earlier iterations). User clicks the tab.
-  void invoke('ext_host_log', {
-    message: `[ext-webview-views] reveal request for ${viewId} (manual click required)`,
-  }).catch(() => {})
+  // hangs in earlier iterations). User clicks the tab. Trace-only —
+  // these fire repeatedly while extensions retry reveal calls and
+  // overwhelmed OPIDE.log; visible with OPIDE_VERBOSE_VIEWS.
+  traceLog(`reveal request for ${viewId} (manual click required)`)
 }
