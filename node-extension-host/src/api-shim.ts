@@ -2937,6 +2937,13 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     }
     // Merge namespaces field-by-field. Real namespace methods on api
     // win; auto-stubs fill in missing fields.
+    //
+    // Some real namespace fields are getters (window.activeTerminal,
+    // workspace.workspaceFolders). Plain `realNs[k] = v` throws on
+    // those because the descriptor is read-only. We check the
+    // descriptor and only assign when the field isn't already defined
+    // (writable or getter). We also wrap each assignment in try/catch
+    // so one bad field doesn't abort the whole merge.
     const stubNs = gen._autoStubNamespaces || {};
     for (const [nsName, stubObj] of Object.entries<any>(stubNs)) {
       const realNs = (api as any)[nsName];
@@ -2945,7 +2952,20 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         continue;
       }
       for (const [fieldName, fieldVal] of Object.entries(stubObj)) {
-        if (realNs[fieldName] === undefined) realNs[fieldName] = fieldVal;
+        // `in` covers both own and inherited properties + getter-only
+        // descriptors. Real namespaces may chain through prototypes
+        // (rare here, but harmless to be conservative).
+        if (fieldName in realNs) continue;
+        try {
+          Object.defineProperty(realNs, fieldName, {
+            value: fieldVal,
+            writable: true,
+            configurable: true,
+            enumerable: true,
+          });
+        } catch {
+          // Object frozen / sealed / non-extensible — leave it alone.
+        }
       }
     }
   } catch (e: any) {

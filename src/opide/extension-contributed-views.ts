@@ -247,6 +247,23 @@ export function registerExtensionContributions(
     // workbench layout service) is caught so it can't take down the
     // whole pre-mount loop. Failures land in OPIDE.log via
     // ext_host_log so the user can see them when tailing.
+    //
+    // Skip pre-mounting views whose `when` clause is currently false.
+    // This prevents the empty "Claude Code" duplicate tab that appears
+    // because Claude Code declares a primary + secondary view, only
+    // one of which should render based on
+    // `claude-code:doesNotSupportSecondarySidebar`. Real VS Code
+    // doesn't show a tab for hidden-by-when views either.
+    //
+    // Caveat: when clauses can flip at runtime via setContext. We
+    // currently don't re-register views when that happens. If users
+    // start hitting this we can add a per-clause subscription that
+    // calls registerCustomView on transition false→true.
+    if (v.when && !evalWhen(v.when)) {
+      logToFile(`pre-mount skip ${v.id}: when="${v.when}" evaluates false`)
+      _slots.delete(v.id)
+      continue
+    }
     try {
       registerCustomView({
         id: `opide-ext-cv-${v.id}`,
