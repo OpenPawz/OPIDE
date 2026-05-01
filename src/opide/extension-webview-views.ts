@@ -57,17 +57,19 @@ function ensureMessageListener(): void {
             try { inst.iframe?.contentWindow?.postMessage(m, '*') } catch { /* ignore */ }
           }
           inst.pendingMessages.length = 0
-        } else if (event.data && typeof event.data === 'object' && event.data.__opide_webview_error__) {
-          // Iframe-side runtime error captured by the script we
-          // inject. Pipe straight to OPIDE.log so the user can see
-          // what crashed inside the extension's webview without
-          // opening dev tools.
-          const err = event.data.__opide_webview_error__
-          const summary =
-            `iframe error in ${inst.viewId}: ${err.kind || 'error'}: ${err.message || ''}` +
-            (err.source ? ` (${err.source}:${err.line}:${err.col})` : '') +
-            (err.stack ? `\nstack: ${String(err.stack).split('\n').slice(0, 8).join(' | ')}` : '')
-          logToFile(summary)
+        } else if (event.data && typeof event.data === 'object' && event.data.__opide_webview_diag__) {
+          const d = event.data.__opide_webview_diag__
+          if (d.kind === 'loaded') {
+            logToFile(`iframe LOADED for ${inst.viewId} — UA=${(d.userAgent || '').slice(0, 60)}`)
+          } else if (d.kind === 'domready') {
+            logToFile(`iframe DOM ready for ${inst.viewId}`)
+          } else if (d.kind === 'error' || d.kind === 'unhandledrejection') {
+            const summary =
+              `iframe ${d.kind} in ${inst.viewId}: ${d.message || ''}` +
+              (d.source ? ` (${d.source}:${d.line}:${d.col})` : '') +
+              (d.stack ? `\nstack: ${String(d.stack).split('\n').slice(0, 8).join(' | ')}` : '')
+            logToFile(summary)
+          }
         } else {
           inst.onMessage(event.data)
         }
@@ -110,17 +112,19 @@ function buildBody(inst: WebviewViewInst, root: HTMLElement): void {
 
 function injectScripts(html: string): string {
   const readyScript = `<script>(function(){try{window.parent.postMessage('__opide_webview_ready__','*')}catch(e){}})();</script>`
-  // Forward iframe-side runtime errors to the parent so we can see
-  // what's actually failing inside extension webviews. Without this,
-  // an error in Claude Code's React app shows up as an empty panel
-  // with the stack visible only via dev tools (which the user
-  // doesn't want to use). Errors land in OPIDE.log via the
-  // __opide_webview_error__ message handler in extension-webview-views.
+  // Diagnostic: error capture + load proof. We listen for runtime
+  // errors AND post a single "iframe loaded" message on script
+  // execution so we can tell from OPIDE.log whether JS in the iframe
+  // ever runs at all. If we see the loaded message but no error and
+  // no UI: Claude Code's content is rendering invisibly. If we see
+  // neither: the iframe itself isn't executing scripts.
   const errorCaptureScript = `<script>
     (function(){
       function send(payload){
-        try { window.parent.postMessage({ __opide_webview_error__: payload }, '*'); } catch(e){}
+        try { window.parent.postMessage({ __opide_webview_diag__: payload }, '*'); } catch(e){}
       }
+      // Fire immediately so we know the iframe ran SOMETHING.
+      send({ kind: 'loaded', userAgent: navigator.userAgent, location: String(location.href) });
       window.addEventListener('error', function(ev){
         send({
           kind: 'error',
@@ -138,8 +142,20 @@ function injectScripts(html: string): string {
           stack: ev.reason && ev.reason.stack ? String(ev.reason.stack) : '',
         });
       });
+      // DOM-ready signal — separate from script-load so we can see if
+      // parsing of the rest of the document succeeded.
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function(){ send({ kind: 'domready' }); });
+      } else {
+        send({ kind: 'domready' });
+      }
     })();
   </script>`
+  // Visible test marker so the user can SEE whether the iframe
+  // rendered ANYTHING, regardless of whether Claude Code's CSS / JS
+  // works. A bright banner at the very top of body. If you see this
+  // strip in the panel, the iframe is alive.
+  const testMarker = `<div style="position:fixed;top:0;left:0;right:0;background:#d4a843;color:#000;padding:4px 8px;font:12px system-ui;z-index:99999;border-bottom:2px solid #000;">OPIDE: iframe is rendering. Claude Code content should appear below.</div>`
   const vsCodeApiShim = `<script>
     (function(){
       let _state = undefined;
@@ -190,11 +206,13 @@ function injectScripts(html: string): string {
   } else {
     rewritten = `<!doctype html><html><head>${errorCaptureScript}</head>${rewritten}`
   }
-  // The other shim + ready handshake still go at the start of body.
+  // The other shim + ready handshake + visible marker go at the
+  // start of body so the marker sits above whatever Claude Code
+  // renders.
   if (/<body[^>]*>/i.test(rewritten)) {
-    return rewritten.replace(/<body([^>]*)>/i, `<body$1>${vsCodeApiShim}${readyScript}`)
+    return rewritten.replace(/<body([^>]*)>/i, `<body$1>${testMarker}${vsCodeApiShim}${readyScript}`)
   }
-  return `<!doctype html>${rewritten}<body>${vsCodeApiShim}${readyScript}</body>`
+  return `<!doctype html>${rewritten}<body>${testMarker}${vsCodeApiShim}${readyScript}</body>`
 }
 
 // ─── Public API ────────────────────────────────────────────────────────
