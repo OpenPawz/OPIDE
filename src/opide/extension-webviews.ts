@@ -346,10 +346,15 @@ export function setWebviewHtml(panelId: string, html: string): void {
   if (!inst) return
 
   // Inject a small ready-handshake script so we can flush queued
-  // postMessages once the iframe's contentWindow is alive. Extensions
-  // call panel.webview.html = '...' before calling postMessage, so
-  // without this, early messages would be dropped.
-  const readyScript = `<script>(function(){try{window.parent.postMessage('__opide_webview_ready__','*')}catch(e){}})();</script>`
+  // postMessages once the iframe's contentWindow is alive. Fired on
+  // window.load (NOT immediately) so any deferred/end-of-body bundle
+  // scripts have loaded and attached their message listeners before
+  // the parent flushes queued initial-state messages.
+  const readyScript = `<script>(function(){
+    function ping(){ try{ window.parent.postMessage('__opide_webview_ready__','*') }catch(e){} }
+    if (document.readyState === 'complete') ping();
+    else { window.addEventListener('load', ping); document.addEventListener('DOMContentLoaded', function(){ setTimeout(ping, 250) }); }
+  })();</script>`
   // VS Code extensions expect a `acquireVsCodeApi()` global.
   const vsCodeApiShim = `<script>
     (function(){

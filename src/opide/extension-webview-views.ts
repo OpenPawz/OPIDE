@@ -111,7 +111,26 @@ function buildBody(inst: WebviewViewInst, root: HTMLElement): void {
 }
 
 function injectScripts(html: string): string {
-  const readyScript = `<script>(function(){try{window.parent.postMessage('__opide_webview_ready__','*')}catch(e){}})();</script>`
+  // Fire ready signal on window.load (AFTER all scripts including
+  // the extension's bundle have loaded and attached listeners).
+  // Firing immediately races with deferred / end-of-body bundle
+  // scripts: the parent flushes queued messages before the bundle's
+  // window.addEventListener('message',...) runs, so initial state
+  // messages get lost and the React app never rendres anything past
+  // its empty skeleton.
+  const readyScript = `<script>(function(){
+    function ping(){ try{ window.parent.postMessage('__opide_webview_ready__','*') }catch(e){} }
+    if (document.readyState === 'complete') {
+      ping();
+    } else {
+      window.addEventListener('load', ping);
+      // Belt-and-braces: also fire 250ms after DOMContentLoaded in
+      // case 'load' is held back by lingering resource fetches.
+      document.addEventListener('DOMContentLoaded', function(){
+        setTimeout(ping, 250);
+      });
+    }
+  })();</script>`
   // Diagnostic: error capture + load proof. We listen for runtime
   // errors AND post a single "iframe loaded" message on script
   // execution so we can tell from OPIDE.log whether JS in the iframe
