@@ -396,6 +396,31 @@ class TabInputTerminal {}
 
 enum LogLevel { Off = 0, Trace = 1, Debug = 2, Info = 3, Warning = 4, Error = 5 }
 
+/** `vscode.RelativePattern` — extensions construct these for file
+ * watchers and search globs (`new vscode.RelativePattern(workspaceFolder,
+ * '**\/*.ts')`). Roo, Cline, Continue all use this at activation. We
+ * just retain the fields; consumers (workspace.findFiles, file
+ * watchers) read .base + .pattern. */
+class RelativePattern {
+  baseUri: any;
+  base: string;
+  pattern: string;
+  constructor(base: any, pattern: string) {
+    if (base && typeof base === 'object' && 'uri' in base) {
+      // WorkspaceFolder shape — extract the URI.
+      this.baseUri = base.uri;
+      this.base = base.uri?.fsPath ?? String(base.uri);
+    } else if (base instanceof Uri) {
+      this.baseUri = base;
+      this.base = base.fsPath;
+    } else {
+      this.base = String(base);
+      this.baseUri = Uri.file(this.base);
+    }
+    this.pattern = pattern;
+  }
+}
+
 /** `vscode.MarkdownString` — used for hover content / chat content. */
 class MarkdownString {
   value: string;
@@ -1423,6 +1448,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     TabInputNotebookDiff,
     TabInputTerminal,
     LogLevel,
+    RelativePattern,
     MarkdownString,
     Hover,
     CodeAction,

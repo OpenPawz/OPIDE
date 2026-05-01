@@ -183,7 +183,11 @@ export function registerExtensionContributions(
   try { injectStyle() } catch (e) {
     logToFile(`injectStyle failed: ${String((e as Error)?.message || e)}`)
   }
-  traceLog(
+  // Keep this at file-log level — it's the single signal that
+  // contributed views from a given extension were processed. Without
+  // it we can't tell whether a missing-tab is "pre-mount didn't run"
+  // vs "pre-mount ran, attach failed". Fires once per extension.
+  logToFile(
     `pre-mounting for ${extensionId}: ${containers.length} container(s), ${views.length} view(s)`,
   )
 

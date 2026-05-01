@@ -182,8 +182,20 @@ pub async fn run_full_index(
         "percent": 0,
     }));
 
-    // Phase I1: Scan and parse
-    let project = index_workspace(root);
+    // Phase I1: Scan and parse — CPU-heavy synchronous fs walk + AST
+    // parse. Runs on a dedicated blocking thread (spawn_blocking)
+    // instead of a tokio worker thread; otherwise it hogs a worker for
+    // 60+ seconds on a large workspace and Tauri command RPCs
+    // (extension bridge, secrets, decorations) time out, which makes
+    // extensions fail to fully activate and webview tabs vanish.
+    let root_owned = root.to_path_buf();
+    let project = match tokio::task::spawn_blocking(move || index_workspace(&root_owned)).await {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("[indexer] index_workspace task panicked: {}", e);
+            return;
+        }
+    };
 
     let _ = app_handle.emit("indexer-progress", serde_json::json!({
         "phase": "chunking",
@@ -192,8 +204,21 @@ pub async fn run_full_index(
         "percent": 25,
     }));
 
-    // Phase I2: Chunk
-    let mut chunks = chunker::chunk_project(&project, root);
+    // Phase I2: Chunk — also CPU-heavy (parses every file with
+    // tree-sitter). Same spawn_blocking treatment.
+    let root_for_chunk = root.to_path_buf();
+    let project_for_chunk = project.clone();
+    let mut chunks = match tokio::task::spawn_blocking(move || {
+        chunker::chunk_project(&project_for_chunk, &root_for_chunk)
+    })
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[indexer] chunk_project task panicked: {}", e);
+            return;
+        }
+    };
     log::info!("[indexer] {} chunks from {} files", chunks.len(), project.file_count());
 
     // B177: warm the embedding cache from a prior run if we have one.

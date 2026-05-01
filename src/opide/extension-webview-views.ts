@@ -185,11 +185,13 @@ export function registerWebviewView(
     const slotNow = findPreMountedSlot(viewId)
     if (slotNow && slotNow.type === 'webview') return
     if (_views.get(viewId) !== inst) return
-    // No contributed view ever appeared. We DON'T fall back to a
-    // legacy custom view here — without a contributes.views entry we
-    // can't know which container the extension wanted. Log and wait;
-    // most extensions DO declare their views in package.json.
-    logToFile(`registerWebviewView: no pre-mounted slot for ${viewId} after grace period`)
+    // No contributed view appeared in the 250ms grace window. This
+    // is NORMAL timing — pre-mount runs on extensionHost/ready which
+    // fires later (after all activations). The pending entry stays
+    // in _pendingProviders and drainPendingForSlot attaches when
+    // pre-mount runs. Trace-only; only matters if pre-mount NEVER
+    // runs at all (which we'd see by missing `pre-mounting for X`).
+    traceLog(`registerWebviewView: no pre-mounted slot for ${viewId} after grace period (will attach later via drainPendingForSlot)`)
   }, 250)
 }
 
@@ -233,7 +235,10 @@ export function setWebviewViewHtml(viewId: string, html: string): void {
     return
   }
   inst.webview.setHtml(html)
-  traceLog(`setWebviewViewHtml: applied to ${viewId}, len=${html.length}`)
+  // File-log: rare event (once per webview html refresh) and a key
+  // observability point — if setHtml never fires the panel stays blank
+  // and we need to know that vs "setHtml fired but rendering broke".
+  logToFile(`setWebviewViewHtml: applied to ${viewId}, len=${html.length}`)
 }
 
 export function postMessageToWebviewView(viewId: string, message: any): void {
