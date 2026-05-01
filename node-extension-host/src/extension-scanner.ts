@@ -82,6 +82,34 @@ export function scanExtensions(extensionsDir: string): ScannedExtension[] {
       const raw = fs.readFileSync(manifestPath, 'utf-8');
       const manifest = JSON.parse(raw);
 
+      // Load NLS dictionary so we can resolve `%foo.bar%` placeholders
+      // in user-visible strings (view names, container titles, etc.).
+      // Real VS Code picks <locale>.json based on env locale; we always
+      // fall back to package.nls.json. Without this, sidebar tabs show
+      // "%views.sidebar.name%" literally (Roo, Cline, GitLens all use
+      // localized titles).
+      const nlsDict: Record<string, string> = {};
+      const nlsPath = path.join(extDir, 'package.nls.json');
+      if (fs.existsSync(nlsPath)) {
+        try {
+          const nlsRaw = fs.readFileSync(nlsPath, 'utf-8');
+          const parsed = JSON.parse(nlsRaw);
+          for (const [k, v] of Object.entries(parsed)) {
+            if (typeof v === 'string') nlsDict[k] = v;
+            else if (v && typeof v === 'object' && 'message' in (v as any)) {
+              nlsDict[k] = String((v as any).message ?? '');
+            }
+          }
+        } catch { /* malformed nls — ignore, fall back to placeholders */ }
+      }
+      const resolveNls = (s: any): any => {
+        if (typeof s !== 'string') return s;
+        // VS Code's placeholder syntax: %some.key%
+        return s.replace(/%([a-zA-Z0-9_.-]+)%/g, (full, key) =>
+          nlsDict[key] !== undefined ? nlsDict[key] : full,
+        );
+      };
+
       // Must have name and publisher (or a combined id)
       const publisher = manifest.publisher || 'unknown';
       const name = manifest.name || entry.name;
@@ -126,7 +154,7 @@ export function scanExtensions(extensionsDir: string): ScannedExtension[] {
           ext.contributedViewContainers.push({
             surface,
             id: e.id,
-            title: e.title || e.id,
+            title: resolveNls(e.title) || e.id,
             iconPath,
             codiconId,
           });
@@ -147,11 +175,11 @@ export function scanExtensions(extensionsDir: string): ScannedExtension[] {
           ext.contributedViews.push({
             containerId,
             id: v.id,
-            name: v.name || v.id,
+            name: resolveNls(v.name) || v.id,
             type: v.type === 'webview' ? 'webview' : 'tree',
             when: v.when,
             visibility: v.visibility,
-            contextualTitle: v.contextualTitle,
+            contextualTitle: resolveNls(v.contextualTitle),
           });
         }
       }
