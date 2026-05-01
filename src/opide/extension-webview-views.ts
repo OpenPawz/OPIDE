@@ -72,25 +72,76 @@ async function getActiveCodeWindow(): Promise<any> {
   return getActiveWindow()
 }
 
+/** Track ResizeObservers per view so we can re-layout the absolutely-
+ * positioned overlay webview when its slot resizes (auxiliary bar
+ * width changes, panel toggles, etc.) and dispose them cleanly. */
+const _layoutObservers = new Map<string, ResizeObserver>()
+
+function attachLayoutObserver(inst: WebviewViewInst, root: HTMLElement): void {
+  // Tear down any prior observer for this view (re-mount case).
+  const prior = _layoutObservers.get(inst.viewId)
+  if (prior) {
+    try { prior.disconnect() } catch { /* ignore */ }
+    _layoutObservers.delete(inst.viewId)
+  }
+  if (typeof ResizeObserver === 'undefined') return
+  try {
+    const obs = new ResizeObserver(() => {
+      // Re-layout on every size change. Cheap; layoutWebviewOverElement
+      // just updates the overlay's absolute position + dimensions.
+      try { inst.webview?.layoutWebviewOverElement?.(root) } catch { /* ignore */ }
+    })
+    obs.observe(root)
+    _layoutObservers.set(inst.viewId, obs)
+  } catch (e) {
+    logToFile(`ResizeObserver setup failed for ${inst.viewId}: ${(e as Error)?.message || e}`)
+  }
+}
+
 async function buildWebview(inst: WebviewViewInst, root: HTMLElement): Promise<void> {
-  traceLog(`buildWebview START for ${inst.viewId}, pendingHtml=${inst.pendingHtml ? `len=${inst.pendingHtml.length}` : 'null'}`)
+  traceLog(`buildWebview START for ${inst.viewId}, pendingHtml=${inst.pendingHtml ? `len=${inst.pendingHtml.length}` : 'null'}, hasExisting=${inst.webview ? 'yes' : 'no'}`)
   inst.container = root
-  root.style.cssText = 'display:flex;flex-direction:column;height:100%;width:100%;background:var(--vscode-sideBar-background);'
+  root.style.cssText = 'display:flex;flex-direction:column;height:100%;width:100%;background:var(--vscode-sideBar-background);position:relative;'
 
   const service = await getWebviewService()
   const targetWindow = await getActiveCodeWindow()
   const { URI } = await import('@codingame/monaco-vscode-api/vscode/vs/base/common/uri')
 
+  // ── Tab-switch survival ──────────────────────────────────────────────
+  // When the user switches between tabs in the auxiliary bar (Claude Code
+  // ↔ Roo ↔ OPIDE), monaco unmounts the previous renderBody's DOM. An
+  // IWebviewElement's iframe is destroyed when its parent hierarchy
+  // changes — so the next click would land on a dead webview. We use
+  // IOverlayWebview instead: it owns its own absolutely-positioned
+  // container that we layoutWebviewOverElement(root) onto. claim/release
+  // is the lifecycle for ownership across re-mounts. The webview is
+  // created ONCE per view; subsequent renderBody calls just re-claim
+  // and re-layout it over the new root.
+  if (inst.webview) {
+    // Re-mount path: webview already exists from a previous renderBody.
+    // Re-claim ownership and reposition over the new root element.
+    try {
+      inst.webview.claim(inst, targetWindow, undefined)
+      inst.webview.layoutWebviewOverElement(root)
+      attachLayoutObserver(inst, root)
+      traceLog(`buildWebview RE-CLAIMED existing webview for ${inst.viewId}`)
+    } catch (e) {
+      logToFile(`re-claim failed for ${inst.viewId}: ${(e as Error)?.message || e}`)
+    }
+    return
+  }
+
   const enableScripts = inst.options?.webviewOptions?.enableScripts !== false
   const enableForms = !!inst.options?.webviewOptions?.enableForms
   const localRoots = inst.localResourceRoots.map((p) => URI.file(p))
 
-  const webview = service.createWebviewElement({
+  // First mount: create the overlay webview. It outlives tab switches.
+  const webview = service.createWebviewOverlay({
     providedViewType: inst.viewId,
     title: inst.viewId,
     options: {
       purpose: 'webviewView',
-      retainContextWhenHidden: !!inst.options?.webviewOptions?.retainContextWhenHidden,
+      retainContextWhenHidden: true, // overlay model means content always retained
     },
     contentOptions: {
       allowScripts: enableScripts,
@@ -104,13 +155,12 @@ async function buildWebview(inst: WebviewViewInst, root: HTMLElement): Promise<v
   })
   inst.webview = webview
 
-  // Mount the webview iframe into our slot's container.
-  webview.mountTo(root, targetWindow)
+  // Claim ownership and absolutely position over the slot's root element.
+  webview.claim(inst, targetWindow, undefined)
+  webview.layoutWebviewOverElement(root)
+  attachLayoutObserver(inst, root)
 
-  // Bridge postMessages back to the sidecar. The workbench webview
-  // emits onMessage when the iframe's React app calls
-  // vscode.postMessage; we forward to onMessage which the bridge wires
-  // to webviewView/onMessage RPC.
+  // Bridge postMessages back to the sidecar.
   webview.onMessage((ev: any) => {
     inst.onMessage(ev?.message)
   })
@@ -218,6 +268,17 @@ export function drainPendingForSlot(viewId: string): boolean {
 export function disposeWebviewView(viewId: string): void {
   const inst = _views.get(viewId)
   if (!inst) return
+  // Tear down the ResizeObserver before the webview itself so we
+  // don't fire stale layout calls into a disposed overlay.
+  const obs = _layoutObservers.get(viewId)
+  if (obs) {
+    try { obs.disconnect() } catch { /* ignore */ }
+    _layoutObservers.delete(viewId)
+  }
+  // Release the overlay claim before disposing — otherwise the
+  // workbench may keep holding a reference and re-show the iframe
+  // on next claim() from a different consumer.
+  try { inst.webview?.release?.(inst) } catch { /* ignore */ }
   try { inst.webview?.dispose?.() } catch { /* ignore */ }
   if (inst.container) inst.container.innerHTML = ''
   _views.delete(viewId)
