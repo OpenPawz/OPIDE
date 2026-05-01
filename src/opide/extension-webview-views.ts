@@ -223,6 +223,24 @@ export function registerWebviewView(
   }
   _views.set(viewId, inst)
 
+  // Pre-warm: kick off resolveWebviewView IMMEDIATELY (don't wait for
+  // first user click). The extension's resolveWebviewView fires
+  // synchronously, sets webview.html, and the resulting setHtml RPC
+  // lands in inst.pendingHtml. When the user finally clicks the tab,
+  // buildWebview applies the cached HTML straight away — no 1-2s
+  // bundle parse delay on first reveal.
+  //
+  // Without this, Claude Code's 4.8 MB webview bundle was parsed only
+  // when the user clicked the tab; first click felt sluggish even
+  // though every click after was instant. This makes first click match
+  // VS Code's "instant" feel because the iframe is already loaded.
+  if (!inst.resolved) {
+    inst.resolved = true
+    try { onResolve() } catch (e) {
+      logToFile(`pre-warm onResolve threw for ${viewId}: ${(e as Error)?.message || e}`)
+    }
+  }
+
   // Two-phase: if a slot was pre-mounted from package.json contributes.views,
   // attach to it. Otherwise queue and resolve once the slot appears.
   const preMounted = findPreMountedSlot(viewId)

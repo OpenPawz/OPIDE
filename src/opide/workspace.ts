@@ -25,6 +25,23 @@ async function notifyEngineWorkspace(path: string | null): Promise<void> {
   }
 }
 
+/** Compare two paths as if from the same filesystem. Strips trailing
+ * slashes and (on macOS / Windows) lowercases for case-insensitive
+ * compare. Used to detect "user picked the folder they're already in"
+ * so we can no-op the open-folder flow without reload. */
+function pathEquals(a: string, b: string): boolean {
+  if (!a || !b) return false
+  const norm = (p: string) => {
+    let n = p.replace(/[/\\]+$/, '')
+    // navigator.userAgent is reliable for OS detection in webview;
+    // Tauri runs in a real WebKit/Edge so this works.
+    const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || ''
+    if (/Mac OS X|Macintosh|Windows/.test(ua)) n = n.toLowerCase()
+    return n
+  }
+  return norm(a) === norm(b)
+}
+
 // ─── Deduplication guards ───────────────────────────────────────────────────
 
 const _initializedPaths = new Set<string>()
@@ -170,6 +187,18 @@ export async function pickAndOpenFolder(): Promise<boolean> {
     tlog(`[step 3] dialog returned: ${selected}`)
 
     if (!selected || typeof selected !== 'string') return false
+
+    // Fast path: user picked the folder we're already in. The full
+    // open-folder flow ends in window.location.reload() (because
+    // monaco-vscode-api hardcodes enterWorkspace = unsupported), and
+    // reloading on a "no-op" folder pick is the most jarring slowdown
+    // — extension host respawns, every webview re-mounts, etc.
+    // Detect the no-op and just return true without doing anything.
+    const currentPath = getWorkspacePath()
+    if (currentPath && pathEquals(currentPath, selected)) {
+      tlog(`[step 3-noop] already in this workspace (${selected}) — skipping reload`)
+      return true
+    }
 
     // Replace current workspace (remove existing folders, add new one)
     try {
