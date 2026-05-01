@@ -13,6 +13,76 @@ import { scanExtensions, ScannedExtension } from './extension-scanner';
 import { createVSCodeApi } from './api-shim';
 import * as path from 'path';
 
+// ─── fs.watch FD cap ─────────────────────────────────────────────────────────
+//
+// Roo (and other extensions using chokidar internally) can launch
+// hundreds of recursive file watchers, each consuming a file
+// descriptor. Even with `ulimit -n 65536`, a chokidar `watch('/')`
+// pointed at a sufficiently large tree blows the limit and trips
+// EMFILE on every subsequent fs.open — wedging the sidecar.
+//
+// Patch fs.watch + fs.watchFile globally to:
+//   1. Cap the total active watcher count at MAX_WATCHERS.
+//   2. Once over the cap, return a no-op watcher (extension's change
+//      events stop firing, but it doesn't crash; the IDE stays alive).
+//   3. Log every cap hit so we can see which extensions are abusive.
+//
+// Done before any extension code can require('fs').
+{
+  const MAX_WATCHERS = 4096;
+  const fs = require('fs');
+  const realWatch = fs.watch;
+  const realWatchFile = fs.watchFile;
+  let active = 0;
+  let warned = false;
+  function noopWatcher(): any {
+    return {
+      close: () => {},
+      on: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      removeAllListeners: () => {},
+      emit: () => false,
+      ref: () => {},
+      unref: () => {},
+    };
+  }
+  fs.watch = function patchedWatch(this: any, ...args: any[]): any {
+    if (active >= MAX_WATCHERS) {
+      if (!warned) {
+        warned = true;
+        process.stderr.write(
+          `[bootstrap] fs.watch cap hit (${MAX_WATCHERS}). Returning no-op watchers; ` +
+          `extension that hit the cap will stop receiving file change events. ` +
+          `First over-cap path: ${String(args[0]).slice(0, 200)}\n`,
+        );
+      }
+      return noopWatcher();
+    }
+    let watcher: any;
+    try {
+      watcher = realWatch.apply(fs, args as any);
+    } catch (e: any) {
+      // EMFILE etc — return no-op so the extension doesn't crash.
+      process.stderr.write(`[bootstrap] fs.watch threw (${e?.code || e?.message}); returning no-op\n`);
+      return noopWatcher();
+    }
+    active++;
+    const realClose = watcher.close.bind(watcher);
+    let closed = false;
+    watcher.close = (...closeArgs: any[]) => {
+      if (!closed) { closed = true; active--; }
+      return realClose(...closeArgs);
+    };
+    return watcher;
+  };
+  // watchFile uses StatWatchers — same FD pressure. Apply the same cap.
+  fs.watchFile = function patchedWatchFile(this: any, ...args: any[]): any {
+    if (active >= MAX_WATCHERS) return noopWatcher();
+    return realWatchFile.apply(fs, args as any);
+  };
+}
+
 // ─── Parse CLI args ──────────────────────────────────────────────────────────
 
 function parseArgs(): { extensionsPath: string; workspacePath: string } {
