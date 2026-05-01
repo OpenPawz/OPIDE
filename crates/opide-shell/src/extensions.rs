@@ -180,6 +180,20 @@ pub async fn ext_extract_vsix(vsix_path: String, target_dir: String) -> Result<(
             let mut out =
                 std::fs::File::create(&out_path).map_err(|e| format!("create entry: {}", e))?;
             std::io::copy(&mut entry, &mut out).map_err(|e| format!("copy entry: {}", e))?;
+            // Preserve unix executable bit. VSIX is a zip; extensions
+            // that bundle native binaries (Claude Code, Cline, etc.)
+            // store them with mode 0755. Without this the file lands
+            // 0644 and `spawn` fails with EACCES.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(mode) = entry.unix_mode() {
+                    let _ = std::fs::set_permissions(
+                        &out_path,
+                        std::fs::Permissions::from_mode(mode),
+                    );
+                }
+            }
         }
     }
 

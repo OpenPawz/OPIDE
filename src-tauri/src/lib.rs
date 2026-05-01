@@ -142,6 +142,7 @@ async fn close_chat_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Increase tokio worker thread stack size from 2MB to 8MB.
@@ -166,6 +167,14 @@ pub fn run() {
     opide_engine::engine::engram::cognitive_event::init();
 
     tauri::Builder::default()
+        // Webview resource loading is handled by monaco-vscode-api's
+        // workbench webview service worker (registered via
+        // @codingame/monaco-vscode-view-common-service-override).
+        // Extensions get URLs of the form
+        // https://file+.vscode-resource.vscode-cdn.net/<path> from
+        // webview.asWebviewUri(); the service worker intercepts those
+        // requests and serves them from the webview's localResourceRoots.
+        // No custom Tauri URI scheme needed.
         .manage(engine_state)
         .manage(opide_shell::terminal::TerminalState::new())
         .manage(opide_shell::watcher::WatcherState::new())

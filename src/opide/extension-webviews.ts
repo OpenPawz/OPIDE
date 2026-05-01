@@ -21,13 +21,18 @@ interface WebviewPanelInst {
   panelId: string
   viewType: string
   title: string
-  iframe: HTMLIFrameElement
+  /** Real workbench webview element from IWebviewService. Owns its own
+   * iframe inside the body div. We talk to it via setHtml/postMessage/
+   * onMessage instead of constructing an iframe by hand. */
+  webview: any | null
   tab: HTMLButtonElement
   body: HTMLDivElement
   panel: HTMLDivElement
   pendingMessages: any[]
-  ready: boolean
+  pendingHtml: string | null
   options: any
+  extensionId: string
+  extensionPath: string
   onMessage: (panelId: string, message: any) => void
   onDispose: (panelId: string) => void
   onViewState: (panelId: string, state: { visible: boolean; active: boolean }) => void
@@ -38,7 +43,6 @@ let _activePanelId: string | null = null
 let _dockEl: HTMLDivElement | null = null
 let _tabStripEl: HTMLDivElement | null = null
 let _bodyAreaEl: HTMLDivElement | null = null
-let _messageListener: ((e: MessageEvent) => void) | null = null
 
 // ─── Dock infrastructure ───────────────────────────────────────────────
 
@@ -181,33 +185,26 @@ function ensureDock(): void {
   // resizer is owned by the dock subtree; no separate ref needed.
   void resizer
 
-  // Single global listener for postMessage from any iframe. We dispatch
-  // by matching the source iframe contentWindow against our registry.
-  // Cheaper than per-panel listeners and survives panel recreation.
-  if (!_messageListener) {
-    _messageListener = (event: MessageEvent) => {
-      for (const panel of _panels.values()) {
-        if (event.source === panel.iframe.contentWindow) {
-          // Ignore the iframe's "ready" handshake; only forward extension
-          // messages. Extensions in VS Code use vscode-webview-api's
-          // postMessage which always carries a payload, so we only care
-          // about events with `data`.
-          if (event.data === '__opide_webview_ready__') {
-            panel.ready = true
-            // Flush any queued messages now that the iframe is alive.
-            for (const m of panel.pendingMessages) {
-              try { panel.iframe.contentWindow?.postMessage(m, '*') } catch { /* ignore */ }
-            }
-            panel.pendingMessages.length = 0
-          } else {
-            panel.onMessage(panel.panelId, event.data)
-          }
-          break
-        }
-      }
-    }
-    window.addEventListener('message', _messageListener)
-  }
+  // No global window message listener needed — the workbench webview
+  // service emits onMessage events on each individual IWebviewElement,
+  // which we wire up per-panel in createWebviewPanel.
+}
+
+/** Resolve the workbench webview service (lazy — workbench may not be
+ * fully up at module load time). */
+async function getWebviewService(): Promise<any> {
+  const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+  const { IWebviewService } = await import(
+    '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/webview/browser/webview.service'
+  )
+  return StandaloneServices.get(IWebviewService)
+}
+
+async function getActiveCodeWindow(): Promise<any> {
+  const { getActiveWindow } = await import(
+    '@codingame/monaco-vscode-api/vscode/vs/base/browser/dom'
+  )
+  return getActiveWindow()
 }
 
 /** Drag-resize handler for the dock's left edge. Lets the user widen
@@ -245,6 +242,7 @@ export function createWebviewPanel(
     viewType: string
     title: string
     options?: any
+    extensionId?: string
     extensionPath?: string
   },
   onMessage: (panelId: string, message: any) => void,
@@ -254,7 +252,7 @@ export function createWebviewPanel(
   ensureDock()
   if (!_tabStripEl || !_bodyAreaEl) return
 
-  const { panelId, viewType, title, options } = params
+  const { panelId, viewType, title, options, extensionId = '', extensionPath = '' } = params
 
   // Tab button
   const tab = document.createElement('button')
@@ -279,44 +277,80 @@ export function createWebviewPanel(
 
   _tabStripEl.appendChild(tab)
 
-  // Body + iframe
+  // Body — the workbench webview will mount its own iframe here.
   const body = document.createElement('div')
   body.className = 'opide-webview-body'
-
-  const iframe = document.createElement('iframe')
-  // Sandbox attributes derived from extension's enableScripts option.
-  // VS Code default: enableScripts=false -> sandboxed without scripts.
-  // We default to enableScripts=true for compatibility with most
-  // extensions; if an extension explicitly opts out we can lock it down.
-  const enableScripts = options?.enableScripts !== false
-  const sandbox = ['allow-same-origin']
-  if (enableScripts) sandbox.push('allow-scripts')
-  if (options?.enableForms) sandbox.push('allow-forms')
-  iframe.setAttribute('sandbox', sandbox.join(' '))
-  // Permissions-policy: extensions can't access camera/mic by default.
-  iframe.setAttribute('allow', '')
-  body.appendChild(iframe)
-
   _bodyAreaEl.appendChild(body)
 
   const inst: WebviewPanelInst = {
     panelId,
     viewType,
     title,
-    iframe,
+    webview: null,
     tab,
     body,
-    panel: body, // alias so we can call removeChild without ambiguity
+    panel: body,
     pendingMessages: [],
-    ready: false,
+    pendingHtml: null,
     options: options || {},
+    extensionId,
+    extensionPath,
     onMessage,
     onDispose,
     onViewState,
   }
   _panels.set(panelId, inst)
 
+  // Construct the real workbench webview asynchronously and mount it.
+  void mountPanelWebview(inst)
+
   activatePanel(panelId)
+}
+
+async function mountPanelWebview(inst: WebviewPanelInst): Promise<void> {
+  const service = await getWebviewService()
+  const targetWindow = await getActiveCodeWindow()
+  const { URI } = await import('@codingame/monaco-vscode-api/vscode/vs/base/common/uri')
+
+  const enableScripts = inst.options?.enableScripts !== false
+  const enableForms = !!inst.options?.enableForms
+  const localRoots = inst.extensionPath ? [URI.file(inst.extensionPath)] : []
+
+  const webview = service.createWebviewElement({
+    providedViewType: inst.viewType,
+    title: inst.title,
+    options: {
+      purpose: 'webviewView',
+      retainContextWhenHidden: !!inst.options?.retainContextWhenHidden,
+    },
+    contentOptions: {
+      allowScripts: enableScripts,
+      allowForms: enableForms,
+      localResourceRoots: localRoots,
+      enableCommandUris: false,
+    },
+    extension: inst.extensionId
+      ? { id: { value: inst.extensionId, _lower: inst.extensionId.toLowerCase() } }
+      : undefined,
+  })
+  inst.webview = webview
+
+  webview.mountTo(inst.body, targetWindow)
+
+  webview.onMessage((ev: any) => {
+    inst.onMessage(inst.panelId, ev?.message)
+  })
+
+  if (inst.pendingHtml != null) {
+    webview.setHtml(inst.pendingHtml)
+    inst.pendingHtml = null
+  }
+  if (inst.pendingMessages.length) {
+    for (const m of inst.pendingMessages) {
+      try { webview.postMessage(m) } catch { /* ignore */ }
+    }
+    inst.pendingMessages.length = 0
+  }
 }
 
 /** Switch to the given panel. Hides others, fires onViewState for both
@@ -344,74 +378,25 @@ function activatePanel(panelId: string): void {
 export function setWebviewHtml(panelId: string, html: string): void {
   const inst = _panels.get(panelId)
   if (!inst) return
-
-  // Inject a small ready-handshake script so we can flush queued
-  // postMessages once the iframe's contentWindow is alive. Fired on
-  // window.load (NOT immediately) so any deferred/end-of-body bundle
-  // scripts have loaded and attached their message listeners before
-  // the parent flushes queued initial-state messages.
-  const readyScript = `<script>(function(){
-    function ping(){ try{ window.parent.postMessage('__opide_webview_ready__','*') }catch(e){} }
-    if (document.readyState === 'complete') ping();
-    else { window.addEventListener('load', ping); document.addEventListener('DOMContentLoaded', function(){ setTimeout(ping, 250) }); }
-  })();</script>`
-  // VS Code extensions expect a `acquireVsCodeApi()` global.
-  const vsCodeApiShim = `<script>
-    (function(){
-      let _state = undefined;
-      window.acquireVsCodeApi = function() {
-        return {
-          postMessage: function(msg) { try { window.parent.postMessage(msg, '*'); } catch (e) {} },
-          getState: function() { return _state; },
-          setState: function(s) { _state = s; },
-        };
-      };
-    })();
-  </script>`
-
-  // Same CSP + URL rewrite as extension-webview-views.ts. See the
-  // longer comment there for the rationale; short version: Claude
-  // Code's HTML has a CSP meta tag that allows only vscode-resource:,
-  // we widen it to also allow opide-ext: which is the scheme our
-  // Tauri protocol handler actually serves.
-  let rewritten = html.replace(
-    /(<meta[^>]+http-equiv\s*=\s*["']Content-Security-Policy["'][^>]+content\s*=\s*["'])([^"']+)(["'])/gi,
-    (_full, prefix: string, content: string, suffix: string) => {
-      const widened = content
-        .replace(/vscode-resource:/g, 'vscode-resource: opide-ext:')
-        .replace(/\bopide-ext:\s+opide-ext:/g, 'opide-ext:')
-      return prefix + widened + suffix
-    },
-  )
-  rewritten = rewritten.replace(/vscode-resource:\/\/(\S+?)([\s"'<>])/g, (_m, p: string, term: string) => {
-    const m = p.match(/[\\/]\.opide[\\/]extensions[\\/]([^\\/]+)[\\/](.*)$/)
-    if (m) return `opide-ext://localhost/${encodeURIComponent(m[1])}/${m[2].split(/[\\/]/).map(encodeURIComponent).join('/')}${term}`
-    return `opide-ext://localhost/${p}${term}`
-  })
-
-  // Append our scripts at the start of <body>; if the html has no body,
-  // wrap it. This keeps the extension's html intact while ensuring our
-  // shim runs before extension scripts.
-  let injected = rewritten
-  if (/<body[^>]*>/i.test(rewritten)) {
-    injected = rewritten.replace(/<body([^>]*)>/i, `<body$1>${vsCodeApiShim}${readyScript}`)
-  } else {
-    injected = `<!doctype html><html><head></head><body>${vsCodeApiShim}${readyScript}${rewritten}</body></html>`
+  if (!inst.webview) {
+    inst.pendingHtml = html
+    return
   }
-
-  inst.ready = false
-  inst.iframe.srcdoc = injected
+  // The workbench webview handles CSP, nonce, acquireVsCodeApi
+  // injection, vscode-webview:// resource resolution, and postMessage
+  // queueing internally. We just hand it the raw HTML.
+  inst.webview.setHtml(html)
 }
 
 export function postMessageToWebview(panelId: string, message: any): void {
   const inst = _panels.get(panelId)
   if (!inst) return
-  if (!inst.ready) {
+  if (!inst.webview) {
     inst.pendingMessages.push(message)
     return
   }
   try {
-    inst.iframe.contentWindow?.postMessage(message, '*')
+    inst.webview.postMessage(message)
   } catch (e) {
     console.warn('[ext-webviews] postMessage failed:', e)
   }
@@ -426,6 +411,7 @@ export function disposeWebviewPanel(panelId: string): void {
   const inst = _panels.get(panelId)
   if (!inst) return
 
+  try { inst.webview?.dispose?.() } catch { /* ignore */ }
   inst.tab.remove()
   inst.body.remove()
   _panels.delete(panelId)

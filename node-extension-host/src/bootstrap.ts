@@ -72,7 +72,20 @@ async function activateExtension(
     let exports: any = {};
     if (typeof extModule.activate === 'function') {
       const context = vsCodeApi._createContext(ext.id, ext.path);
-      exports = (await extModule.activate(context)) || {};
+      // Track which extension is currently activating so api-shim
+      // calls (registerWebviewViewProvider, createWebviewPanel, etc.)
+      // can attribute the call back to the originating extension —
+      // needed to grant resource roots and origin keying on webviews.
+      if (typeof (vsCodeApi as any)._setCurrentExtension === 'function') {
+        (vsCodeApi as any)._setCurrentExtension(ext.id, ext.path);
+      }
+      try {
+        exports = (await extModule.activate(context)) || {};
+      } finally {
+        if (typeof (vsCodeApi as any)._setCurrentExtension === 'function') {
+          (vsCodeApi as any)._setCurrentExtension(null, null);
+        }
+      }
     }
 
     const activated: ActivatedExtension = { id: ext.id, exports, extension: ext };

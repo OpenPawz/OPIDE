@@ -1254,7 +1254,16 @@ function handleTreeChildrenResponse(params: any): void {
 // Phase C.C2: webview view lifecycle. Reuses the iframe rendering
 // helpers from extension-webview-views which mounts in a sidebar slot.
 function handleWebviewViewRegisterProvider(params: any): void {
-  void getWebviewViews().then((wv) => wv.registerWebviewView(params?.viewId, params?.options || {}, () => {
+  // Pass the extension's identity through into the options so the
+  // webview can scope localResourceRoots to the extension's install
+  // directory. The api-shim attaches extensionId/extensionPath next
+  // to options before sending the RPC.
+  const enrichedOptions = {
+    ...(params?.options || {}),
+    extensionId: params?.extensionId || params?.options?.extensionId || '',
+    extensionPath: params?.extensionPath || params?.options?.extensionPath || '',
+  }
+  void getWebviewViews().then((wv) => wv.registerWebviewView(params?.viewId, enrichedOptions, () => {
     sendNotification('webviewView/resolve', { viewId: params?.viewId })
   }, (message) => {
     sendNotification('webviewView/messageFromWebview', { viewId: params?.viewId, message })

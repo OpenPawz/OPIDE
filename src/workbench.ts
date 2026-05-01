@@ -123,6 +123,12 @@ import getLocalizationServiceOverride from '@codingame/monaco-vscode-localizatio
 // Full workbench shell — manages activity bar, sidebar, editor, panel, status bar
 import getWorkbenchServiceOverride from '@codingame/monaco-vscode-workbench-service-override'
 
+// View-common: provides IWebviewService + IWebviewViewService — the real
+// VS Code webview infrastructure (iframe creation, acquireVsCodeApi handshake,
+// CSP / nonce, postMessage, localResourceRoots → webview-resource://). Without
+// this, registerWebviewViewProvider has nothing to mount into.
+import getViewCommonServiceOverride from '@codingame/monaco-vscode-view-common-service-override'
+
 // ─── OPIDE custom modules ───────────────────────────────────────────────────
 import { TauriFileSystemProvider } from './tauri-fs-provider.ts'
 import { OpideTerminalBackend } from './opide/terminal-backend.ts'
@@ -281,6 +287,12 @@ export async function initializeWorkbench(): Promise<void> {
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore — works at runtime with 0 args
       ...getLocalizationServiceOverride(),
+
+      // ── Webview infrastructure ────────────────────────────────────────
+      // Registers IWebviewService + IWebviewViewService used by extensions
+      // that contribute panels / sidebar webviews (Claude Code, Continue,
+      // Cline, GitLens, vscode-pull-request-github, etc).
+      ...getViewCommonServiceOverride(),
 
       // ── Full workbench shell (must be last) ────────────────────────────
       ...getWorkbenchServiceOverride(),

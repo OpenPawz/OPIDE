@@ -319,29 +319,26 @@ enum TextEditorCursorStyle {
 }
 
 /**
- * Convert an fsPath that lives inside `~/.opide/extensions/<id>/...`
- * into a real URL the iframe can fetch. Real VS Code uses a custom
- * `vscode-resource://` scheme served by the workbench; we register
- * `opide-ext://` in Tauri (see src-tauri/src/lib.rs's
- * opide_ext_protocol_handler) and route fsPaths inside the extensions
- * root through it.
+ * Compute the webview-resource URL for a local fsPath. Mirrors the
+ * algorithm in monaco-vscode-api's
+ * vs/workbench/contrib/webview/common/webview.js#asWebviewUri so the
+ * URL we hand to the extension matches the format the workbench
+ * webview's service worker recognises and routes to localResourceRoots.
  *
- * For paths OUTSIDE the extensions root we fall back to file:// — the
- * iframe usually can't load those (sandbox + cross-origin), but at
- * least the URI is well-formed.
+ * For a `file:///path/to/foo` URI:
+ *   https://file+.vscode-resource.vscode-cdn.net/path/to/foo
  */
 function fsPathToWebviewUrl(fsPath: string): string {
-  if (!fsPath) return 'opide-ext://localhost/';
-  // Find ".opide/extensions/" anchor and split there.
-  const m = fsPath.match(/[\\/]\.opide[\\/]extensions[\\/]([^\\/]+)[\\/](.*)$/);
-  if (m) {
-    const extId = encodeURIComponent(m[1]);
-    const rel = m[2].split(/[\\/]/).map(encodeURIComponent).join('/');
-    return `opide-ext://localhost/${extId}/${rel}`;
-  }
-  // Outside the extensions dir — best effort.
-  return `file://${fsPath}`;
+  if (!fsPath) return '';
+  // Normalise to forward slashes; ensure leading slash.
+  let p = fsPath.replace(/\\/g, '/');
+  if (!p.startsWith('/')) p = '/' + p;
+  return `https://file+.vscode-resource.vscode-cdn.net${p}`;
 }
+
+/** CSP source matching the webview-resource URLs above. Extensions
+ * template `${webview.cspSource}` into their CSP meta tag. */
+const WEBVIEW_CSP_SOURCE = "'self' https://*.vscode-cdn.net";
 
 // ── Coding-agent API surface ────────────────────────────────────────────
 // These classes / enums / values are accessed at module-load time by every
@@ -770,6 +767,27 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     exports: any;
   }
   const _extensionRegistry = new Map<string, ExtRegistryRec>();
+  /** Set by bootstrap before/after activate(ext) so api-shim calls made
+   * synchronously inside activate (registerWebviewViewProvider,
+   * createWebviewPanel, etc.) can attribute themselves to the right
+   * extension — needed to compute resource roots / origin keys. */
+  let _currentExtensionId: string | null = null;
+  let _currentExtensionPath: string | null = null;
+  /** Case-insensitive registry lookup. VS Code extension IDs are
+   * compared case-insensitively even though they're stored
+   * case-preserving. Claude Code self-references with the same case it
+   * declares in package.json so this rarely matters, but Cline/Continue
+   * sometimes lowercase. */
+  function lookupExtensionRec(id: string): ExtRegistryRec | undefined {
+    if (!id) return undefined;
+    const direct = _extensionRegistry.get(id);
+    if (direct) return direct;
+    const lower = id.toLowerCase();
+    for (const [k, v] of _extensionRegistry) {
+      if (k.toLowerCase() === lower) return v;
+    }
+    return undefined;
+  }
   function toPublicExtension(rec: ExtRegistryRec): any {
     return {
       id: rec.id,
@@ -893,6 +911,13 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     options: any;
   }
   const _webviewViews = new Map<string, WebviewViewProvider>();
+  /** Per-view onDidReceiveMessage emitters. Created in webviewView/resolve
+   * and fired in webviewView/messageFromWebview so the extension's
+   * onDidReceiveMessage callback actually runs when the webview React
+   * app calls vscode.postMessage(...). Without this the webview is mute
+   * to the extension and never gets initial state. */
+  const _webviewViewMessageEmitters = new Map<string, VSCodeEvent<any>>();
+  const _webviewViewDisposeEmitters = new Map<string, VSCodeEvent<void>>();
 
   // ── Phase B registries ────────────────────────────────────────────────
   // Chat participants: extensions register handlers here; OPIDE's chat
@@ -1052,6 +1077,10 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         if (!inst) break;
         const onDidReceiveMessageEvent = new VSCodeEvent<any>('webviewView/messageFromWebview');
         const onDidDisposeEvent = new VSCodeEvent<void>('webviewView/didDispose');
+        // Register the emitters so messageFromWebview can route messages
+        // back to the extension's onDidReceiveMessage handler.
+        _webviewViewMessageEmitters.set(params?.viewId, onDidReceiveMessageEvent);
+        _webviewViewDisposeEmitters.set(params?.viewId, onDidDisposeEvent);
         const view = {
           viewType: params?.viewId,
           webview: {
@@ -1060,7 +1089,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
             // CSP source the extension HTML can use as a placeholder
             // in <meta http-equiv="Content-Security-Policy">. Matches
             // the scheme our protocol handler serves.
-            cspSource: 'opide-ext:',
+            cspSource: WEBVIEW_CSP_SOURCE,
             asWebviewUri(uri: Uri) {
               return Uri.parse(fsPathToWebviewUrl(uri.fsPath));
             },
@@ -1094,8 +1123,15 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         break;
       }
       case 'webviewView/messageFromWebview': {
-        // No registry yet for individual view emitters — the bridge
-        // already routed it; we just log unknown views.
+        const emitter = _webviewViewMessageEmitters.get(params?.viewId);
+        if (emitter) emitter.fire(params?.message);
+        break;
+      }
+      case 'webviewView/didDispose': {
+        const dispEmitter = _webviewViewDisposeEmitters.get(params?.viewId);
+        if (dispEmitter) dispEmitter.fire(undefined);
+        _webviewViewMessageEmitters.delete(params?.viewId);
+        _webviewViewDisposeEmitters.delete(params?.viewId);
         break;
       }
 
@@ -1761,7 +1797,11 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           viewColumn,
           preserveFocus,
           options: options || {},
-          extensionPath,
+          // Per-extension identity (not the global extensions root).
+          // Lets the workbench webview scope localResourceRoots to
+          // just this extension's install dir.
+          extensionId: _currentExtensionId,
+          extensionPath: _currentExtensionPath,
         }).catch((e) => bridge.log(`webview/create failed: ${e}`));
 
         const webview = {
@@ -1793,7 +1833,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           asWebviewUri(uri: Uri) {
             return Uri.parse(fsPathToWebviewUrl(uri.fsPath));
           },
-          cspSource: 'opide-ext:',
+          cspSource: WEBVIEW_CSP_SOURCE,
         };
 
         const wp = {
@@ -1866,7 +1906,16 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       // when the user reveals the view; the extension fills it in.
       registerWebviewViewProvider(viewId: string, provider: any, options?: any) {
         _webviewViews.set(viewId, { viewId, provider, options });
-        rpcRequest('webviewView/registerProvider', { viewId, options: options || {} }).catch(() => {});
+        // Attach current extension's identity so the workbench webview
+        // can scope localResourceRoots correctly. Without this, the
+        // webview can't load <script src="opide-ext://..."> from the
+        // extension's install dir.
+        rpcRequest('webviewView/registerProvider', {
+          viewId,
+          options: options || {},
+          extensionId: _currentExtensionId,
+          extensionPath: _currentExtensionPath,
+        }).catch(() => {});
         return {
           dispose: () => {
             _webviewViews.delete(viewId);
@@ -2115,7 +2164,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         return [..._extensionRegistry.values()].map(toPublicExtension);
       },
       getExtension(id: string): any | undefined {
-        const rec = _extensionRegistry.get(id);
+        const rec = lookupExtensionRec(id);
         return rec ? toPublicExtension(rec) : undefined;
       },
       onDidChange: new VSCodeEvent<void>('onDidChange').event,
@@ -2656,6 +2705,13 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         });
       }
     },
+    /** Bootstrap sets this before calling activate(ext), clears after.
+     * Lets sync-time api-shim calls inside activate() know which
+     * extension is the caller. */
+    _setCurrentExtension(id: string | null, path: string | null) {
+      _currentExtensionId = id;
+      _currentExtensionPath = path;
+    },
     /** Bootstrap calls this after activating an extension so
      * getExtension() reflects current state (isActive, exports). */
     _markExtensionActivated(id: string, exports: any) {
@@ -2673,10 +2729,58 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         process.env.HOME || process.env.USERPROFILE || '/tmp',
         '.opide', 'extension-global-storage', extensionId
       );
+      // Real VS Code populates `context.extension` with the same
+      // Extension object that `vscode.extensions.getExtension(id)`
+      // returns — Claude Code reads `context.extension.packageJSON.version`
+      // during activation, and Continue / Cline do similar. Look up by
+      // case-insensitive match because publisher IDs in package.json
+      // can differ in case from how extensions self-reference.
+      const rec = lookupExtensionRec(extensionId);
+      const extensionPublic = rec ? toPublicExtension(rec) : undefined;
+      // ExtensionContext.environmentVariableCollection — used by
+      // extensions that spawn terminals to inject env vars (Claude Code
+      // sets MCP server port + auth token via this so its CLI inherits
+      // them). Real VS Code applies these to all terminals the
+      // extension creates; we just record them so reads round-trip and
+      // get()?.value works. Forwarding to actual terminal env is a TODO
+      // for when extension-spawned terminals exist.
+      const envMutators = new Map<string, { type: number; value: string; options: any }>();
+      const environmentVariableCollection: any = {
+        persistent: true,
+        description: undefined,
+        replace(name: string, value: string, options?: any) {
+          envMutators.set(name, { type: 1, value, options: options || {} });
+        },
+        append(name: string, value: string, options?: any) {
+          envMutators.set(name, { type: 2, value, options: options || {} });
+        },
+        prepend(name: string, value: string, options?: any) {
+          envMutators.set(name, { type: 3, value, options: options || {} });
+        },
+        get(name: string) {
+          return envMutators.get(name);
+        },
+        forEach(cb: (n: string, m: any, c: any) => any) {
+          for (const [n, m] of envMutators) cb(n, m, environmentVariableCollection);
+        },
+        delete(name: string) {
+          envMutators.delete(name);
+        },
+        clear() {
+          envMutators.clear();
+        },
+        // GlobalEnvironmentVariableCollection extension: scoped variant
+        // returns a (here: identical) collection for a given scope.
+        getScoped(_scope: any) {
+          return environmentVariableCollection;
+        },
+      };
       return {
         subscriptions: disposables,
         extensionPath: extPath,
         extensionUri: Uri.file(extPath),
+        extension: extensionPublic,
+        environmentVariableCollection,
         storagePath,
         storageUri: Uri.file(storagePath),
         globalStoragePath,
