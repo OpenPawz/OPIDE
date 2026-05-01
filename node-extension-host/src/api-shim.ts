@@ -2905,6 +2905,56 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       metadata: out.metadata,
     };
   }
+  // ── Merge auto-generated stubs ─────────────────────────────────────
+  // scripts/gen-api-stubs.ts walks @codingame/monaco-vscode-api/vscode-dts/
+  // vscode.d.ts and emits stubs for every documented class / enum /
+  // namespace / function we don't already implement. We merge them in
+  // BEFORE returning api so:
+  //   - top-level enums/classes (e.g. ExtensionMode, RelativePattern,
+  //     CodeActionKind) are present even when api-shim hasn't shimmed
+  //     them by hand
+  //   - namespace methods (e.g. window.createTreeView, lm.requestModel,
+  //     debug.startDebugging) exist as no-ops returning undefined or
+  //     Promise.resolve()
+  //   - calls to auto-stubs log a one-shot warning to stderr so we know
+  //     which surface needs a real implementation next
+  // Real implementations win because we apply stubs to api LAST with
+  // Object.assign(stubs, ...) — but stubs only fill gaps via a
+  // 2-arg merge that preserves existing api keys (gen.merge below).
+  //
+  // Net effect: extensions stop crashing on `Cannot read properties of
+  // undefined (reading 'X')` for any X documented in vscode.d.ts.
+  try {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const gen = require('./api-shim-generated.js');
+    /* eslint-enable @typescript-eslint/no-require-imports */
+    // Merge top-level exports (classes + enums) into api WITHOUT
+    // overwriting anything api already has. The real code wins.
+    for (const [k, v] of Object.entries(gen)) {
+      if (k === '_autoStubNamespaces' || k.startsWith('_ns_')) continue;
+      if ((api as any)[k] !== undefined) continue;
+      (api as any)[k] = v;
+    }
+    // Merge namespaces field-by-field. Real namespace methods on api
+    // win; auto-stubs fill in missing fields.
+    const stubNs = gen._autoStubNamespaces || {};
+    for (const [nsName, stubObj] of Object.entries<any>(stubNs)) {
+      const realNs = (api as any)[nsName];
+      if (!realNs) {
+        (api as any)[nsName] = { ...stubObj };
+        continue;
+      }
+      for (const [fieldName, fieldVal] of Object.entries(stubObj)) {
+        if (realNs[fieldName] === undefined) realNs[fieldName] = fieldVal;
+      }
+    }
+  } catch (e: any) {
+    // Auto-generated file might be missing on first run after a clean
+    // checkout — generator runs as part of npm run build, but a
+    // stale dist/ could omit it. Log + continue with hand-written shim.
+    bridge.log(`[api-shim] failed to load api-shim-generated: ${e?.message || e}`);
+  }
+
   return api;
 }
 
