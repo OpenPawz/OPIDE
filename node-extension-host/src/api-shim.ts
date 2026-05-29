@@ -854,6 +854,11 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       bridge.send({ jsonrpc: '2.0', id, result: r });
       return;
     }
+    if (method === 'languages/provideLinkedEditingRanges') {
+      const r = await provideLinkedEditingRanges(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
     // Unknown — respond with null so the caller doesn't time out.
     bridge.send({ jsonrpc: '2.0', id, result: null });
   }
@@ -1526,6 +1531,29 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     return [];
   }
 
+  async function provideLinkedEditingRanges(params: any): Promise<any> {
+    const { uri, position, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return null;
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    for (const rec of _linkedEditingProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideLinkedEditingRanges?.(doc, pos, cancel));
+        if (r?.ranges?.length) {
+          return {
+            ranges: r.ranges.map((rg: any) => serializeRangeStrict(rg)).filter(Boolean),
+            wordPattern: r.wordPattern ? r.wordPattern.source : undefined,
+          };
+        }
+      } catch (e: any) {
+        bridge.log(`linkedEditing provider failed: ${e?.message || e}`);
+      }
+    }
+    return null;
+  }
+
   async function provideSignatureHelp(params: any): Promise<any> {
     const { uri, position, languageId } = params || {};
     const doc = await resolveDoc(uri, languageId);
@@ -1797,6 +1825,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _onTypeFormattingProviders = new Map<string, LangProviderRec>();
   const _selectionRangeProviders = new Map<string, LangProviderRec>();
   const _colorProviders = new Map<string, LangProviderRec>();
+  const _linkedEditingProviders = new Map<string, LangProviderRec>();
   let _nextLangProviderId = 1;
 
   /** VS Code DocumentSelector accepts strings, arrays, or objects with
@@ -3652,6 +3681,12 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         _colorProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerColorProvider', { selector }).catch(() => {});
         return { dispose: () => { _colorProviders.delete(id); } };
+      },
+      registerLinkedEditingRangeProvider(selector: any, provider: any) {
+        const id = `ler-${_nextLangProviderId++}`;
+        _linkedEditingProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerLinkedEditingRangeProvider', { selector }).catch(() => {});
+        return { dispose: () => { _linkedEditingProviders.delete(id); } };
       },
 
       registerSignatureHelpProvider(selector: any, provider: any, ...rest: any[]) {

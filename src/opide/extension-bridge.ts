@@ -670,6 +670,11 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       if (id) sendResponse(id, null)
       break
     }
+    case 'languages/registerLinkedEditingRangeProvider': {
+      handleRegisterLanguageProvider('linkedEditing', params)
+      if (id) sendResponse(id, null)
+      break
+    }
 
     // P1: inline completions. Carries providerId + languages so the
     // sidecar can route provideInlineCompletionItems back to the
@@ -2521,6 +2526,32 @@ async function handleRegisterLanguageProvider(
                 }))
               } catch {
                 return []
+              }
+            },
+          })
+          break
+
+        case 'linkedEditing':
+          monaco.languages.registerLinkedEditingRangeProvider(lang, {
+            provideLinkedEditingRanges: async (model: any, position: any) => {
+              try {
+                const result = await sendRequest('languages/provideLinkedEditingRanges', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  languageId: lang,
+                })
+                if (!result?.ranges?.length) return null
+                return {
+                  ranges: result.ranges.map((r: any) => ({
+                    startLineNumber: (r.start?.line ?? 0) + 1,
+                    startColumn: (r.start?.character ?? 0) + 1,
+                    endLineNumber: (r.end?.line ?? 0) + 1,
+                    endColumn: (r.end?.character ?? 0) + 1,
+                  })),
+                  wordPattern: result.wordPattern ? new RegExp(result.wordPattern) : undefined,
+                }
+              } catch {
+                return null
               }
             },
           })
