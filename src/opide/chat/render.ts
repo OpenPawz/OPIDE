@@ -396,12 +396,23 @@ export function renderMessages(): void {
   }
 
   // Incremental append: only add new messages — no DOM teardown, no focus loss
+  const wasNearBottom = isNearBottom()
   for (let i = _renderedCount; i < S.messages.length; i++) {
     S.msgList.appendChild(makeBubble(S.messages[i]))
   }
   _renderedCount = S.messages.length
 
-  S.msgList.scrollTop = S.msgList.scrollHeight
+  // Only auto-scroll if the user was already near the bottom. Previously this
+  // yanked them back down on every append (tool results, etc.) even while
+  // they'd scrolled up to read earlier history.
+  if (wasNearBottom) S.msgList.scrollTop = S.msgList.scrollHeight
+}
+
+/** Scroll the message list to the bottom. Use after an explicit user action
+ * (sending a message) where we always want the newest content in view,
+ * regardless of where they'd scrolled. */
+export function scrollChatToBottom(): void {
+  if (S.msgList) S.msgList.scrollTop = S.msgList.scrollHeight
 }
 
 /** Force a full re-render (used when switching sessions or clearing chat) */

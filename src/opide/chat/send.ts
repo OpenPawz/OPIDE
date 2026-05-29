@@ -9,6 +9,7 @@ import { S } from './state.ts'
 import type { ChatResponse, AgentCheckpoint } from './types.ts'
 import {
   renderMessages,
+  scrollChatToBottom,
   showStreamingBubble,
   setStreaming,
   hideToolIndicator,
@@ -80,6 +81,10 @@ export async function doSend(): Promise<void> {
 
   S.messages.push({ role: 'user', content, ts: new Date() })
   renderMessages()
+  // Sending is an explicit action — always bring the newest message into view
+  // even if the user had scrolled up (renderMessages itself only auto-scrolls
+  // when already near the bottom).
+  scrollChatToBottom()
 
   if (S.streaming) {
     // Mid-run redirect: save partial streamed text and signal the UI
