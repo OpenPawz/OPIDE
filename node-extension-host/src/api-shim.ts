@@ -518,11 +518,44 @@ class WorkspaceEdit {
   has(uri: any) { return this._edits.some((e) => e.uri === uri); }
   get size(): number { return this._edits.length; }
   entries() { return this._edits.map((e) => [e.uri, [e]]); }
-  set(uri: any, edits: any[]) { this._edits = this._edits.filter((e) => e.uri !== uri).concat(edits); }
+  set(uri: any, edits: any[]) {
+    // VS Code's set(uri, TextEdit[]) — tag each edit with its uri so the
+    // wire serializer can group them (raw TextEdits carry no uri).
+    const tagged = (edits || []).map((e) => ({ kind: 'replace', uri, range: e.range, newText: e.newText }));
+    this._edits = this._edits.filter((e) => e.uri !== uri).concat(tagged);
+  }
   get(uri: any) { return this._edits.filter((e) => e.uri === uri); }
   createFile() { /* TODO */ }
   deleteFile() { /* TODO */ }
   renameFile() { /* TODO */ }
+  /** Serialize to the `{ changes: { [uri]: [{range,newText}] } }` wire
+   * shape the bridge's convertWorkspaceEdit expects. insert → zero-width
+   * range at the position; delete → empty newText. */
+  _toWire(): { changes: Record<string, Array<{ range: any; newText: string }>> } {
+    const changes: Record<string, Array<{ range: any; newText: string }>> = {};
+    const norm = (r: any) =>
+      r?.start && r?.end
+        ? {
+            start: { line: r.start.line, character: r.start.character },
+            end: { line: r.end.line, character: r.end.character },
+          }
+        : undefined;
+    for (const e of this._edits) {
+      const uri = e.uri;
+      const uriStr = uri?.fsPath ?? uri?.path ?? (typeof uri === 'string' ? uri : '');
+      if (!uriStr) continue;
+      (changes[uriStr] ||= []);
+      if (e.kind === 'insert') {
+        const at = { line: e.position?.line ?? 0, character: e.position?.character ?? 0 };
+        changes[uriStr].push({ range: { start: at, end: at }, newText: e.newText ?? '' });
+      } else {
+        // replace / delete / raw TextEdit
+        const range = norm(e.range);
+        if (range) changes[uriStr].push({ range, newText: e.kind === 'delete' ? '' : (e.newText ?? '') });
+      }
+    }
+    return { changes };
+  }
 }
 
 enum SymbolKind {
@@ -732,6 +765,26 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     }
     if (method === 'languages/provideDocumentFormattingEdits') {
       const r = await provideFormattingEdits(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideCodeActions') {
+      const r = await provideCodeActions(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideRenameEdits') {
+      const r = await provideRenameEdits(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/prepareRename') {
+      const r = await prepareRename(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideSignatureHelp') {
+      const r = await provideSignatureHelp(params);
       bridge.send({ jsonrpc: '2.0', id, result: r });
       return;
     }
@@ -1044,6 +1097,136 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     return out;
   }
 
+  /** MarkdownString | MarkedString | string → plain string for the wire. */
+  function mdToString(d: any): string | undefined {
+    if (d == null) return undefined;
+    return typeof d === 'string' ? d : (d.value ?? undefined);
+  }
+
+  /** A vscode.WorkspaceEdit (the shim's class) or a plain {changes}/LSP-ish
+   * object → the { changes: { [uri]: [{range,newText}] } } wire shape. */
+  function serializeWorkspaceEdit(we: any): any {
+    if (!we) return { changes: {} };
+    if (typeof we._toWire === 'function') return we._toWire();
+    if (we.changes || we.documentChanges) return we; // already wire/LSP shaped
+    return { changes: {} };
+  }
+
+  async function provideCodeActions(params: any): Promise<any[]> {
+    const { uri, range, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const r = range
+      ? new Range(range.start?.line ?? 0, range.start?.character ?? 0, range.end?.line ?? 0, range.end?.character ?? 0)
+      : new Range(0, 0, 0, 0);
+    const cancel = makeCancel();
+    const ctx = { diagnostics: [], only: undefined, triggerKind: 1 };
+    const out: any[] = [];
+    for (const rec of _codeActionProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const res = await Promise.resolve(rec.provider.provideCodeActions?.(doc, r, ctx, cancel));
+        if (!Array.isArray(res)) continue;
+        for (const a of res) {
+          // Each entry is a Command (has .command) or a CodeAction.
+          const isCommand = typeof a?.command === 'string';
+          if (isCommand) {
+            out.push({ title: a.title ?? '', command: { command: a.command, title: a.title, arguments: a.arguments } });
+          } else {
+            out.push({
+              title: a.title ?? '',
+              kind: a.kind?.value ?? a.kind, // CodeActionKind → string
+              isPreferred: a.isPreferred,
+              command: a.command
+                ? { command: a.command.command, title: a.command.title, arguments: a.command.arguments }
+                : undefined,
+              edit: a.edit ? serializeWorkspaceEdit(a.edit) : undefined,
+            });
+          }
+        }
+      } catch (e: any) {
+        bridge.log(`codeAction provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
+  async function provideRenameEdits(params: any): Promise<any> {
+    const { uri, position, newName, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return null;
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    for (const rec of _renameProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const we = await Promise.resolve(rec.provider.provideRenameEdits?.(doc, pos, newName, cancel));
+        if (we) return serializeWorkspaceEdit(we);
+      } catch (e: any) {
+        bridge.log(`rename provider failed: ${e?.message || e}`);
+      }
+    }
+    return null;
+  }
+
+  async function prepareRename(params: any): Promise<any> {
+    const { uri, position, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return null;
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    for (const rec of _renameProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      const prepare = rec.provider.prepareRename;
+      if (typeof prepare !== 'function') continue;
+      try {
+        const r = await Promise.resolve(prepare.call(rec.provider, doc, pos, cancel));
+        if (!r) continue;
+        // Either a Range, or { range, placeholder }.
+        const range = r.range ?? r;
+        return {
+          range: serializeRangeStrict(range),
+          placeholder: r.placeholder ?? doc.getText?.(range) ?? '',
+        };
+      } catch (e: any) {
+        bridge.log(`prepareRename provider failed: ${e?.message || e}`);
+      }
+    }
+    return null;
+  }
+
+  async function provideSignatureHelp(params: any): Promise<any> {
+    const { uri, position, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return null;
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    const ctx = { triggerKind: 1, triggerCharacter: undefined, isRetrigger: false, activeSignatureHelp: undefined };
+    for (const rec of _signatureHelpProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideSignatureHelp?.(doc, pos, cancel, ctx));
+        if (r?.signatures) {
+          return {
+            signatures: (r.signatures || []).map((sig: any) => ({
+              label: sig.label ?? '',
+              documentation: mdToString(sig.documentation),
+              parameters: (sig.parameters || []).map((p: any) => ({
+                label: p.label, // string or [number, number] — Monaco accepts both
+                documentation: mdToString(p.documentation),
+              })),
+            })),
+            activeSignature: r.activeSignature ?? 0,
+            activeParameter: r.activeParameter ?? 0,
+          };
+        }
+      } catch (e: any) {
+        bridge.log(`signatureHelp provider failed: ${e?.message || e}`);
+      }
+    }
+    return null;
+  }
+
   // Event dispatchers
   const onDidChangeTextDoc = new VSCodeEvent<any>('onDidChangeTextDocument');
   const onDidOpenTextDoc = new VSCodeEvent<any>('onDidOpenTextDocument');
@@ -1268,6 +1451,9 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _referenceProviders = new Map<string, LangProviderRec>();
   const _documentSymbolProviders = new Map<string, LangProviderRec>();
   const _formattingProviders = new Map<string, LangProviderRec>();
+  const _codeActionProviders = new Map<string, LangProviderRec>();
+  const _renameProviders = new Map<string, LangProviderRec>();
+  const _signatureHelpProviders = new Map<string, LangProviderRec>();
   let _nextLangProviderId = 1;
 
   /** VS Code DocumentSelector accepts strings, arrays, or objects with
@@ -2721,8 +2907,32 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       },
 
       registerCodeActionsProvider(selector: any, provider: any, metadata?: any) {
+        const id = `act-${_nextLangProviderId++}`;
+        _codeActionProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerCodeActionsProvider', { selector }).catch(() => {});
-        return { dispose: () => {} };
+        return { dispose: () => { _codeActionProviders.delete(id); } };
+      },
+
+      registerRenameProvider(selector: any, provider: any) {
+        const id = `rnm-${_nextLangProviderId++}`;
+        _renameProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerRenameProvider', { selector }).catch(() => {});
+        return { dispose: () => { _renameProviders.delete(id); } };
+      },
+
+      registerSignatureHelpProvider(selector: any, provider: any, ...rest: any[]) {
+        const id = `sig-${_nextLangProviderId++}`;
+        _signatureHelpProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        // The trigger characters arg can be a string list or a
+        // SignatureHelpProviderMetadata { triggerCharacters, retriggerCharacters }.
+        const meta = rest.length === 1 && rest[0] && typeof rest[0] === 'object' && !Array.isArray(rest[0])
+          ? rest[0]
+          : { triggerCharacters: rest.flat() };
+        rpcRequest('languages/registerSignatureHelpProvider', {
+          selector,
+          triggerCharacters: meta.triggerCharacters || [],
+        }).catch(() => {});
+        return { dispose: () => { _signatureHelpProviders.delete(id); } };
       },
 
       registerDocumentFormattingEditProvider(selector: any, provider: any) {
