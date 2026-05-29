@@ -255,54 +255,98 @@ async fn execute_update_profile(
         updates.keys().collect::<Vec<_>>()
     );
 
+    let state = app_handle
+        .try_state::<EngineState>()
+        .ok_or("Engine state not available")?;
+
+    // ── Persist the change ──────────────────────────────────────────────
+    // `system_prompt` is a real column on project_agents, so it updates
+    // there. The model has no name/avatar/bio columns, so those are stored
+    // in a `profile.json` soul file (merged with any existing one) — the
+    // agent can read it back via soul_read. Previously this tool emitted a
+    // dead event + a memory note and PERSISTED NOTHING while telling the
+    // caller "Successfully updated… UI updated in real-time" — a lie.
+    let mut persisted: Vec<String> = Vec::new();
+
+    if let Some(sp) = system_prompt {
+        match state.store.update_agent_system_prompt(agent_id, sp) {
+            Ok(n) if n > 0 => persisted.push(format!("system_prompt (column, {n} row(s))")),
+            Ok(_) => {
+                // No project_agents row (e.g. the built-in `default` agent).
+                // Fall back to a soul file so the change isn't lost.
+                state
+                    .store
+                    .set_agent_file(agent_id, "system_prompt.md", sp)
+                    .map_err(|e| format!("failed to persist system_prompt soul file: {e}"))?;
+                persisted.push("system_prompt (soul file)".into());
+            }
+            Err(e) => return Err(format!("failed to persist system_prompt: {e}").into()),
+        }
+    }
+
+    if name.is_some() || avatar.is_some() || bio.is_some() {
+        // Merge into the existing profile.json soul file so a partial
+        // update doesn't clobber previously-set fields.
+        let mut profile = state
+            .store
+            .get_agent_file(agent_id, "profile.json")
+            .ok()
+            .flatten()
+            .and_then(|f| serde_json::from_str::<serde_json::Value>(&f.content).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        if let Some(v) = name {
+            profile.insert("name".into(), serde_json::json!(v));
+            persisted.push("name".into());
+        }
+        if let Some(v) = avatar {
+            profile.insert("avatar".into(), serde_json::json!(v));
+            persisted.push("avatar".into());
+        }
+        if let Some(v) = bio {
+            profile.insert("bio".into(), serde_json::json!(v));
+            persisted.push("bio".into());
+        }
+        let content = serde_json::to_string_pretty(&serde_json::Value::Object(profile))
+            .unwrap_or_else(|_| "{}".into());
+        state
+            .store
+            .set_agent_file(agent_id, "profile.json", &content)
+            .map_err(|e| format!("failed to persist profile.json soul file: {e}"))?;
+    }
+
+    // Notify any UI listener (best-effort) and record a memory note.
     let _ = app_handle.emit("agent-profile-updated", serde_json::Value::Object(updates));
 
-    let mut desc_parts = vec![format!("Updated profile for agent '{}':", agent_id)];
+    let memory_content = format!(
+        "Updated profile for agent '{}': {}",
+        agent_id,
+        persisted.join(", ")
+    );
+    let emb_client = state.embedding_client();
+    let _ = memory::store_memory(
+        &state.store,
+        &memory_content,
+        "fact",
+        5,
+        emb_client.as_ref(),
+        None,
+    )
+    .await;
+
+    let mut result_parts = vec![format!("Updated and persisted profile for '{}':", agent_id)];
     if let Some(v) = name {
-        desc_parts.push(format!("name -> {}", v));
+        result_parts.push(format!("- **Name**: {} (soul file)", v));
     }
     if let Some(v) = avatar {
-        desc_parts.push(format!("avatar -> {}", v));
+        result_parts.push(format!("- **Avatar**: {} (soul file)", v));
     }
     if let Some(v) = bio {
-        desc_parts.push(format!("bio -> {}", v));
+        result_parts.push(format!("- **Bio**: {} (soul file)", v));
     }
     if system_prompt.is_some() {
-        desc_parts.push("system_prompt updated".into());
+        result_parts.push("- **System Prompt**: persisted".into());
     }
-    let memory_content = desc_parts.join(" ");
-
-    let state = app_handle.try_state::<EngineState>();
-    if let Some(state) = state {
-        let emb_client = state.embedding_client();
-        let _ = memory::store_memory(
-            &state.store,
-            &memory_content,
-            "fact",
-            5,
-            emb_client.as_ref(),
-            None,
-        )
-        .await;
-    }
-
-    let mut result_parts = vec![format!(
-        "Successfully updated agent profile for '{}':",
-        agent_id
-    )];
-    if let Some(v) = name {
-        result_parts.push(format!("- **Name**: {}", v));
-    }
-    if let Some(v) = avatar {
-        result_parts.push(format!("- **Avatar**: {}", v));
-    }
-    if let Some(v) = bio {
-        result_parts.push(format!("- **Bio**: {}", v));
-    }
-    if system_prompt.is_some() {
-        result_parts.push("- **System Prompt**: updated".into());
-    }
-    result_parts.push("\nThe UI has been updated in real-time.".into());
 
     Ok(result_parts.join("\n"))
 }

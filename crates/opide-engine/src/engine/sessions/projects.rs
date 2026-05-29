@@ -145,6 +145,23 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Update an agent's `system_prompt` across every project it belongs
+    /// to, matching by `agent_id`. Returns the number of rows updated so
+    /// callers can tell whether the agent had a persisted row at all (the
+    /// built-in `default` agent has none — it falls back to a soul file).
+    pub fn update_agent_system_prompt(
+        &self,
+        agent_id: &str,
+        system_prompt: &str,
+    ) -> EngineResult<usize> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "UPDATE project_agents SET system_prompt=?2 WHERE agent_id=?1",
+            params![agent_id, system_prompt],
+        )?;
+        Ok(n)
+    }
+
     /// Look up a single agent's stored model override (from any project).
     /// Returns `None` if the agent doesn't exist or has no model set.
     pub fn get_agent_model(&self, agent_id: &str) -> Option<String> {
