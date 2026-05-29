@@ -320,6 +320,13 @@ export async function executeExtensionCommand(command: string, ...args: any[]): 
   return sendRequest('commands/execute', { command, args })
 }
 
+/** Fire-and-forget notification to the sidecar. Exported so feature
+ * modules (e.g. extension-scm) can push UI-originated events back to the
+ * extension host without re-implementing the JSON-RPC framing. */
+export function notifyHost(method: string, params: any): void {
+  sendNotification(method, params)
+}
+
 /** Activate a specific extension by ID. */
 export async function activateExtension(extensionId: string): Promise<void> {
   if (!_running) throw new Error('Extension host not running')
@@ -925,6 +932,8 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'scm/setResourceStates':
     case 'scm/setCount':
     case 'scm/setStatusBar':
+    case 'scm/setInputBox':
+    case 'scm/setAcceptCommand':
     case 'scm/disposeGroup':
     case 'scm/disposeSourceControl': {
       handleScm(method, params)

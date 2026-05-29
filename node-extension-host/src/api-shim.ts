@@ -1511,6 +1511,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     inputBox: any; resourceGroups: Map<string, any>;
     quickDiffProvider?: any;
     statusBarCommands?: any[];
+    acceptInputCommand?: any;
     count: number;
   }
   const _sourceControls = new Map<string, SourceControlInst>();
@@ -1671,6 +1672,16 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           });
         }
         break;
+
+      // User edited the SCM commit-message box in the panel — write the
+      // value straight into the extension's inputBox so it reads the live
+      // text. We set the internal field directly (not the setter) to avoid
+      // echoing a scm/setInputBox back to the panel mid-keystroke.
+      case 'scm/inputBoxChanged': {
+        const sc = params?.id ? _sourceControls.get(params.id) : undefined;
+        if (sc?.inputBox) sc.inputBox._value = params?.value ?? '';
+        break;
+      }
 
       // Task finished — the frontend sends this when the spawned command
       // exits, so we can fire onDidEndTask(Process) for the matching
@@ -3313,14 +3324,36 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     // ── Phase F: scm ────────────────────────────────────────────────────
     scm: {
       createSourceControl(id: string, label: string, rootUri?: any) {
+        // Reactive SourceControlInputBox: setting value/placeholder/enabled/
+        // visible pushes to the SCM panel so the commit-message box reflects
+        // the extension's state; user edits flow back via scm/inputBoxChanged
+        // (handled below) which writes _value directly (no echo).
+        const inputBox: any = { _value: '', _placeholder: '', _enabled: true, _visible: true };
+        const pushInputBox = () => {
+          rpcRequest('scm/setInputBox', {
+            id,
+            value: inputBox._value,
+            placeholder: inputBox._placeholder,
+            enabled: inputBox._enabled,
+            visible: inputBox._visible,
+          }).catch(() => {});
+        };
+        const defineBoxProp = (name: string, internal: string) => {
+          Object.defineProperty(inputBox, name, {
+            enumerable: true,
+            get() { return inputBox[internal]; },
+            set(v: any) { inputBox[internal] = v; pushInputBox(); },
+          });
+        };
+        defineBoxProp('value', '_value');
+        defineBoxProp('placeholder', '_placeholder');
+        defineBoxProp('enabled', '_enabled');
+        defineBoxProp('visible', '_visible');
+
         const inst: SourceControlInst = {
           id, label, rootUri,
           resourceGroups: new Map(),
-          inputBox: {
-            value: '',
-            placeholder: '',
-            visible: true,
-          },
+          inputBox,
           count: 0,
         };
         _sourceControls.set(id, inst);
@@ -3330,6 +3363,15 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           get inputBox() { return inst.inputBox; },
           set count(v: number) { inst.count = v; rpcRequest('scm/setCount', { id, count: v }).catch(() => {}); },
           set quickDiffProvider(v: any) { inst.quickDiffProvider = v; },
+          // The Command run when the user accepts the commit input (commit
+          // button / Cmd+Enter). VS Code's SourceControl.acceptInputCommand.
+          set acceptInputCommand(v: any) {
+            inst.acceptInputCommand = v;
+            rpcRequest('scm/setAcceptCommand', {
+              id,
+              command: v ? { command: v.command, title: v.title, arguments: v.arguments } : null,
+            }).catch(() => {});
+          },
           set statusBarCommands(v: any[]) { inst.statusBarCommands = v; rpcRequest('scm/setStatusBar', { id, commands: v }).catch(() => {}); },
           createResourceGroup(groupId: string, groupLabel: string) {
             const groupKey = `${id}:${groupId}:${_nextScmGroupId++}`;

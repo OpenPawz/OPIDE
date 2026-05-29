@@ -22,6 +22,7 @@ import {
   registerCustomView,
   ViewContainerLocation,
 } from '@codingame/monaco-vscode-workbench-service-override'
+import { executeExtensionCommand, notifyHost } from './extension-bridge.ts'
 
 interface ResourceState {
   resourceUri?: string
@@ -29,8 +30,15 @@ interface ResourceState {
   contextValue?: string
   command?: any
 }
+interface InputBoxState { value: string; placeholder: string; enabled: boolean; visible: boolean }
 interface GroupRec { id: string; label: string; resources: ResourceState[] }
-interface ScmRec { id: string; label: string; rootUri?: string; groups: Map<string, GroupRec>; count: number }
+interface ScmRec {
+  id: string; label: string; rootUri?: string;
+  groups: Map<string, GroupRec>; count: number;
+  inputBox: InputBoxState;
+  /** vscode Command run on commit (acceptInputCommand), if the extension set one. */
+  acceptCommand?: { command: string; title?: string; arguments?: any[] }
+}
 
 const _scms = new Map<string, ScmRec>()
 let _container: HTMLElement | null = null
@@ -59,6 +67,14 @@ function ensureView(): void {
 
 function rerender(): void {
   if (!_container) return
+  // Preserve focus + caret across the full rebuild so a rerender (e.g. a
+  // resource-state refresh from GitLens) doesn't interrupt the user typing
+  // a commit message.
+  const active = document.activeElement as HTMLTextAreaElement | null
+  const focusedScmId = active?.dataset?.scmInput
+  const selStart = active?.selectionStart ?? null
+  const selEnd = active?.selectionEnd ?? null
+
   _container.innerHTML = ''
   if (_scms.size === 0) {
     const empty = document.createElement('div')
@@ -74,6 +90,40 @@ function rerender(): void {
     title.style.cssText = 'padding:4px 12px;font-weight:600;color:var(--vscode-foreground);'
     title.textContent = `${sc.label}${sc.count ? ` (${sc.count})` : ''}`
     section.appendChild(title)
+
+    // Commit-message input box (when the extension made it visible).
+    if (sc.inputBox.visible) {
+      const inputWrap = document.createElement('div')
+      inputWrap.style.cssText = 'padding:4px 12px 8px 12px;display:flex;flex-direction:column;gap:6px;'
+      const ta = document.createElement('textarea')
+      ta.dataset.scmInput = sc.id
+      ta.value = sc.inputBox.value
+      ta.placeholder = sc.inputBox.placeholder || 'Message (press Cmd/Ctrl+Enter to commit)'
+      ta.rows = 1
+      ta.disabled = !sc.inputBox.enabled
+      ta.style.cssText = 'resize:vertical;min-height:26px;padding:5px 8px;font-family:var(--vscode-font-family,system-ui);font-size:12px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,var(--vscode-widget-border,#3c3c3c));border-radius:3px;outline:none;'
+      ta.addEventListener('input', () => {
+        sc.inputBox.value = ta.value
+        notifyHost('scm/inputBoxChanged', { id: sc.id, value: ta.value })
+      })
+      ta.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault()
+          runAccept(sc)
+        }
+      })
+      inputWrap.appendChild(ta)
+
+      const commitBtn = document.createElement('button')
+      commitBtn.textContent = sc.acceptCommand?.title || 'Commit'
+      commitBtn.disabled = !sc.acceptCommand
+      commitBtn.title = sc.acceptCommand ? '' : 'No commit action registered by the extension'
+      commitBtn.style.cssText = 'align-self:flex-start;padding:4px 14px;font-size:12px;border:none;border-radius:3px;cursor:pointer;background:var(--vscode-button-background);color:var(--vscode-button-foreground);opacity:' + (sc.acceptCommand ? '1' : '0.5')
+      commitBtn.addEventListener('click', () => runAccept(sc))
+      inputWrap.appendChild(commitBtn)
+      section.appendChild(inputWrap)
+    }
+
     for (const g of sc.groups.values()) {
       const groupEl = document.createElement('div')
       groupEl.style.cssText = 'padding:2px 12px 6px 12px;'
@@ -93,6 +143,27 @@ function rerender(): void {
     }
     _container.appendChild(section)
   }
+
+  // Restore focus + caret to the commit box the user was editing.
+  if (focusedScmId) {
+    const ta = _container.querySelector(`textarea[data-scm-input="${focusedScmId}"]`) as HTMLTextAreaElement | null
+    if (ta) {
+      ta.focus()
+      if (selStart != null && selEnd != null) {
+        try { ta.setSelectionRange(selStart, selEnd) } catch { /* ignore */ }
+      }
+    }
+  }
+}
+
+/** Run a source control's acceptInputCommand (commit). No-op if the
+ * extension never registered one. */
+function runAccept(sc: ScmRec): void {
+  const cmd = sc.acceptCommand
+  if (!cmd?.command) return
+  executeExtensionCommand(cmd.command, ...(cmd.arguments || [])).catch((e) =>
+    console.warn('[ext-scm] acceptInputCommand failed:', e),
+  )
 }
 
 export function handle(method: string, params: any): void {
@@ -102,7 +173,25 @@ export function handle(method: string, params: any): void {
       _scms.set(params.id, {
         id: params.id, label: params.label, rootUri: params.rootUri,
         groups: new Map(), count: 0,
+        inputBox: { value: '', placeholder: '', enabled: true, visible: true },
       })
+      rerender()
+      break
+    }
+    case 'scm/setInputBox': {
+      const sc = _scms.get(params.id); if (!sc) return
+      // Echoed extension-side change (placeholder, programmatic value set,
+      // clear-after-commit, etc). User keystrokes don't come back here.
+      if (typeof params.value === 'string') sc.inputBox.value = params.value
+      if (typeof params.placeholder === 'string') sc.inputBox.placeholder = params.placeholder
+      if (typeof params.enabled === 'boolean') sc.inputBox.enabled = params.enabled
+      if (typeof params.visible === 'boolean') sc.inputBox.visible = params.visible
+      rerender()
+      break
+    }
+    case 'scm/setAcceptCommand': {
+      const sc = _scms.get(params.id); if (!sc) return
+      sc.acceptCommand = params.command || undefined
       rerender()
       break
     }
