@@ -2796,47 +2796,86 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           // route to lm/sendRequest and stream the response back.
           async sendRequest(messages: any[], options?: any, token?: any): Promise<any> {
             const requestId = `lm-${_nextRequestId++}`;
-            const chunks: string[] = [];
-            // Simple streaming: collect chunks pushed via lm/streamChunk
-            // notification then yield them to the extension as an async
-            // iterator over its `text` and `stream` properties.
+            // REAL streaming. Previously this awaited the whole
+            // lm/sendRequest response before exposing any chunk, so the
+            // extension's `for await (const t of response.text)` only ran
+            // AFTER the model finished — chat UIs (Continue, Cline) showed
+            // nothing then dumped everything at once. Now we return the
+            // response object immediately and feed a broadcast buffer that
+            // each iterator (`text` and `stream`) drains live as chunks
+            // arrive. VS Code's sendRequest resolves once the request is
+            // accepted; errors surface through the stream.
+            const buffer: string[] = [];
+            let done = false;
+            let streamError: any = null;
+            // Multiple waiters: `text` and `stream` can be iterated
+            // independently, each parked on its own resolver until the
+            // next chunk / completion wakes them.
+            const waiters = new Set<() => void>();
+            const wake = () => {
+              for (const w of waiters) w();
+              waiters.clear();
+            };
+
             const onChunk = (msg: any) => {
               if (msg?.method === 'lm/streamChunk' && msg?.params?.requestId === requestId) {
-                chunks.push(msg.params.text || '');
+                buffer.push(msg.params.text || '');
+                wake();
               }
             };
             bridge.onMessage(onChunk);
-            try {
-              const result = await rpcRequest('lm/sendRequest', {
-                requestId,
-                modelId: m.id,
-                messages: messages.map((mm: any) => ({
-                  role: mm.role ?? 'user',
-                  content: typeof mm.content === 'string'
-                    ? mm.content
-                    : (mm.content || []).map((c: any) => c?.text ?? '').join(''),
-                })),
-                options: options || {},
-              });
-              // If no streaming chunks were emitted, fall back to the
-              // final text the bridge returned. Either way, expose
-              // both `text` (async iterable of strings) and `stream`
-              // for compatibility with extensions that read either.
-              if (chunks.length === 0 && result?.text) chunks.push(result.text);
-              const asyncIter = {
-                async *[Symbol.asyncIterator]() {
-                  for (const c of chunks) yield c;
-                },
-              };
-              return {
-                text: (async function* () { for (const c of chunks) yield c; })(),
-                stream: asyncIter,
-              };
-            } finally {
-              // CC1 fix: detach the chunk listener so we don't leak
-              // handlers across LM calls.
-              bridge.offMessage(onChunk);
+
+            // Cancellation: if the extension's token fires, mark done so
+            // iterators stop awaiting. (We can't abort the upstream
+            // request yet, but we stop delivering to the extension.)
+            if (token?.onCancellationRequested) {
+              token.onCancellationRequested(() => { done = true; wake(); });
             }
+
+            // Kick off the request without awaiting — completion just
+            // appends any final non-streamed text and flips `done`.
+            void rpcRequest('lm/sendRequest', {
+              requestId,
+              modelId: m.id,
+              messages: messages.map((mm: any) => ({
+                role: mm.role ?? 'user',
+                content: typeof mm.content === 'string'
+                  ? mm.content
+                  : (mm.content || []).map((c: any) => c?.text ?? '').join(''),
+              })),
+              options: options || {},
+            })
+              .then((result: any) => {
+                // If the provider returned final text but never streamed
+                // (non-streaming model), emit it as a single chunk.
+                if (buffer.length === 0 && result?.text) buffer.push(result.text);
+              })
+              .catch((e: any) => { streamError = e; })
+              .finally(() => {
+                done = true;
+                bridge.offMessage(onChunk);
+                wake();
+              });
+
+            // Shared live iterator over the broadcast buffer. Each call
+            // gets its own cursor so text/stream don't steal chunks from
+            // each other.
+            async function* drain(): AsyncGenerator<string> {
+              let i = 0;
+              for (;;) {
+                while (i < buffer.length) yield buffer[i++];
+                if (done) {
+                  if (streamError) throw streamError;
+                  return;
+                }
+                await new Promise<void>((resolve) => { waiters.add(resolve); });
+              }
+            }
+
+            return {
+              text: drain(),
+              stream: { [Symbol.asyncIterator]: () => drain() },
+            };
           },
           async countTokens(text: string): Promise<number> {
             const r = await rpcRequest('lm/countTokens', { modelId: m.id, text })
