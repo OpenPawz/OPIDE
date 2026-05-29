@@ -789,6 +789,11 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       bridge.send({ jsonrpc: '2.0', id, result: r });
       return;
     }
+    if (method === 'languages/provideCodeLenses') {
+      const r = await provideCodeLenses(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
     // Unknown — respond with null so the caller doesn't time out.
     bridge.send({ jsonrpc: '2.0', id, result: null });
   }
@@ -1196,6 +1201,40 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     return null;
   }
 
+  async function provideCodeLenses(params: any): Promise<any[]> {
+    const { uri, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const out: any[] = [];
+    for (const rec of _codeLensProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const lenses = await Promise.resolve(rec.provider.provideCodeLenses?.(doc, cancel));
+        if (!Array.isArray(lenses)) continue;
+        for (let lens of lenses) {
+          // Resolve the lens if it arrived without a command and the
+          // provider supports resolution (VS Code lazy-resolves lenses).
+          if (!lens?.command && typeof rec.provider.resolveCodeLens === 'function') {
+            try {
+              const resolved = await Promise.resolve(rec.provider.resolveCodeLens(lens, cancel));
+              if (resolved) lens = resolved;
+            } catch { /* keep unresolved */ }
+          }
+          out.push({
+            range: serializeRangeStrict(lens?.range),
+            command: lens?.command
+              ? { command: lens.command.command, title: lens.command.title, arguments: lens.command.arguments }
+              : undefined,
+          });
+        }
+      } catch (e: any) {
+        bridge.log(`codeLens provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
   async function provideSignatureHelp(params: any): Promise<any> {
     const { uri, position, languageId } = params || {};
     const doc = await resolveDoc(uri, languageId);
@@ -1455,6 +1494,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _codeActionProviders = new Map<string, LangProviderRec>();
   const _renameProviders = new Map<string, LangProviderRec>();
   const _signatureHelpProviders = new Map<string, LangProviderRec>();
+  const _codeLensProviders = new Map<string, LangProviderRec>();
   let _nextLangProviderId = 1;
 
   /** VS Code DocumentSelector accepts strings, arrays, or objects with
@@ -3233,6 +3273,13 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         _renameProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerRenameProvider', { selector }).catch(() => {});
         return { dispose: () => { _renameProviders.delete(id); } };
+      },
+
+      registerCodeLensProvider(selector: any, provider: any) {
+        const id = `cl-${_nextLangProviderId++}`;
+        _codeLensProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerCodeLensProvider', { selector }).catch(() => {});
+        return { dispose: () => { _codeLensProviders.delete(id); } };
       },
 
       registerSignatureHelpProvider(selector: any, provider: any, ...rest: any[]) {

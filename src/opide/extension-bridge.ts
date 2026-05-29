@@ -610,6 +610,11 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       if (id) sendResponse(id, null)
       break
     }
+    case 'languages/registerCodeLensProvider': {
+      handleRegisterLanguageProvider('codeLens', params)
+      if (id) sendResponse(id, null)
+      break
+    }
 
     // P1: inline completions. Carries providerId + languages so the
     // sidecar can route provideInlineCompletionItems back to the
@@ -2154,6 +2159,35 @@ async function handleRegisterLanguageProvider(
                 }
               } catch {
                 return null
+              }
+            },
+          })
+          break
+
+        case 'codeLens':
+          monaco.languages.registerCodeLensProvider(lang, {
+            provideCodeLenses: async (model: any) => {
+              try {
+                const result = await sendRequest('languages/provideCodeLenses', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  languageId: lang,
+                })
+                const lenses = (Array.isArray(result) ? result : []).map((l: any) => ({
+                  range: {
+                    startLineNumber: (l.range?.start?.line ?? 0) + 1,
+                    startColumn: (l.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (l.range?.end?.line ?? 0) + 1,
+                    endColumn: (l.range?.end?.character ?? 0) + 1,
+                  },
+                  command: l.command ? {
+                    id: l.command.command || l.command.id || '',
+                    title: l.command.title || '',
+                    arguments: l.command.arguments || [],
+                  } : undefined,
+                }))
+                return { lenses, dispose() {} }
+              } catch {
+                return { lenses: [], dispose() {} }
               }
             },
           })
