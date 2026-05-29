@@ -326,7 +326,7 @@ pub async fn execute(
         }
         "ide_list_dir" => {
             let path = args["path"].as_str().unwrap_or("").to_string();
-            Some(match opide_shell::ide_mcp::ide_list_dir(path).await {
+            Some(match opide_shell::ide_mcp::ide_list_dir(path, None).await {
                 Ok(dl) => Ok(serde_json::to_string_pretty(&dl).unwrap_or_default()),
                 Err(e) => Err(e),
             })

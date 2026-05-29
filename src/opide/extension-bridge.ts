@@ -715,7 +715,9 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'fs/readDirectory': {
       const dirPath = params?.path
       if (!dirPath) { if (id) sendResponse(id, []); break }
-      invoke('ide_list_dir', { path: dirPath }).then((result: any) => {
+      // includeHidden: VS Code's readDirectory must return dotfiles too
+      // (.gitignore, .env, .vscode). The agent tools keep the default hide.
+      invoke('ide_list_dir', { path: dirPath, includeHidden: true }).then((result: any) => {
         const entries = (result?.entries || []).map((e: any) => [
           e.name,
           e.is_dir ? 2 : 1, // FileType.Directory or FileType.File

@@ -282,7 +282,7 @@ impl opide_sandbox::HostApi for OpideHostApi {
 
     fn list_dir(&self, path: &str) -> Result<Vec<opide_sandbox::DirEntry>, String> {
         let path = path.to_string();
-        match self.block_on(opide_shell::ide_mcp::ide_list_dir(path.clone())) {
+        match self.block_on(opide_shell::ide_mcp::ide_list_dir(path.clone(), None)) {
             Ok(result) => Ok(result.entries.into_iter().map(|e| opide_sandbox::DirEntry {
                 name: e.name,
                 is_dir: e.is_dir,

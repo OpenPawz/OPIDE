@@ -203,7 +203,15 @@ pub async fn ide_delete_file(path: String, recursive: Option<bool>) -> Result<()
 }
 
 #[tauri::command]
-pub async fn ide_list_dir(path: String) -> Result<DirectoryListing, String> {
+pub async fn ide_list_dir(
+    path: String,
+    include_hidden: Option<bool>,
+) -> Result<DirectoryListing, String> {
+    // Agent tools hide dotfiles by default (cleaner listings); the extension
+    // host's vscode.workspace.fs.readDirectory passes include_hidden=true
+    // because its contract is to return EVERY entry (.gitignore, .env,
+    // .vscode, …).
+    let show_hidden = include_hidden.unwrap_or(false);
     let mut entries = Vec::new();
     let mut dir = tokio::fs::read_dir(&path)
         .await
@@ -215,8 +223,7 @@ pub async fn ide_list_dir(path: String) -> Result<DirectoryListing, String> {
         .map_err(|e| format!("Dir entry failed: {e}"))?
     {
         let name = entry.file_name().to_string_lossy().to_string();
-        // Skip hidden files
-        if name.starts_with('.') {
+        if !show_hidden && name.starts_with('.') {
             continue;
         }
         let meta = entry.metadata().await.ok();
