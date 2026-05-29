@@ -502,8 +502,19 @@ pub async fn run_agent_turn(
             // Track token usage — input tokens reflect the full context sent
             // each round, so we keep only the LAST round's input tokens (not a sum).
             // Output tokens are truly incremental, so we sum those across rounds.
+            //
+            // Only overwrite the input count when the chunk actually reports
+            // one. Anthropic splits usage across two SSE events — input_tokens
+            // arrive in `message_start`, output_tokens in `message_delta` (with
+            // input_tokens:0). The delta event arrives LAST, so an unconditional
+            // overwrite clobbered the real input count with 0, making every
+            // Anthropic turn report 0 input tokens. The guard preserves the
+            // "last round's input" semantics (each round's message_start carries
+            // input>0) and is a no-op for OpenAI (single usage chunk, input>0).
             if let Some(usage) = &chunk.usage {
-                last_input_tokens = usage.input_tokens; // overwrite, not accumulate
+                if usage.input_tokens > 0 {
+                    last_input_tokens = usage.input_tokens;
+                }
                 total_output_tokens += usage.output_tokens;
             }
         }
