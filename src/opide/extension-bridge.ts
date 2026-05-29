@@ -667,11 +667,11 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'fs/readFile': {
       const readPath = params?.path
       if (!readPath) { if (id) sendResponse(id, null); break }
-      invoke('ide_read_file', { path: readPath }).then((result: any) => {
-        // Return base64-encoded content (API shim decodes with Buffer.from)
-        const content = result?.content || ''
-        const b64 = typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(content))) : content
-        if (id) sendResponse(id, b64)
+      // Read raw bytes as base64 so binary files (images, wasm, fonts)
+      // survive — the shim decodes the base64 to a Uint8Array. The old
+      // text path (ide_read_file) corrupted any non-UTF-8 content.
+      invoke('ide_read_file_bytes', { path: readPath }).then((b64: any) => {
+        if (id) sendResponse(id, b64 || '')
       }).catch((e) => {
         debugLog(`fs/readFile failed: ${e}`)
         if (id) sendResponse(id, null)
@@ -683,14 +683,9 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       const writePath = params?.path
       const writeContent = params?.content || ''
       if (!writePath) { if (id) sendResponse(id, null); break }
-      // Content comes as base64 from the API shim
-      let decoded: string
-      try {
-        decoded = decodeURIComponent(escape(atob(writeContent)))
-      } catch {
-        decoded = writeContent // Might already be plain text
-      }
-      invoke('ide_write_file', { path: writePath, content: decoded }).then(() => {
+      // Content is base64 of the raw bytes from the shim; write bytes
+      // directly so binary content isn't mangled by a UTF-8 round-trip.
+      invoke('ide_write_file_bytes', { path: writePath, contentBase64: writeContent }).then(() => {
         if (id) sendResponse(id, null)
       }).catch((e) => {
         debugLog(`fs/writeFile failed: ${e}`)
@@ -702,20 +697,17 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'fs/stat': {
       const statPath = params?.path
       if (!statPath) { if (id) sendResponse(id, null); break }
-      invoke('ide_read_file', { path: statPath }).then((result: any) => {
+      // Real stat: correct FileType (incl. symlink/dir), true size, and
+      // actual ctime/mtime — no longer reads the whole file or fakes times.
+      invoke('ide_stat', { path: statPath }).then((s: any) => {
         if (id) sendResponse(id, {
-          type: 1, // FileType.File
-          size: result?.size || 0,
-          ctime: Date.now(),
-          mtime: Date.now(),
+          type: s?.type ?? 1,
+          size: s?.size ?? 0,
+          ctime: s?.ctime ?? 0,
+          mtime: s?.mtime ?? 0,
         })
       }).catch(() => {
-        // Might be a directory
-        invoke('ide_list_dir', { path: statPath }).then(() => {
-          if (id) sendResponse(id, { type: 2, size: 0, ctime: Date.now(), mtime: Date.now() }) // FileType.Directory
-        }).catch(() => {
-          if (id) sendResponse(id, null)
-        })
+        if (id) sendResponse(id, null)
       })
       break
     }

@@ -46,6 +46,17 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct FileStat {
+    /// VS Code FileType bitmask: File=1, Directory=2, SymbolicLink=64.
+    #[serde(rename = "type")]
+    pub file_type: u32,
+    pub size: u64,
+    /// Epoch milliseconds.
+    pub ctime: u64,
+    pub mtime: u64,
+}
+
 // ─── IDE Tool Commands ───────────────────────────────────────────────────────
 // These are Tauri commands that agents call through the OpenPawz engine.
 // The engine's tool bridge routes MCP tool calls to these.
@@ -90,6 +101,80 @@ pub async fn ide_write_file(path: String, content: String) -> Result<(), String>
 
     log::info!("[opide-mcp] wrote {} ({} bytes)", path, content.len());
     Ok(())
+}
+
+/// Raw-bytes file read for vscode.workspace.fs.readFile, which returns a
+/// Uint8Array. The text-based ide_read_file corrupts binary files (images,
+/// wasm, fonts) because it reads as UTF-8. Returns standard base64 of the
+/// raw bytes; the caller decodes to bytes.
+#[tauri::command]
+pub async fn ide_read_file_bytes(path: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("Read failed: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Raw-bytes file write for vscode.workspace.fs.writeFile. `content_base64`
+/// is standard base64 of the raw bytes to write — no UTF-8 round-trip, so
+/// binary content survives intact. Creates parent directories.
+#[tauri::command]
+pub async fn ide_write_file_bytes(path: String, content_base64: String) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(content_base64.as_bytes())
+        .map_err(|e| format!("Invalid base64: {e}"))?;
+    if let Some(parent) = Path::new(&path).parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Mkdir failed: {e}"))?;
+    }
+    let len = bytes.len();
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|e| format!("Write failed: {e}"))?;
+    log::info!("[opide-mcp] wrote {} ({} bytes, binary)", path, len);
+    Ok(())
+}
+
+/// Real stat for vscode.workspace.fs.stat. The previous frontend fake read
+/// the entire file just to get its size and reported ctime/mtime = now.
+/// `file_type` uses VS Code's FileType bitmask: File=1, Directory=2,
+/// SymbolicLink=64 (OR-combined for symlinks). Times are epoch millis.
+#[tauri::command]
+pub async fn ide_stat(path: String) -> Result<FileStat, String> {
+    // symlink_metadata so we can detect a symlink without following it,
+    // then resolve the target's kind for the combined bitmask.
+    let meta = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|e| format!("Stat failed: {e}"))?;
+    let ft = meta.file_type();
+    let mut file_type: u32 = 0;
+    if ft.is_symlink() {
+        file_type |= 64;
+        if let Ok(target) = tokio::fs::metadata(&path).await {
+            file_type |= if target.is_dir() { 2 } else { 1 };
+        } else {
+            file_type |= 1;
+        }
+    } else if ft.is_dir() {
+        file_type = 2;
+    } else {
+        file_type = 1;
+    }
+    let to_ms = |t: std::io::Result<std::time::SystemTime>| -> u64 {
+        t.ok()
+            .and_then(|st| st.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    };
+    Ok(FileStat {
+        file_type,
+        size: meta.len(),
+        ctime: to_ms(meta.created()),
+        mtime: to_ms(meta.modified()),
+    })
 }
 
 #[tauri::command]
