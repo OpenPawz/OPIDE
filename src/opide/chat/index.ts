@@ -133,9 +133,16 @@ async function updateModelSelect(): Promise<void> {
       }
     }
 
+    // Always include the currently-selected model, even if it isn't in any
+    // provider's presets/enabled list (e.g. a custom or saved model). Without
+    // this the dropdown rebuild dropped it and silently fell back to "Auto"
+    // while S.selectedModel still pointed at the real model — the UI lied.
+    if (current) models.add(current)
+
     S.modelSelect.innerHTML = ''
     const autoOpt = document.createElement('option')
     autoOpt.value = ''; autoOpt.textContent = 'Auto'
+    autoOpt.selected = !current
     S.modelSelect.appendChild(autoOpt)
     for (const m of models) {
       const opt = document.createElement('option')
@@ -143,7 +150,6 @@ async function updateModelSelect(): Promise<void> {
       opt.selected = m === current
       S.modelSelect.appendChild(opt)
     }
-    if (current && models.has(current)) S.selectedModel = current
   } catch { /* ignore */ }
 }
 
