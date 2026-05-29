@@ -570,6 +570,13 @@ impl GoogleProvider {
             let mut byte_stream = response.bytes_stream();
             let mut buffer = String::new();
             let mut fc_index_counter: usize = 0; // persistent across SSE events
+            // Gemini's usageMetadata is CUMULATIVE and (in recent models)
+            // present on every streamed chunk. Pushing a usage chunk per
+            // occurrence made the agent loop's per-round output sum count the
+            // running total many times over. Keep only the latest (= final
+            // cumulative total) and emit it once after the stream.
+            let mut latest_usage: Option<TokenUsage> = None;
+            let mut latest_usage_model: Option<String> = None;
 
             while let Some(result) = byte_stream.next().await {
                 let bytes = result
@@ -771,32 +778,42 @@ impl GoogleProvider {
                                 }
                             }
 
-                            // Gemini reports usage in usageMetadata
+                            // Gemini reports usage in usageMetadata (cumulative).
+                            // Record the latest; emit once after the stream so
+                            // the per-round output sum isn't multiplied by the
+                            // number of chunks.
                             if let Some(um) = v.get("usageMetadata") {
                                 let input = um["promptTokenCount"].as_u64().unwrap_or(0);
                                 let output = um["candidatesTokenCount"].as_u64().unwrap_or(0);
                                 if input > 0 || output > 0 {
-                                    chunks.push(StreamChunk {
-                                        delta_text: None,
-                                        tool_calls: vec![],
-                                        finish_reason: None,
-                                        usage: Some(TokenUsage {
-                                            input_tokens: input,
-                                            output_tokens: output,
-                                            total_tokens: um["totalTokenCount"]
-                                                .as_u64()
-                                                .unwrap_or(input + output),
-                                            ..Default::default()
-                                        }),
-                                        model: api_model.clone(),
-                                        thought_parts: vec![],
-                                        thinking_text: None,
+                                    latest_usage = Some(TokenUsage {
+                                        input_tokens: input,
+                                        output_tokens: output,
+                                        total_tokens: um["totalTokenCount"]
+                                            .as_u64()
+                                            .unwrap_or(input + output),
+                                        ..Default::default()
                                     });
+                                    latest_usage_model = api_model.clone();
                                 }
                             }
                         }
                     }
                 }
+            }
+
+            // Emit the final (cumulative) usage exactly once so the agent
+            // loop counts it a single time per round.
+            if let Some(usage) = latest_usage.take() {
+                chunks.push(StreamChunk {
+                    delta_text: None,
+                    tool_calls: vec![],
+                    finish_reason: None,
+                    usage: Some(usage),
+                    model: latest_usage_model.take(),
+                    thought_parts: vec![],
+                    thinking_text: None,
+                });
             }
 
             GOOGLE_CIRCUIT.record_success();
