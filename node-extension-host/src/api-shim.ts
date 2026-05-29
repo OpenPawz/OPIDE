@@ -827,6 +827,100 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     cur[segs[segs.length - 1]] = value;
   }
 
+  // Build a vscode.LanguageModelChat for a model descriptor `m` (as
+  // returned by lm/selectModels). Used by both vscode.lm.selectChatModels
+  // AND the chat-participant dispatch path, which sets request.model so a
+  // participant can call `request.model.sendRequest(...)`. Keeping a single
+  // factory means the streaming/cancellation behaviour can't drift between
+  // the two entry points.
+  function makeLmModel(m: any): any {
+    return {
+      id: m.id,
+      name: m.name || m.id,
+      vendor: m.vendor || 'opide',
+      family: m.family || m.id,
+      version: m.version || '1.0',
+      maxInputTokens: m.maxInputTokens || 200_000,
+      // Extension calls model.sendRequest(messages, opts, token); we
+      // route to lm/sendRequest and stream the response back.
+      async sendRequest(messages: any[], options?: any, token?: any): Promise<any> {
+        const requestId = `lm-${_nextRequestId++}`;
+        // REAL streaming. Return the response object immediately and feed a
+        // broadcast buffer that each iterator (`text` and `stream`) drains
+        // live as chunks arrive. VS Code's sendRequest resolves once the
+        // request is accepted; errors surface through the stream.
+        const buffer: string[] = [];
+        let done = false;
+        let streamError: any = null;
+        // Multiple waiters: `text` and `stream` can be iterated
+        // independently, each parked on its own resolver until the next
+        // chunk / completion wakes them.
+        const waiters = new Set<() => void>();
+        const wake = () => {
+          for (const w of waiters) w();
+          waiters.clear();
+        };
+
+        const onChunk = (msg: any) => {
+          if (msg?.method === 'lm/streamChunk' && msg?.params?.requestId === requestId) {
+            buffer.push(msg.params.text || '');
+            wake();
+          }
+        };
+        bridge.onMessage(onChunk);
+
+        // Cancellation: if the extension's token fires, mark done so
+        // iterators stop awaiting.
+        if (token?.onCancellationRequested) {
+          token.onCancellationRequested(() => { done = true; wake(); });
+        }
+
+        void rpcRequest('lm/sendRequest', {
+          requestId,
+          modelId: m.id,
+          messages: messages.map((mm: any) => ({
+            role: mm.role ?? 'user',
+            content: typeof mm.content === 'string'
+              ? mm.content
+              : (mm.content || []).map((c: any) => c?.text ?? '').join(''),
+          })),
+          options: options || {},
+        })
+          .then((result: any) => {
+            if (buffer.length === 0 && result?.text) buffer.push(result.text);
+          })
+          .catch((e: any) => { streamError = e; })
+          .finally(() => {
+            done = true;
+            bridge.offMessage(onChunk);
+            wake();
+          });
+
+        async function* drain(): AsyncGenerator<string> {
+          let i = 0;
+          for (;;) {
+            while (i < buffer.length) yield buffer[i++];
+            if (done) {
+              if (streamError) throw streamError;
+              return;
+            }
+            await new Promise<void>((resolve) => { waiters.add(resolve); });
+          }
+        }
+
+        return {
+          text: drain(),
+          stream: { [Symbol.asyncIterator]: () => drain() },
+        };
+      },
+      async countTokens(text: string): Promise<number> {
+        const r = await rpcRequest('lm/countTokens', { modelId: m.id, text })
+          .catch(() => ({ count: Math.ceil((text || '').length / 4) }));
+        return r?.count ?? Math.ceil((text || '').length / 4);
+      },
+    };
+  }
+
   // Document registry — keeps content cached so getText() is synchronous
   const openDocuments = new Map<string, TextDocument>();
 
@@ -1372,13 +1466,6 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           },
         };
         const cancellation = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) };
-        const request = {
-          prompt: params?.prompt ?? '',
-          command: params?.command,
-          references: params?.references ?? [],
-          participant: params?.participantId,
-          location: params?.location ?? 1,
-        };
         // Shape history into VS Code ChatContext.history turns. The
         // frontend sends plain { role, content } entries, but extensions
         // expect ChatRequestTurn (`.prompt`, `.participant`) and
@@ -1409,21 +1496,43 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           };
         });
         const context = { history };
-        Promise.resolve()
-          .then(() => part.handler(request, context, stream, cancellation))
-          .then((result: any) => {
+        // Resolve a default LanguageModelChat for request.model BEFORE
+        // invoking the handler. VS Code's ChatRequest carries the model the
+        // user picked, and modern participants call
+        // `request.model.sendRequest(...)` — without it they throw on
+        // `undefined.sendRequest`. Pick the first available model; fall
+        // back to a synthetic 'default' descriptor (the engine resolves
+        // 'default' to its configured default model).
+        (async () => {
+          let modelDesc: any = { id: 'default', name: 'default' };
+          try {
+            const models = await rpcRequest('lm/selectModels', { selector: {} });
+            if (Array.isArray(models) && models[0]) modelDesc = models[0];
+          } catch { /* fall back to the synthetic default */ }
+
+          const request = {
+            prompt: params?.prompt ?? '',
+            command: params?.command,
+            references: params?.references ?? [],
+            participant: params?.participantId,
+            location: params?.location ?? 1,
+            model: makeLmModel(modelDesc),
+          };
+
+          try {
+            const result = await part.handler(request, context, stream, cancellation);
             bridge.send({
               jsonrpc: '2.0', method: 'chat/dispatchEnd',
               params: { requestId, result },
             });
-          })
-          .catch((err: any) => {
+          } catch (err: any) {
             bridge.log(`chat handler error for ${params?.participantId}: ${err?.message || err}`);
             bridge.send({
               jsonrpc: '2.0', method: 'chat/dispatchEnd',
               params: { requestId, error: String(err?.message || err) },
             });
-          });
+          }
+        })();
         break;
       }
 
@@ -2839,104 +2948,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       async selectChatModels(selector?: any): Promise<any[]> {
         const models = await rpcRequest('lm/selectModels', { selector: selector || {} })
           .catch(() => []);
-        return (models || []).map((m: any) => ({
-          id: m.id,
-          name: m.name || m.id,
-          vendor: m.vendor || 'opide',
-          family: m.family || m.id,
-          version: m.version || '1.0',
-          maxInputTokens: m.maxInputTokens || 200_000,
-          // Extension calls model.sendRequest(messages, opts, token); we
-          // route to lm/sendRequest and stream the response back.
-          async sendRequest(messages: any[], options?: any, token?: any): Promise<any> {
-            const requestId = `lm-${_nextRequestId++}`;
-            // REAL streaming. Previously this awaited the whole
-            // lm/sendRequest response before exposing any chunk, so the
-            // extension's `for await (const t of response.text)` only ran
-            // AFTER the model finished — chat UIs (Continue, Cline) showed
-            // nothing then dumped everything at once. Now we return the
-            // response object immediately and feed a broadcast buffer that
-            // each iterator (`text` and `stream`) drains live as chunks
-            // arrive. VS Code's sendRequest resolves once the request is
-            // accepted; errors surface through the stream.
-            const buffer: string[] = [];
-            let done = false;
-            let streamError: any = null;
-            // Multiple waiters: `text` and `stream` can be iterated
-            // independently, each parked on its own resolver until the
-            // next chunk / completion wakes them.
-            const waiters = new Set<() => void>();
-            const wake = () => {
-              for (const w of waiters) w();
-              waiters.clear();
-            };
-
-            const onChunk = (msg: any) => {
-              if (msg?.method === 'lm/streamChunk' && msg?.params?.requestId === requestId) {
-                buffer.push(msg.params.text || '');
-                wake();
-              }
-            };
-            bridge.onMessage(onChunk);
-
-            // Cancellation: if the extension's token fires, mark done so
-            // iterators stop awaiting. (We can't abort the upstream
-            // request yet, but we stop delivering to the extension.)
-            if (token?.onCancellationRequested) {
-              token.onCancellationRequested(() => { done = true; wake(); });
-            }
-
-            // Kick off the request without awaiting — completion just
-            // appends any final non-streamed text and flips `done`.
-            void rpcRequest('lm/sendRequest', {
-              requestId,
-              modelId: m.id,
-              messages: messages.map((mm: any) => ({
-                role: mm.role ?? 'user',
-                content: typeof mm.content === 'string'
-                  ? mm.content
-                  : (mm.content || []).map((c: any) => c?.text ?? '').join(''),
-              })),
-              options: options || {},
-            })
-              .then((result: any) => {
-                // If the provider returned final text but never streamed
-                // (non-streaming model), emit it as a single chunk.
-                if (buffer.length === 0 && result?.text) buffer.push(result.text);
-              })
-              .catch((e: any) => { streamError = e; })
-              .finally(() => {
-                done = true;
-                bridge.offMessage(onChunk);
-                wake();
-              });
-
-            // Shared live iterator over the broadcast buffer. Each call
-            // gets its own cursor so text/stream don't steal chunks from
-            // each other.
-            async function* drain(): AsyncGenerator<string> {
-              let i = 0;
-              for (;;) {
-                while (i < buffer.length) yield buffer[i++];
-                if (done) {
-                  if (streamError) throw streamError;
-                  return;
-                }
-                await new Promise<void>((resolve) => { waiters.add(resolve); });
-              }
-            }
-
-            return {
-              text: drain(),
-              stream: { [Symbol.asyncIterator]: () => drain() },
-            };
-          },
-          async countTokens(text: string): Promise<number> {
-            const r = await rpcRequest('lm/countTokens', { modelId: m.id, text })
-              .catch(() => ({ count: Math.ceil((text || '').length / 4) }));
-            return r?.count ?? Math.ceil((text || '').length / 4);
-          },
-        }));
+        return (models || []).map((m: any) => makeLmModel(m));
       },
       tokens: {
         // Common tokenization helpers extensions sometimes use.
