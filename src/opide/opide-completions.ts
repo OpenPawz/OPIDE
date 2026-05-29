@@ -18,6 +18,10 @@ import { getService, ICodeEditorService } from '@codingame/monaco-vscode-api/ser
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const MAX_CONTEXT_LINES = 50 // Send at most 50 lines of context
+// Safety timeout: if a completion run never emits its `complete` event
+// (engine error, aborted run), resolve null + drop the resolver so the
+// provider promise can't hang and _completionResolvers can't leak.
+const COMPLETION_TIMEOUT_MS = 8000
 
 // Hidden persistent session id used for completion requests so we don't create
 // an orphan session per keystroke. Filtered out of the session selector (B49).
@@ -181,7 +185,16 @@ export async function requestCompletion(
       },
     })
       .then((response) => {
-        _completionResolvers.set(response.run_id, resolve)
+        const runId = response.run_id
+        _completionResolvers.set(runId, resolve)
+        // If the complete event never lands, time out: drop the resolver and
+        // resolve null so the provider promise resolves and nothing leaks.
+        setTimeout(() => {
+          if (_completionResolvers.delete(runId)) {
+            _completionAccum.delete(runId)
+            resolve(null)
+          }
+        }, COMPLETION_TIMEOUT_MS)
       })
       .catch(() => {
         resolve(null)
