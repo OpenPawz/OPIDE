@@ -2361,8 +2361,8 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         async readDirectory(uri: Uri): Promise<[string, number][]> {
           return rpcRequest('fs/readDirectory', { path: uri.fsPath });
         },
-        async delete(uri: Uri): Promise<void> {
-          await rpcRequest('fs/delete', { path: uri.fsPath });
+        async delete(uri: Uri, options?: { recursive?: boolean; useTrash?: boolean }): Promise<void> {
+          await rpcRequest('fs/delete', { path: uri.fsPath, recursive: options?.recursive ?? false });
         },
         async createDirectory(uri: Uri): Promise<void> {
           await rpcRequest('fs/createDirectory', { path: uri.fsPath });

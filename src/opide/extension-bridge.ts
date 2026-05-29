@@ -729,9 +729,13 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     }
 
     case 'fs/delete': {
-      const { uri: delUri, recursive: delRecursive } = params || {}
-      if (delUri) {
-        invoke('ide_delete_file', { path: delUri, recursive: delRecursive ?? false })
+      // The shim sends `path`; tolerate `uri` too. Previously this only
+      // read `uri`, so workspace.fs.delete() (which sends `path`) was a
+      // silent no-op — the file was never deleted.
+      const delPath = params?.path ?? params?.uri
+      const delRecursive = params?.recursive
+      if (delPath) {
+        invoke('ide_delete_file', { path: delPath, recursive: delRecursive ?? false })
           .then(() => { if (id) sendResponse(id, null) })
           .catch((e: unknown) => { if (id) sendResponse(id, { error: String(e) }) })
       } else if (id) {
