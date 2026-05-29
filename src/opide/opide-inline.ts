@@ -237,10 +237,8 @@ async function executeInlineEdit(instruction: string, overlay: HTMLElement): Pro
   resultArea.textContent = '⏳ Thinking…'
   _accum = ''
 
-  // Listen for streaming events
-  _unlisten = await listen<any>('engine-event', ({ payload }) => {
-    if (_runId && payload.run_id !== _runId) return
-
+  // Apply one engine event to the overlay.
+  const handleEvent = (payload: any) => {
     if (payload.kind === 'delta') {
       _accum += payload.text
       resultArea.textContent = _accum
@@ -252,6 +250,18 @@ async function executeInlineEdit(instruction: string, overlay: HTMLElement): Pro
       _unlisten = null
       _runId = null
     }
+  }
+
+  // engine_chat_send only returns our run_id AFTER the round-trip, but events
+  // can arrive before then. Buffer everything until we know our run_id, then
+  // replay only OUR events — otherwise a concurrent run (e.g. the main chat
+  // streaming) would bleed its deltas into this overlay, or its `complete`
+  // would hijack the inline edit with the wrong text.
+  const pending: any[] = []
+  _unlisten = await listen<any>('engine-event', ({ payload }) => {
+    if (_runId === null) { pending.push(payload); return }
+    if (payload.run_id !== _runId) return
+    handleEvent(payload)
   })
 
   // Include actual editor selection as context
@@ -267,6 +277,11 @@ async function executeInlineEdit(instruction: string, overlay: HTMLElement): Pro
       },
     })
     _runId = response.run_id
+    // Replay any events that arrived for our run before we knew the id.
+    for (const p of pending) {
+      if (p.run_id === _runId) handleEvent(p)
+    }
+    pending.length = 0
   } catch (err) {
     resultArea.textContent = `Error: ${err}`
     actions.style.display = 'flex'
