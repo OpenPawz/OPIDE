@@ -522,6 +522,18 @@ export function updateStatus(text: string): void {
 
 export function setStreaming(active: boolean): void {
   S.streaming = active
+  // When streaming stops for ANY reason (complete, abort, surfaced,
+  // error), kill the "Thinking… Ns" interval. Previously only the
+  // delta/complete event handlers cleared it, so aborting mid-think
+  // left the timer running — it kept overwriting the "Aborted" status
+  // with "Thinking… 6s, 7s…" every second forever. delta calls
+  // setStreaming(TRUE) when content starts, so clearing only on the
+  // false branch doesn't interfere with the think→stream transition.
+  if (!active && S.thinkingTimerInterval !== null) {
+    clearInterval(S.thinkingTimerInterval)
+    S.thinkingTimerInterval = null
+    S.thinkingStartTs = null
+  }
   // Send button always visible — during streaming it redirects the agent
   if (S.sendBtn) S.sendBtn.style.display = 'flex'
   if (S.stopBtn) S.stopBtn.style.display = active ? 'flex' : 'none'

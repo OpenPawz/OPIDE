@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::thread;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -185,6 +185,25 @@ pub async fn dap_start(
                 }
                 None => {
                     log::info!("[opide-dap] reader ended for {}", aid);
+                    // Remove the instance + reap the child so an adapter
+                    // that exits on its own doesn't leak a stale HashMap
+                    // entry + zombie process (Child doesn't reap on drop).
+                    // Only dap_stop cleaned up before. Also notify the
+                    // frontend so it can tear down the debug session UI.
+                    if let Some(st) = app_handle.try_state::<DapState>() {
+                        let inst = st
+                            .adapters
+                            .lock()
+                            .ok()
+                            .and_then(|mut a| a.remove(&aid));
+                        if let Some(mut inst) = inst {
+                            let _ = inst._child.wait();
+                        }
+                    }
+                    let _ = app_handle.emit(
+                        "dap-exit",
+                        serde_json::json!({ "adapter_id": &aid }),
+                    );
                     break;
                 }
             }

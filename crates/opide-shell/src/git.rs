@@ -177,7 +177,7 @@ pub async fn git_diff(repo_path: String, staged: bool) -> Result<Vec<GitDiffResu
     }
     .map_err(|e| e.to_string())?;
 
-    let mut results = Vec::new();
+    let mut results: Vec<GitDiffResult> = Vec::new();
 
     diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
         let path = delta
@@ -195,15 +195,21 @@ pub async fn git_diff(repo_path: String, staged: bool) -> Result<Vec<GitDiffResu
             _ => "",
         };
 
-        // Find or create entry
-        if let Some(entry) = results.iter_mut().find(|e: &&mut GitDiffResult| e.path == path) {
-            entry.patch.push_str(prefix);
-            entry.patch.push_str(content);
-        } else {
-            let mut patch = String::new();
-            patch.push_str(prefix);
-            patch.push_str(content);
-            results.push(GitDiffResult { path, patch });
+        // git2 emits all lines of one delta contiguously, so the matching
+        // entry — if any — is always the LAST one we pushed. Checking
+        // results.last() is O(1); the previous `.find()` over the whole
+        // vec was O(files) per line → O(files × lines) for a big commit.
+        match results.last_mut() {
+            Some(entry) if entry.path == path => {
+                entry.patch.push_str(prefix);
+                entry.patch.push_str(content);
+            }
+            _ => {
+                let mut patch = String::new();
+                patch.push_str(prefix);
+                patch.push_str(content);
+                results.push(GitDiffResult { path, patch });
+            }
         }
         true
     })

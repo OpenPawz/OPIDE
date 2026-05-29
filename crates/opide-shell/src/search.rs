@@ -40,6 +40,11 @@ pub struct SearchRequest {
 #[tauri::command]
 pub async fn search_files(request: SearchRequest) -> Result<SearchResult, String> {
     let max_results = request.max_results.unwrap_or(500);
+    // Collect one extra past the cap so we can tell "exactly max_results
+    // matches and that's all" (truncated=false) from "hit the cap and
+    // there's more" (truncated=true). Without this, a result set that
+    // lands exactly on the cap is always flagged truncated.
+    let collect_cap = max_results.saturating_add(1);
 
     // Build the regex matcher
     let pattern = if request.is_regex {
@@ -55,9 +60,14 @@ pub async fn search_files(request: SearchRequest) -> Result<SearchResult, String
 
     let mut all_matches = Vec::new();
 
-    // Walk files respecting .gitignore
+    // Walk files respecting .gitignore. hidden(false) so dotfiles and
+    // dot-directories ARE searchable — people grep .github/workflows,
+    // .vscode/settings.json, .env.example constantly, and excluding
+    // them silently is surprising. The heavy hidden dir (.git) is still
+    // skipped by the explicit /.git/ check below, and .gitignore'd files
+    // stay excluded via git_ignore(true).
     let walker = WalkBuilder::new(&request.root)
-        .hidden(true)          // skip hidden files
+        .hidden(false)         // include dotfiles/dotdirs (except .git, skipped below)
         .git_ignore(true)      // respect .gitignore
         .git_global(true)      // respect global gitignore
         .git_exclude(true)     // respect .git/info/exclude
@@ -98,14 +108,6 @@ pub async fn search_files(request: SearchRequest) -> Result<SearchResult, String
             }
         }
 
-        // Apply glob filter if provided
-        if let Some(ref glob) = request.glob {
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !glob_match(glob, file_name) {
-                continue;
-            }
-        }
-
         let path_str = path.to_string_lossy().to_string();
         // Strip the root prefix for cleaner display
         let relative = path_str
@@ -113,30 +115,45 @@ pub async fn search_files(request: SearchRequest) -> Result<SearchResult, String
             .unwrap_or(&path_str)
             .trim_start_matches('/');
 
+        // Apply glob filter if provided. Match against the RELATIVE
+        // path (not just the file name) so path globs like
+        // `src/**/*.ts` work — consistent with search_file_list.
+        if let Some(ref glob) = request.glob {
+            if !glob_match(glob, relative) {
+                continue;
+            }
+        }
+
         let relative_owned = relative.to_string();
 
         let _ = searcher.search_path(
             &matcher,
             path,
             UTF8(|line_number, line_text| {
-                if all_matches.len() < max_results {
+                if all_matches.len() < collect_cap {
                     all_matches.push(SearchMatch {
                         path: relative_owned.clone(),
                         line_number,
                         line_text: line_text.trim_end().to_string(),
                     });
                 }
-                Ok(all_matches.len() < max_results)
+                Ok(all_matches.len() < collect_cap)
             }),
         );
 
-        if all_matches.len() >= max_results {
+        if all_matches.len() >= collect_cap {
             break;
         }
     }
 
+    // We over-collected by one to detect real truncation. If we got the
+    // extra match, there was more than the cap — flag truncated and
+    // trim back down to max_results.
+    let truncated = all_matches.len() > max_results;
+    if truncated {
+        all_matches.truncate(max_results);
+    }
     let total = all_matches.len();
-    let truncated = total >= max_results;
 
     Ok(SearchResult {
         matches: all_matches,
@@ -161,8 +178,11 @@ pub async fn search_file_list(
         Some(p) => Some(glob::Pattern::new(p).map_err(|e| format!("invalid glob: {e}"))?),
     };
 
+    // hidden(false): match search_files — dotfiles/dotdirs are listable
+    // (Cmd+P should find .github/workflows/ci.yml). .git is skipped
+    // explicitly below; .gitignore'd files stay excluded.
     let walker = WalkBuilder::new(&root)
-        .hidden(true)
+        .hidden(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
@@ -177,6 +197,18 @@ pub async fn search_file_list(
         };
 
         if entry.file_type().map_or(true, |ft| !ft.is_file()) {
+            continue;
+        }
+
+        // Now that hidden(false) lets the walker descend into dotdirs,
+        // skip the heavy/noisy ones explicitly — same set search_files
+        // filters. Without this, Cmd+P would list every object under
+        // .git/, plus node_modules/ and target/ if not gitignored.
+        let path_check = entry.path().to_string_lossy();
+        if path_check.contains("/.git/")
+            || path_check.contains("/node_modules/")
+            || path_check.contains("/target/")
+        {
             continue;
         }
 

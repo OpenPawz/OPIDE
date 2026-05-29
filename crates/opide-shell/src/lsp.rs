@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::thread;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -261,6 +261,25 @@ pub async fn lsp_start(
                 LspRead::Skip => continue,
                 LspRead::Eof => {
                     log::info!("[opide-lsp] reader ended for {}", sid);
+                    // Remove the instance from state and reap the child.
+                    // Without this, a language server that crashes or exits
+                    // on its own leaves a stale HashMap entry holding a
+                    // zombie Child (std::process::Child does not reap on
+                    // drop) — only lsp_stop cleaned up before, and the
+                    // frontend won't call it after just seeing lsp-exit.
+                    if let Some(st) = app_handle.try_state::<LspState>() {
+                        let inst = st
+                            .servers
+                            .lock()
+                            .ok()
+                            .and_then(|mut s| s.remove(&sid));
+                        if let Some(mut inst) = inst {
+                            // Child has already exited (that's why we hit
+                            // EOF); wait() just reaps the zombie. Returns
+                            // immediately.
+                            let _ = inst.child.wait();
+                        }
+                    }
                     // B122: notify frontend so it can drop its handle / restart.
                     let _ = app_handle.emit(
                         "lsp-exit",

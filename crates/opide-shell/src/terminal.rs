@@ -14,7 +14,7 @@ use std::thread;
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::utf8::Utf8Decoder;
 
@@ -249,6 +249,19 @@ pub async fn terminal_spawn(
     let app_exit = app.clone();
     thread::spawn(move || {
         let exit_code = child.wait().ok().map(|s| s.exit_code() as i32);
+        // Drop the instance from state so its PTY master fd, writer, and
+        // killer are released. Without this, terminals that exit on their
+        // own (user types `exit`, a one-shot command finishes) leak the
+        // HashMap entry forever — only terminal_kill removed it before.
+        // Each leaked master holds a file descriptor, so a session that
+        // opens/closes many terminals slowly exhausts the fd table.
+        // (terminal_kill may have already removed it; remove() is a no-op
+        // then.)
+        if let Some(st) = app_exit.try_state::<TerminalState>() {
+            if let Ok(mut terminals) = st.terminals.lock() {
+                terminals.remove(&tid_exit);
+            }
+        }
         let _ = app_exit.emit(
             "terminal-exit",
             TerminalExitEvent {

@@ -167,10 +167,32 @@ export function createWorkspaceProvider() {
   }
 }
 
+/** Guards against concurrent folder-picks. pickAndOpenFolder is wired
+ * to TWO commands (opide.openFolder + workbench.action.files.openFolder)
+ * AND a toolbar button — a single user action can fire it 2-3 times.
+ * Without this guard you get multiple native dialogs stacked on top of
+ * each other and, worse, multiple window.location.reload() calls racing
+ * (each re-running extension activation). Hold the guard for the whole
+ * flow; clear it in finally so a thrown error doesn't wedge it shut. */
+let _pickInFlight = false
+
 /**
  * Show the native Tauri folder picker and open the selected folder.
  */
 export async function pickAndOpenFolder(): Promise<boolean> {
+  if (_pickInFlight) {
+    console.log('[opide-workspace] pickAndOpenFolder() ignored — a pick is already in flight')
+    return false
+  }
+  _pickInFlight = true
+  try {
+    return await _pickAndOpenFolderInner()
+  } finally {
+    _pickInFlight = false
+  }
+}
+
+async function _pickAndOpenFolderInner(): Promise<boolean> {
   console.log('[opide-workspace] [step 1] pickAndOpenFolder() called')
   // Pipe to OPIDE.log so we can see it without DevTools.
   const tlog = (m: string) => {
