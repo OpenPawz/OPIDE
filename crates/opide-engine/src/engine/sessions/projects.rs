@@ -84,6 +84,14 @@ impl SessionStore {
 
     pub fn delete_project(&self, id: &str) -> EngineResult<()> {
         let conn = self.conn.lock();
+        // The schema declares ON DELETE CASCADE for project_agents and
+        // project_messages, but the connection runs with foreign_keys OFF
+        // (see flows.rs), so cascades don't fire. Delete the FK children
+        // manually — otherwise they orphan forever, and orphaned
+        // project_agents even surface as ghost entries in list_all_agents
+        // after the project is gone.
+        conn.execute("DELETE FROM project_agents WHERE project_id=?1", params![id])?;
+        conn.execute("DELETE FROM project_messages WHERE project_id=?1", params![id])?;
         conn.execute("DELETE FROM projects WHERE id=?1", params![id])?;
         Ok(())
     }
