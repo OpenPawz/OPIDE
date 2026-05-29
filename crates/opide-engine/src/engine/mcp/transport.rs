@@ -79,7 +79,15 @@ impl StdioTransport {
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            // SIGKILL the MCP server if this Child handle ever drops
+            // without an explicit shutdown(). tokio defaults this to
+            // false, so any early-return drop path (e.g. the stdin/
+            // stdout/stderr .take() failing below, or the owning
+            // transport being dropped on error) would otherwise orphan
+            // a heavyweight node/python MCP server process. With this,
+            // the OS reaps it when the handle goes away.
+            .kill_on_drop(true);
 
         // Merge extra env vars (credentials, etc.)
         for (k, v) in env {

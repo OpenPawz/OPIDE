@@ -704,7 +704,22 @@ impl OpenAiProvider {
                                 }
                             }
                             "response.completed" => {
-                                let usage = v.get("usage").and_then(|u| {
+                                // The Responses API wraps everything in a
+                                // `response` object: the completed event is
+                                // {"type":"response.completed","response":{
+                                // ...,"usage":{...},"model":"..."}}. Older/
+                                // alt shapes put usage at the top level. Check
+                                // the nested location first, then fall back to
+                                // top-level so we capture usage either way —
+                                // otherwise the token meter silently misses
+                                // every Responses-API turn.
+                                let usage_obj = if v["response"].get("usage").is_some() {
+                                    &v["response"]["usage"]
+                                } else {
+                                    &v["usage"]
+                                };
+                                let usage = {
+                                    let u = usage_obj;
                                     let input_tok = u["input_tokens"].as_u64().unwrap_or(0);
                                     let output_tok = u["output_tokens"].as_u64().unwrap_or(0);
                                     if input_tok > 0 || output_tok > 0 {
@@ -719,8 +734,11 @@ impl OpenAiProvider {
                                     } else {
                                         None
                                     }
-                                });
-                                let model_name = v["model"].as_str().map(|s| s.to_string());
+                                };
+                                let model_name = v["response"]["model"]
+                                    .as_str()
+                                    .or_else(|| v["model"].as_str())
+                                    .map(|s| s.to_string());
                                 chunks.push(StreamChunk {
                                     delta_text: None,
                                     tool_calls: vec![],
@@ -767,21 +785,49 @@ impl OpenAiProvider {
         // Extract the actual model name returned by the API
         let model = v["model"].as_str().map(|s| s.to_string());
 
-        let choice = v["choices"].get(0)?;
-        let delta = &choice["delta"];
-        let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
+        // Parse usage FIRST, independent of `choices`. When
+        // stream_options.include_usage is set (see request body), OpenAI
+        // sends a FINAL chunk with `"choices": []` and only `usage`
+        // populated. The previous `v["choices"].get(0)?` early-returned
+        // None on that chunk, so the usage was silently dropped and the
+        // token meter under-reported every OpenAI stream.
+        let usage = v.get("usage").and_then(|u| {
+            let input = u["prompt_tokens"].as_u64().unwrap_or(0);
+            let output = u["completion_tokens"].as_u64().unwrap_or(0);
+            if input > 0 || output > 0 {
+                Some(TokenUsage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    total_tokens: u["total_tokens"].as_u64().unwrap_or(input + output),
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        });
 
-        let delta_text = delta["content"].as_str().map(|s| s.to_string());
+        // choices may be absent/empty on the usage-only final chunk.
+        let choice = v["choices"].get(0);
+        let finish_reason = choice
+            .and_then(|c| c["finish_reason"].as_str())
+            .map(|s| s.to_string());
+        let delta_text = choice
+            .and_then(|c| c["delta"]["content"].as_str())
+            .map(|s| s.to_string());
 
         // OpenAI reasoning models (o1, o3, o4-mini) emit reasoning in a separate field
-        let thinking_text = delta
-            .get("reasoning_content")
-            .or_else(|| delta.get("reasoning"))
-            .and_then(|v| v.as_str())
+        let thinking_text = choice
+            .and_then(|c| {
+                let delta = &c["delta"];
+                delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(|v| v.as_str())
+            })
             .map(|s| s.to_string());
 
         let mut tool_calls = Vec::new();
-        if let Some(tcs) = delta["tool_calls"].as_array() {
+        if let Some(tcs) = choice.and_then(|c| c["delta"]["tool_calls"].as_array()) {
             for tc in tcs {
                 let index = tc["index"].as_u64().unwrap_or(0) as usize;
                 let id = tc["id"].as_str().map(|s| s.to_string());
@@ -806,23 +852,17 @@ impl OpenAiProvider {
             }
         }
 
-        // Parse usage from the final chunk (OpenAI includes it when
-        // stream_options.include_usage is set, and also in the last chunk
-        // of standard streams).
-        let usage = v.get("usage").and_then(|u| {
-            let input = u["prompt_tokens"].as_u64().unwrap_or(0);
-            let output = u["completion_tokens"].as_u64().unwrap_or(0);
-            if input > 0 || output > 0 {
-                Some(TokenUsage {
-                    input_tokens: input,
-                    output_tokens: output,
-                    total_tokens: u["total_tokens"].as_u64().unwrap_or(input + output),
-                    ..Default::default()
-                })
-            } else {
-                None
-            }
-        });
+        // If the chunk carried nothing actionable at all, skip it — but a
+        // usage-only chunk (no choices) still returns a StreamChunk so the
+        // caller records the token usage.
+        if delta_text.is_none()
+            && finish_reason.is_none()
+            && thinking_text.is_none()
+            && tool_calls.is_empty()
+            && usage.is_none()
+        {
+            return None;
+        }
 
         Some(StreamChunk {
             delta_text,
