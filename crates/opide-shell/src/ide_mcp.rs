@@ -266,6 +266,50 @@ pub async fn ide_run_command(
     })
 }
 
+/// Open a URL or path in the OS default handler WITHOUT going through a
+/// shell. The extension-host env.openExternal path used to build
+/// `zsh -c "open \"$url\""`, so a URL containing $(...), backticks, or ${...}
+/// triggered shell command injection (substitution happens even inside double
+/// quotes). Passing the URL as a distinct argv entry removes that entirely.
+#[tauri::command]
+pub async fn open_external(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    let lower = trimmed.to_lowercase();
+    // Block script/data schemes; everything else (http(s), mailto, app
+    // callback schemes used for OAuth) is handed to the OS opener as a single
+    // argument — no shell interpretation.
+    if lower.starts_with("javascript:") || lower.starts_with("data:") {
+        return Err(format!("Refusing to open scheme: {trimmed}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("open");
+        c.arg(trimmed);
+        c
+    };
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("xdg-open");
+        c.arg(trimmed);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // `start` takes a quoted title arg first; the URL is a separate argv
+        // entry, not concatenated into a command string.
+        let mut c = tokio::process::Command::new("cmd");
+        c.args(["/C", "start", "", trimmed]);
+        c
+    };
+
+    // The launcher exits immediately after handing off; await + reap it.
+    cmd.status()
+        .await
+        .map_err(|e| format!("open_external failed: {e}"))?;
+    Ok(())
+}
+
 // ─── Git Tools (delegates to git.rs) ─────────────────────────────────────────
 
 #[tauri::command]

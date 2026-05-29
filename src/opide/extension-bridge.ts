@@ -782,11 +782,11 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'env/openExternal': {
       const url = params?.uri || params?.url || ''
       if (url) {
-        // env/openExternal is the LSP path extensions use for "click to open
-        // docs" links. Silent failure means the click did nothing, which
-        // looks like a frozen UI. Log so we can diagnose. sendResponse below
-        // still fires so the LSP doesn't itself hang waiting for an answer.
-        invoke('ide_run_command', { command: `open "${url}"`, cwd: '/' }).catch((e) => {
+        // open_external launches the URL via the OS opener with the URL as a
+        // distinct argv entry — NOT through a shell. The previous
+        // `ide_run_command('open "<url>")` path let a URL containing $(...),
+        // backticks, or ${...} execute arbitrary commands.
+        invoke('open_external', { url }).catch((e) => {
           console.warn('[extension-bridge] env/openExternal failed:', url, e)
         })
       }

@@ -372,6 +372,7 @@ pub fn run() {
             opide_shell::ide_mcp::ide_read_file_bytes,
             opide_shell::ide_mcp::ide_write_file_bytes,
             opide_shell::ide_mcp::ide_stat,
+            opide_shell::ide_mcp::open_external,
             opide_shell::ide_mcp::ide_delete_file,
             opide_shell::ide_mcp::ide_list_dir,
             opide_shell::ide_mcp::ide_run_command,
