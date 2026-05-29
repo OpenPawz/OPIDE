@@ -42,6 +42,11 @@ class TauriTerminalProcess extends SimpleTerminalProcess {
   private unlistenData: UnlistenFn | null = null
   private unlistenExit: UnlistenFn | null = null
   private readonly dataEmitter: Emitter<string>
+  // Real process-exit channel. The base class leaves onProcessExit as
+  // Event.None (never fires), so Monaco never learned the PTY exited and the
+  // terminal tab stayed "alive". We back it with our own emitter and fire it
+  // from the Rust `terminal-exit` event.
+  private readonly exitEmitter = new Emitter<number | undefined>()
 
   constructor(
     id: number,
@@ -53,6 +58,7 @@ class TauriTerminalProcess extends SimpleTerminalProcess {
     super(id, pid, cwd, dataEmitter.event)
     this.terminalId = terminalId
     this.dataEmitter = dataEmitter
+    this.onProcessExit = this.exitEmitter.event
   }
 
   async start(): Promise<undefined> {
@@ -108,12 +114,11 @@ class TauriTerminalProcess extends SimpleTerminalProcess {
   // ── Internal ─────────────────────────────────────────────────────────────
 
   private fireExit(code: number): void {
-    // B42: SimpleTerminalProcess's exit signal isn't directly exposed via a
-    // public emitter we can fire — the message-only path here just renders
-    // text in xterm. End-to-end exit reporting requires the Rust-side
-    // terminal.rs to emit real exit codes (B111, queued for the opide-shell
-    // pass). For now this is best-effort.
+    // Render the exit line in xterm, then signal Monaco's terminal layer via
+    // the real onProcessExit emitter so the tab reflects the exited state
+    // (terminal.rs emits the true exit code on the `terminal-exit` event).
     this.dataEmitter.fire(`\r\n[Process exited with code ${code}]\r\n`)
+    this.exitEmitter.fire(code)
   }
 
   private cleanup(): void {
@@ -121,6 +126,10 @@ class TauriTerminalProcess extends SimpleTerminalProcess {
     this.unlistenData = null
     this.unlistenExit?.()
     this.unlistenExit = null
+    // Dispose the emitters so their listeners don't leak across the
+    // terminal's lifetime (one TauriTerminalProcess per spawned PTY).
+    this.dataEmitter.dispose()
+    this.exitEmitter.dispose()
   }
 }
 
