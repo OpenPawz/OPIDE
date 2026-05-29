@@ -535,6 +535,11 @@ export function registerOpideChat(): void {
       newBtn.style.cssText = 'padding:0'
       newBtn.innerHTML = '<span class="codicon codicon-add" style="font-size:13px"></span>'
       newBtn.addEventListener('click', async () => {
+        // Abort any in-flight run first. Without this the old run kept
+        // executing on the backend and its delta/complete events (runId still
+        // set) bled into the freshly-cleared chat. doAbort marks the run
+        // completed and clears runId/streaming. Mirrors the session switcher.
+        if (S.streaming) await doAbort()
         // Reset the agent's cognitive state and episodic memories so the new
         // chat starts completely fresh — no working memory or recalled findings
         // carry over from the previous run.
