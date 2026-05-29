@@ -654,6 +654,16 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
+    case 'workspace/applyEdit': {
+      // vscode.workspace.applyEdit(edit) — multi-file text edits for
+      // refactors/codemods. Was a hardcoded false in the shim. Apply via the
+      // workbench bulk-edit service (covers unopened files).
+      handleApplyWorkspaceEdit(params)
+        .then((ok) => { if (id) sendResponse(id, ok) })
+        .catch((e) => { debugLog(`workspace/applyEdit failed: ${e}`); if (id) sendResponse(id, false) })
+      break
+    }
+
     case 'workspace/saveAll': {
       // vscode.workspace.saveAll() — was sent by the shim but never handled,
       // so it silently no-opped. Delegate to the workbench's own save-all
@@ -2309,6 +2319,47 @@ async function pushConfigChange(): Promise<void> {
   } catch (e) {
     debugLog(`configuration/didChange failed: ${e}`)
   }
+}
+
+// Apply a multi-file WorkspaceEdit ({ changes: { [uri]: [{range,newText}] } })
+// through the workbench's IBulkEditService, which resolves and edits both
+// open and unopened files atomically (and leaves them dirty, matching VS
+// Code — extensions/users save separately). Wire ranges are 0-based; Monaco
+// IRange is 1-based.
+async function handleApplyWorkspaceEdit(params: any): Promise<boolean> {
+  const changes = params?.changes || {}
+  const uris = Object.keys(changes)
+  if (uris.length === 0) return true
+
+  const monacoMod = await import('monaco-editor') as any
+  const monaco = monacoMod.default || monacoMod
+  const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+  const bulkMod: any = await import(
+    '@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService'
+  )
+  const IBulkEditService = bulkMod?.IBulkEditService
+  const ResourceTextEdit = bulkMod?.ResourceTextEdit
+  if (!IBulkEditService || !ResourceTextEdit) return false
+  const bulk = StandaloneServices.get(IBulkEditService) as any
+  if (!bulk?.apply) return false
+
+  const resourceEdits: any[] = []
+  for (const uri of uris) {
+    const resource = monaco.Uri.file(uri)
+    for (const te of (changes[uri] as any[])) {
+      resourceEdits.push(new ResourceTextEdit(resource, {
+        range: {
+          startLineNumber: (te.range?.start?.line ?? 0) + 1,
+          startColumn: (te.range?.start?.character ?? 0) + 1,
+          endLineNumber: (te.range?.end?.line ?? 0) + 1,
+          endColumn: (te.range?.end?.character ?? 0) + 1,
+        },
+        text: te.newText ?? '',
+      }))
+    }
+  }
+  await bulk.apply(resourceEdits, {})
+  return true
 }
 
 // Save every dirty editor via the workbench's built-in action — the

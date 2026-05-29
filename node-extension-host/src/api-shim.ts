@@ -2404,10 +2404,19 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         bridge.log(`workspace.registerTextDocumentContentProvider stub for scheme: ${_scheme}`);
         return new VsCodeDisposable();
       },
-      applyEdit(_edit: WorkspaceEdit): Promise<boolean> {
-        // Forward to the bridge once we wire WorkspaceEdit application.
-        // Returning false means "edit didn't apply" — extensions handle this.
-        return Promise.resolve(false);
+      applyEdit(edit: WorkspaceEdit): Promise<boolean> {
+        // Serialize the text edits and apply them through the workbench's
+        // IBulkEditService (handles open AND unopened files atomically).
+        // Previously this returned false unconditionally, so every
+        // refactor/codemod extension calling workspace.applyEdit silently
+        // failed. (File create/delete/rename ops aren't carried yet — text
+        // edits are the overwhelming majority of applyEdit usage.)
+        const wire = edit && typeof (edit as any)._toWire === 'function'
+          ? (edit as any)._toWire()
+          : { changes: {} };
+        return rpcRequest('workspace/applyEdit', wire)
+          .then((r: any) => r !== false)
+          .catch(() => false);
       },
       saveAll(): Promise<boolean> {
         return rpcRequest('workspace/saveAll', {}).then(() => true).catch(() => false);
