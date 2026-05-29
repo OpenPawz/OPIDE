@@ -654,6 +654,16 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
+    case 'workspace/saveAll': {
+      // vscode.workspace.saveAll() — was sent by the shim but never handled,
+      // so it silently no-opped. Delegate to the workbench's own save-all
+      // action, which persists every dirty editor.
+      handleSaveAll()
+        .then(() => { if (id) sendResponse(id, true) })
+        .catch((e) => { debugLog(`workspace/saveAll failed: ${e}`); if (id) sendResponse(id, false) })
+      break
+    }
+
     case 'workspace/watchFiles': {
       // Use our existing file watcher
       if (params?.pattern) {
@@ -2299,6 +2309,19 @@ async function pushConfigChange(): Promise<void> {
   } catch (e) {
     debugLog(`configuration/didChange failed: ${e}`)
   }
+}
+
+// Save every dirty editor via the workbench's built-in action — the
+// reliable path that respects the file service, formatters-on-save, etc.
+async function handleSaveAll(): Promise<void> {
+  const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+  const { ICommandService } = await import(
+    '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+  )
+  if (!ICommandService) return
+  const commandService = StandaloneServices.get(ICommandService) as any
+  if (!commandService?.executeCommand) return
+  await commandService.executeCommand('workbench.action.files.saveAll')
 }
 
 // ─── Command execution handler ──────────────────────────────────────────────
