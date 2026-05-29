@@ -125,8 +125,15 @@ impl SessionStore {
     /// Delete a task and its activity.
     pub fn delete_task(&self, task_id: &str) -> EngineResult<()> {
         let conn = self.conn.lock();
+        // FK CASCADE is declared but not enforced (foreign_keys OFF), so delete
+        // both FK children manually. task_activity was already handled;
+        // task_agents was being leaked (orphaned forever).
         conn.execute(
             "DELETE FROM task_activity WHERE task_id = ?1",
+            params![task_id],
+        )?;
+        conn.execute(
+            "DELETE FROM task_agents WHERE task_id = ?1",
             params![task_id],
         )?;
         conn.execute("DELETE FROM tasks WHERE id = ?1", params![task_id])?;

@@ -104,6 +104,11 @@ impl SessionStore {
     /// Delete a squad and its members.
     pub fn delete_squad(&self, squad_id: &str) -> EngineResult<()> {
         let conn = self.conn.lock();
+        // FK CASCADE is declared but not enforced (foreign_keys OFF), so the
+        // squad_members rows were orphaned on squad deletion. Delete them
+        // manually. (The delete_squad_cascades test never checked members, so
+        // it didn't catch this.)
+        conn.execute("DELETE FROM squad_members WHERE squad_id = ?1", params![squad_id])?;
         conn.execute("DELETE FROM squads WHERE id = ?1", params![squad_id])?;
         Ok(())
     }
