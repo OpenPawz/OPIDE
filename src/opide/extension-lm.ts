@@ -95,19 +95,40 @@ export async function sendRequest(
 ): Promise<{ text: string }> {
   const { messages, modelId } = params || {}
 
-  // Subscribe to engine streaming events keyed on a one-shot run id
-  // we manufacture; the engine doesn't currently provide a per-call
-  // lm-specific channel so we listen on `engine-event` and filter.
+  // engine_chat_send runs the agent loop in a BACKGROUND task and returns
+  // immediately with just { run_id, session_id } — the actual text streams
+  // over `engine-event`. Two bugs used to make this path return empty
+  // every time: (1) it matched `kind === 'token'` but the engine emits
+  // text deltas as `kind === 'delta'`, and (2) it read `result.text`,
+  // which ChatResponse doesn't have. So we now (a) match 'delta', (b)
+  // await the 'complete' event for the run, and (c) filter by run_id so a
+  // concurrent main-chat stream doesn't bleed into the extension's tokens.
   const accumulated: string[] = []
+  let myRunId: string | null = null
+  // Events that arrive before engine_chat_send resolves (so before we
+  // know our run_id) are buffered and replayed once we do.
+  const buffered: any[] = []
+  let finalText = ''
+  let resolveDone: (() => void) | null = null
+  const donePromise = new Promise<void>((res) => { resolveDone = res })
+
+  const handleEvent = (p: any) => {
+    if (p?.kind === 'delta' && typeof p.text === 'string') {
+      accumulated.push(p.text)
+      onChunk(p.text)
+    } else if (p?.kind === 'complete') {
+      if (typeof p.text === 'string') finalText = p.text
+      resolveDone?.()
+    } else if (p?.kind === 'error') {
+      resolveDone?.()
+    }
+  }
+
   const unlisten = await listen<any>('engine-event', (e) => {
     const payload: any = e.payload || {}
-    // Match by run_id we get back from engine_chat_send below; until
-    // then store everything that arrives for the current ephemeral
-    // session id so we can flush on completion.
-    if (payload?.kind === 'token' && payload?.text) {
-      accumulated.push(payload.text)
-      onChunk(payload.text)
-    }
+    if (myRunId === null) { buffered.push(payload); return }
+    if (payload?.run_id !== myRunId) return
+    handleEvent(payload)
   })
 
   try {
@@ -138,12 +159,28 @@ export async function sendRequest(
       },
     }).catch(() => null)
 
-    // Engine returns a final message; if streaming events fired we have
-    // the chunks already, otherwise fall back to the final text.
-    const final = result?.text || result?.content || ''
-    if (accumulated.length === 0 && final) {
-      accumulated.push(final)
-      onChunk(final)
+    myRunId = result?.run_id ?? null
+    if (!myRunId) return { text: '' } // failed to start the run
+
+    // Replay anything that arrived for our run before we knew the id.
+    for (const p of buffered) {
+      if (p?.run_id === myRunId) handleEvent(p)
+    }
+    buffered.length = 0
+
+    // Wait for the run to complete. The engine always emits a Complete
+    // (or Error) event — even on abort/crash — so this resolves; the
+    // timeout is a safety net against a wedged engine.
+    await Promise.race([
+      donePromise,
+      new Promise<void>((res) => setTimeout(res, 300_000)),
+    ])
+
+    // If the model didn't stream deltas (some providers only send a final
+    // message), fall back to the complete event's full text.
+    if (accumulated.length === 0 && finalText) {
+      accumulated.push(finalText)
+      onChunk(finalText)
     }
     return { text: accumulated.join('') }
   } finally {
