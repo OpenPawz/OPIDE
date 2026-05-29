@@ -829,6 +829,31 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       bridge.send({ jsonrpc: '2.0', id, result: r });
       return;
     }
+    if (method === 'languages/provideDocumentRangeFormattingEdits') {
+      const r = await provideRangeFormattingEdits(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideOnTypeFormattingEdits') {
+      const r = await provideOnTypeFormattingEdits(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideSelectionRanges') {
+      const r = await provideSelectionRanges(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideDocumentColors') {
+      const r = await provideDocumentColors(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideColorPresentations') {
+      const r = await provideColorPresentations(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
     // Unknown — respond with null so the caller doesn't time out.
     bridge.send({ jsonrpc: '2.0', id, result: null });
   }
@@ -1377,6 +1402,130 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     return out;
   }
 
+  async function provideRangeFormattingEdits(params: any): Promise<any[]> {
+    const { uri, languageId, range, options } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const r = range
+      ? new Range(range.start?.line ?? 0, range.start?.character ?? 0, range.end?.line ?? 0, range.end?.character ?? 0)
+      : new Range(0, 0, 0, 0);
+    for (const rec of _rangeFormattingProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const edits = await Promise.resolve(rec.provider.provideDocumentRangeFormattingEdits?.(doc, r, options || {}, cancel));
+        if (Array.isArray(edits) && edits.length) {
+          return edits.map((e: any) => ({ range: serializeRangeStrict(e.range), newText: e.newText ?? '' }));
+        }
+      } catch (e: any) {
+        bridge.log(`rangeFormatting provider failed: ${e?.message || e}`);
+      }
+    }
+    return [];
+  }
+
+  async function provideOnTypeFormattingEdits(params: any): Promise<any[]> {
+    const { uri, languageId, position, ch, options } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    for (const rec of _onTypeFormattingProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const edits = await Promise.resolve(rec.provider.provideOnTypeFormattingEdits?.(doc, pos, ch, options || {}, cancel));
+        if (Array.isArray(edits) && edits.length) {
+          return edits.map((e: any) => ({ range: serializeRangeStrict(e.range), newText: e.newText ?? '' }));
+        }
+      } catch (e: any) {
+        bridge.log(`onTypeFormatting provider failed: ${e?.message || e}`);
+      }
+    }
+    return [];
+  }
+
+  async function provideSelectionRanges(params: any): Promise<any[]> {
+    const { uri, languageId, positions } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const posArr = (positions || []).map((p: any) => new Position(p?.line ?? 0, p?.character ?? 0));
+    for (const rec of _selectionRangeProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const result = await Promise.resolve(rec.provider.provideSelectionRanges?.(doc, posArr, cancel));
+        if (Array.isArray(result)) {
+          // One SelectionRange per input position; each is a linked list via
+          // .parent (widening). Flatten each chain to [{range}, ...].
+          return result.map((sr: any) => {
+            const chain: any[] = [];
+            let cur = sr;
+            while (cur) { chain.push({ range: serializeRangeStrict(cur.range) }); cur = cur.parent; }
+            return chain;
+          });
+        }
+      } catch (e: any) {
+        bridge.log(`selectionRange provider failed: ${e?.message || e}`);
+      }
+    }
+    return [];
+  }
+
+  async function provideDocumentColors(params: any): Promise<any[]> {
+    const { uri, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const out: any[] = [];
+    for (const rec of _colorProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const colors = await Promise.resolve(rec.provider.provideDocumentColors?.(doc, cancel));
+        if (Array.isArray(colors)) {
+          for (const c of colors) {
+            out.push({
+              range: serializeRangeStrict(c.range),
+              color: { red: c.color?.red ?? 0, green: c.color?.green ?? 0, blue: c.color?.blue ?? 0, alpha: c.color?.alpha ?? 1 },
+            });
+          }
+        }
+      } catch (e: any) {
+        bridge.log(`color provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
+  async function provideColorPresentations(params: any): Promise<any[]> {
+    const { uri, languageId, color, range } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const r = range
+      ? new Range(range.start?.line ?? 0, range.start?.character ?? 0, range.end?.line ?? 0, range.end?.character ?? 0)
+      : new Range(0, 0, 0, 0);
+    const ctx = { document: doc, range: r };
+    const colorObj = { red: color?.red ?? 0, green: color?.green ?? 0, blue: color?.blue ?? 0, alpha: color?.alpha ?? 1 };
+    for (const rec of _colorProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const presentations = await Promise.resolve(rec.provider.provideColorPresentations?.(colorObj, ctx, cancel));
+        if (Array.isArray(presentations) && presentations.length) {
+          return presentations.map((p: any) => ({
+            label: p.label ?? '',
+            textEdit: p.textEdit ? { range: serializeRangeStrict(p.textEdit.range), newText: p.textEdit.newText ?? '' } : undefined,
+            additionalTextEdits: Array.isArray(p.additionalTextEdits)
+              ? p.additionalTextEdits.map((e: any) => ({ range: serializeRangeStrict(e.range), newText: e.newText ?? '' }))
+              : undefined,
+          }));
+        }
+      } catch (e: any) {
+        bridge.log(`colorPresentation provider failed: ${e?.message || e}`);
+      }
+    }
+    return [];
+  }
+
   async function provideSignatureHelp(params: any): Promise<any> {
     const { uri, position, languageId } = params || {};
     const doc = await resolveDoc(uri, languageId);
@@ -1644,6 +1793,10 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _foldingRangeProviders = new Map<string, LangProviderRec>();
   const _documentLinkProviders = new Map<string, LangProviderRec>();
   const _inlayHintsProviders = new Map<string, LangProviderRec>();
+  const _rangeFormattingProviders = new Map<string, LangProviderRec>();
+  const _onTypeFormattingProviders = new Map<string, LangProviderRec>();
+  const _selectionRangeProviders = new Map<string, LangProviderRec>();
+  const _colorProviders = new Map<string, LangProviderRec>();
   let _nextLangProviderId = 1;
 
   /** VS Code DocumentSelector accepts strings, arrays, or objects with
@@ -3472,6 +3625,33 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         _inlayHintsProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerInlayHintsProvider', { selector }).catch(() => {});
         return { dispose: () => { _inlayHintsProviders.delete(id); } };
+      },
+      registerDocumentRangeFormattingEditProvider(selector: any, provider: any) {
+        const id = `rfmt-${_nextLangProviderId++}`;
+        _rangeFormattingProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerRangeFormattingProvider', { selector }).catch(() => {});
+        return { dispose: () => { _rangeFormattingProviders.delete(id); } };
+      },
+      registerOnTypeFormattingEditProvider(selector: any, provider: any, firstTriggerChar: string, ...moreTriggerChars: string[]) {
+        const id = `otf-${_nextLangProviderId++}`;
+        _onTypeFormattingProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerOnTypeFormattingProvider', {
+          selector,
+          triggerCharacters: [firstTriggerChar, ...moreTriggerChars].filter(Boolean),
+        }).catch(() => {});
+        return { dispose: () => { _onTypeFormattingProviders.delete(id); } };
+      },
+      registerSelectionRangeProvider(selector: any, provider: any) {
+        const id = `selr-${_nextLangProviderId++}`;
+        _selectionRangeProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerSelectionRangeProvider', { selector }).catch(() => {});
+        return { dispose: () => { _selectionRangeProviders.delete(id); } };
+      },
+      registerColorProvider(selector: any, provider: any) {
+        const id = `clr-${_nextLangProviderId++}`;
+        _colorProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerColorProvider', { selector }).catch(() => {});
+        return { dispose: () => { _colorProviders.delete(id); } };
       },
 
       registerSignatureHelpProvider(selector: any, provider: any, ...rest: any[]) {

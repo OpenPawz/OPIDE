@@ -650,6 +650,26 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       if (id) sendResponse(id, null)
       break
     }
+    case 'languages/registerRangeFormattingProvider': {
+      handleRegisterLanguageProvider('rangeFormatting', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerOnTypeFormattingProvider': {
+      handleRegisterLanguageProvider('onTypeFormatting', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerSelectionRangeProvider': {
+      handleRegisterLanguageProvider('selectionRange', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerColorProvider': {
+      handleRegisterLanguageProvider('color', params)
+      if (id) sendResponse(id, null)
+      break
+    }
 
     // P1: inline completions. Carries providerId + languages so the
     // sidecar can route provideInlineCompletionItems back to the
@@ -2366,6 +2386,141 @@ async function handleRegisterLanguageProvider(
                 return { hints, dispose() {} }
               } catch {
                 return { hints: [], dispose() {} }
+              }
+            },
+          })
+          break
+
+        case 'rangeFormatting':
+          monaco.languages.registerDocumentRangeFormattingEditProvider(lang, {
+            provideDocumentRangeFormattingEdits: async (model: any, range: any, options: any) => {
+              try {
+                const result = await sendRequest('languages/provideDocumentRangeFormattingEdits', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  range: {
+                    start: { line: range.startLineNumber - 1, character: range.startColumn - 1 },
+                    end: { line: range.endLineNumber - 1, character: range.endColumn - 1 },
+                  },
+                  options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
+                  languageId: lang,
+                })
+                return (Array.isArray(result) ? result : []).map((e: any) => ({
+                  range: {
+                    startLineNumber: (e.range?.start?.line ?? 0) + 1,
+                    startColumn: (e.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (e.range?.end?.line ?? 0) + 1,
+                    endColumn: (e.range?.end?.character ?? 0) + 1,
+                  },
+                  text: e.newText ?? '',
+                }))
+              } catch {
+                return []
+              }
+            },
+          })
+          break
+
+        case 'onTypeFormatting':
+          monaco.languages.registerOnTypeFormattingEditProvider(lang, {
+            autoFormatTriggerCharacters: params?.triggerCharacters || [],
+            provideOnTypeFormattingEdits: async (model: any, position: any, ch: string, options: any) => {
+              try {
+                const result = await sendRequest('languages/provideOnTypeFormattingEdits', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  ch,
+                  options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
+                  languageId: lang,
+                })
+                return (Array.isArray(result) ? result : []).map((e: any) => ({
+                  range: {
+                    startLineNumber: (e.range?.start?.line ?? 0) + 1,
+                    startColumn: (e.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (e.range?.end?.line ?? 0) + 1,
+                    endColumn: (e.range?.end?.character ?? 0) + 1,
+                  },
+                  text: e.newText ?? '',
+                }))
+              } catch {
+                return []
+              }
+            },
+          })
+          break
+
+        case 'selectionRange':
+          monaco.languages.registerSelectionRangeProvider(lang, {
+            provideSelectionRanges: async (model: any, positions: any[]) => {
+              try {
+                const result = await sendRequest('languages/provideSelectionRanges', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  positions: positions.map((p: any) => ({ line: p.lineNumber - 1, character: p.column - 1 })),
+                  languageId: lang,
+                })
+                // SelectionRange[][] — chain of widening ranges per position.
+                return (Array.isArray(result) ? result : []).map((chain: any[]) =>
+                  (Array.isArray(chain) ? chain : []).map((sr: any) => ({
+                    range: {
+                      startLineNumber: (sr.range?.start?.line ?? 0) + 1,
+                      startColumn: (sr.range?.start?.character ?? 0) + 1,
+                      endLineNumber: (sr.range?.end?.line ?? 0) + 1,
+                      endColumn: (sr.range?.end?.character ?? 0) + 1,
+                    },
+                  })),
+                )
+              } catch {
+                return []
+              }
+            },
+          })
+          break
+
+        case 'color':
+          monaco.languages.registerColorProvider(lang, {
+            provideDocumentColors: async (model: any) => {
+              try {
+                const result = await sendRequest('languages/provideDocumentColors', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  languageId: lang,
+                })
+                return (Array.isArray(result) ? result : []).map((c: any) => ({
+                  range: {
+                    startLineNumber: (c.range?.start?.line ?? 0) + 1,
+                    startColumn: (c.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (c.range?.end?.line ?? 0) + 1,
+                    endColumn: (c.range?.end?.character ?? 0) + 1,
+                  },
+                  color: c.color,
+                }))
+              } catch {
+                return []
+              }
+            },
+            provideColorPresentations: async (model: any, colorInfo: any) => {
+              try {
+                const result = await sendRequest('languages/provideColorPresentations', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  color: colorInfo.color,
+                  range: {
+                    start: { line: colorInfo.range.startLineNumber - 1, character: colorInfo.range.startColumn - 1 },
+                    end: { line: colorInfo.range.endLineNumber - 1, character: colorInfo.range.endColumn - 1 },
+                  },
+                  languageId: lang,
+                })
+                return (Array.isArray(result) ? result : []).map((p: any) => ({
+                  label: p.label || '',
+                  textEdit: p.textEdit ? {
+                    range: {
+                      startLineNumber: (p.textEdit.range?.start?.line ?? 0) + 1,
+                      startColumn: (p.textEdit.range?.start?.character ?? 0) + 1,
+                      endLineNumber: (p.textEdit.range?.end?.line ?? 0) + 1,
+                      endColumn: (p.textEdit.range?.end?.character ?? 0) + 1,
+                    },
+                    text: p.textEdit.newText ?? '',
+                  } : undefined,
+                }))
+              } catch {
+                return []
               }
             },
           })
