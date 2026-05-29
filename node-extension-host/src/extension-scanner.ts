@@ -115,11 +115,47 @@ export function scanExtensions(extensionsDir: string): ScannedExtension[] {
       const name = manifest.name || entry.name;
       const id = `${publisher}.${name}`;
 
+      // Activation events. VS Code 1.74+ lets extensions ship
+      // `activationEvents: []` and auto-generates the events from their
+      // `contributes` block — a contributed command implies
+      // onCommand:<cmd>, a contributed view implies onView:<id>. If we
+      // don't synthesize those, modern extensions (empty
+      // activationEvents) never wake up when their command is invoked
+      // or their view is revealed. Merge synthesized events into the
+      // declared list. Only if BOTH are empty do we fall back to '*'
+      // (eager) so the extension isn't completely dead.
+      const declaredEvents: string[] = Array.isArray(manifest.activationEvents)
+        ? manifest.activationEvents.slice()
+        : [];
+      const contributes = manifest.contributes || {};
+      // onCommand:<cmd> from contributes.commands
+      const cmdContrib = contributes.commands;
+      const cmdList = Array.isArray(cmdContrib) ? cmdContrib : (cmdContrib ? [cmdContrib] : []);
+      for (const c of cmdList) {
+        if (c?.command) {
+          const ev = `onCommand:${c.command}`;
+          if (!declaredEvents.includes(ev)) declaredEvents.push(ev);
+        }
+      }
+      // onView:<id> from contributes.views (object: container -> [{id}])
+      const viewsContrib = contributes.views || {};
+      for (const container of Object.keys(viewsContrib)) {
+        const arr = viewsContrib[container];
+        if (!Array.isArray(arr)) continue;
+        for (const v of arr) {
+          if (v?.id) {
+            const ev = `onView:${v.id}`;
+            if (!declaredEvents.includes(ev)) declaredEvents.push(ev);
+          }
+        }
+      }
+      const activationEvents = declaredEvents.length > 0 ? declaredEvents : ['*'];
+
       const ext: ScannedExtension = {
         id,
         path: extDir,
         manifest,
-        activationEvents: manifest.activationEvents || ['*'],
+        activationEvents,
         contributes: manifest.contributes || {},
         contributedViewContainers: [],
         contributedViews: [],

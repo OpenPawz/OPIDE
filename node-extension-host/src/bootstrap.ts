@@ -365,9 +365,22 @@ async function main() {
    * the user just triggered (onLanguage, onCommand, onView, etc).
    * Idempotent — already-activated extensions are no-ops. */
   async function activateMatching(eventName: string): Promise<void> {
+    // VS Code activation events have bare-prefix semantics: a bare
+    // `onLanguage` (no `:<id>`) means "activate on ANY language file",
+    // so it must match a specific trigger like `onLanguage:typescript`.
+    // The callers always send the SPECIFIC form (onLanguage:<id>,
+    // onCommand:<cmd>, onView:<id>, …), so we match either the exact
+    // event OR its bare prefix. Without this, extensions that declare
+    // bare `onLanguage` (Roo and many others) never activate on file
+    // open. eventName with no `:` makes bare === eventName, so
+    // colon-less events (onDebug) behave exactly as before.
+    const colon = eventName.indexOf(':');
+    const bare = colon >= 0 ? eventName.slice(0, colon) : eventName;
     for (const ext of extensions) {
       if (activatedExtensions.has(ext.id)) continue;
-      const matched = ext.activationEvents.some((ae) => ae === eventName);
+      const matched = ext.activationEvents.some(
+        (ae) => ae === eventName || ae === bare,
+      );
       if (matched) {
         await activateExtension(ext, vsCodeApi, bridge);
       }
