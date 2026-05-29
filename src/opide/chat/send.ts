@@ -293,6 +293,13 @@ export async function doAbort(): Promise<void> {
       S.messages.push({ role: 'assistant', content: S.streamAccum + '\n\n*(aborted)*', ts: new Date() })
       S.streamAccum = ''
     }
+    // Mark the run completed and clear runId BEFORE the engine's terminal
+    // Complete event (which it emits on cancellation, with empty text)
+    // arrives — otherwise the streaming listener doesn't filter it and
+    // finalizeStreaming appends a second, empty assistant bubble after the
+    // "(aborted)" one.
+    if (S.runId) markRunCompleted(S.runId)
+    S.runId = null
     renderMessages()
   } catch (e) {
     console.warn('[opide-chat] abort failed:', e)
