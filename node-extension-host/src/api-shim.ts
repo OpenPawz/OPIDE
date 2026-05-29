@@ -1379,7 +1379,36 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           participant: params?.participantId,
           location: params?.location ?? 1,
         };
-        const context = { history: params?.history ?? [] };
+        // Shape history into VS Code ChatContext.history turns. The
+        // frontend sends plain { role, content } entries, but extensions
+        // expect ChatRequestTurn (`.prompt`, `.participant`) and
+        // ChatResponseTurn (`.response`, `.participant`) objects — reading
+        // raw {role,content} gives them undefined on every field. We map
+        // to the turn shape and keep role/content too, so loose consumers
+        // still work. Response turns expose `response` as an array of
+        // markdown-part-shaped objects ({ value: MarkdownString }).
+        const rawHistory: any[] = Array.isArray(params?.history) ? params.history : [];
+        const history = rawHistory.map((h: any) => {
+          const content = typeof h?.content === 'string' ? h.content : '';
+          if (h?.role === 'user') {
+            return {
+              prompt: content,
+              command: undefined,
+              references: [],
+              participant: params?.participantId,
+              role: 'user',
+              content,
+            };
+          }
+          return {
+            response: [{ value: { value: content } }],
+            result: {},
+            participant: params?.participantId,
+            role: 'assistant',
+            content,
+          };
+        });
+        const context = { history };
         Promise.resolve()
           .then(() => part.handler(request, context, stream, cancellation))
           .then((result: any) => {
