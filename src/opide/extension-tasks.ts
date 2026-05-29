@@ -20,7 +20,10 @@ interface TaskExecutionRecord {
 const _executions = new Map<string, TaskExecutionRecord>()
 let _executionCounter = 1
 
-export async function executeTask(params: any): Promise<{ executionId: string } | null> {
+export async function executeTask(
+  params: any,
+  onEnd?: (executionId: string, exitCode: number) => void,
+): Promise<{ executionId: string } | null> {
   if (!params?.execution?.command) return null
   const executionId = `task-${_executionCounter++}`
   const record: TaskExecutionRecord = { executionId }
@@ -36,12 +39,17 @@ export async function executeTask(params: any): Promise<{ executionId: string } 
 
   // Spawn through ide_run_command for a simple one-shot. v2 swaps to a
   // PTY-backed terminal so output streams live and the user can interact.
+  // On exit we notify the sidecar so vscode.tasks.onDidEndTask fires —
+  // extensions that run a task and await its completion depend on it.
   invoke<any>('ide_run_command', { command: cmd, cwd: exec.cwd || undefined }).then((result: any) => {
-    console.log(`[ext-tasks] ${params.name || 'task'} exited ${result?.exit_code ?? 0}`)
+    const exitCode = result?.exit_code ?? 0
+    console.log(`[ext-tasks] ${params.name || 'task'} exited ${exitCode}`)
     _executions.delete(executionId)
+    onEnd?.(executionId, exitCode)
   }).catch((e) => {
     console.warn(`[ext-tasks] ${params.name || 'task'} failed:`, e)
     _executions.delete(executionId)
+    onEnd?.(executionId, 1)
   })
   return { executionId }
 }

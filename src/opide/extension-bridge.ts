@@ -1219,7 +1219,12 @@ async function handleDebugCustomRequest(params: any): Promise<any> {
 // Phase E handlers
 async function handleTaskExecute(params: any): Promise<{ executionId: string } | null> {
   const t = await getTasks()
-  return t.executeTask(params)
+  // Notify the sidecar when the task's process exits so the extension's
+  // vscode.tasks.onDidEndTask / onDidEndTaskProcess fire (common
+  // "run task then continue" pattern depends on it).
+  return t.executeTask(params, (executionId, exitCode) => {
+    sendNotification('tasks/didEnd', { executionId, exitCode })
+  })
 }
 async function handleTaskTerminate(params: any): Promise<void> {
   const t = await getTasks()

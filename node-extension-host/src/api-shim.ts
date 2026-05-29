@@ -1497,6 +1497,13 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const onDidCloseTerminal = new VSCodeEvent<any>('onDidCloseTerminal');
   const onDidStartTask = new VSCodeEvent<any>('onDidStartTask');
   const onDidEndTask = new VSCodeEvent<any>('onDidEndTask');
+  const onDidStartTaskProcess = new VSCodeEvent<any>('onDidStartTaskProcess');
+  const onDidEndTaskProcess = new VSCodeEvent<any>('onDidEndTaskProcess');
+  // executionId → TaskExecution, so a tasks/didEnd notification from the
+  // frontend (when the spawned command exits) can fire onDidEndTask with
+  // the right execution. Without this, extensions that run a task and
+  // `await` its completion via onDidEndTask hang forever.
+  const _taskExecutions = new Map<string, any>();
 
   // ── Phase F registries ────────────────────────────────────────────────
   interface SourceControlInst {
@@ -1664,6 +1671,22 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           });
         }
         break;
+
+      // Task finished — the frontend sends this when the spawned command
+      // exits, so we can fire onDidEndTask(Process) for the matching
+      // execution and let extensions awaiting completion proceed.
+      case 'tasks/didEnd': {
+        const execId: string | undefined = params?.executionId;
+        if (execId) {
+          const exec = _taskExecutions.get(execId);
+          if (exec) {
+            _taskExecutions.delete(execId);
+            onDidEndTaskProcess.fire({ execution: exec, exitCode: params?.exitCode ?? 0 });
+            onDidEndTask.fire({ execution: exec });
+          }
+        }
+        break;
+      }
 
       // ── Debug adapter events ───────────────────────────────────────
       // The frontend forwards every DAP event the adapter emits as a
@@ -3275,14 +3298,16 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
             if (result?.executionId) rpcRequest('tasks/terminate', { executionId: result.executionId }).catch(() => {});
           },
         };
+        if (result?.executionId) _taskExecutions.set(result.executionId, exec);
         onDidStartTask.fire({ execution: exec });
+        onDidStartTaskProcess.fire({ execution: exec, processId: undefined });
         return exec;
       },
       taskExecutions: [] as any[],
       onDidStartTask: onDidStartTask.event,
       onDidEndTask: onDidEndTask.event,
-      onDidStartTaskProcess: new VSCodeEvent<any>('onDidStartTaskProcess').event,
-      onDidEndTaskProcess: new VSCodeEvent<any>('onDidEndTaskProcess').event,
+      onDidStartTaskProcess: onDidStartTaskProcess.event,
+      onDidEndTaskProcess: onDidEndTaskProcess.event,
     },
 
     // ── Phase F: scm ────────────────────────────────────────────────────
