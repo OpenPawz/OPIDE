@@ -674,6 +674,7 @@ let _nextRequestId = 1;
 export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, workspacePath: string) {
   const commandRegistry = new Map<string, (...args: any[]) => any>();
   const diagnosticCollections = new Map<string, Map<string, Diagnostic[]>>();
+  let _nextDiagnosticCollectionId = 1;
   const outputChannels = new Map<string, string[]>();
   const disposables: Array<{ dispose(): void }> = [];
 
@@ -2839,33 +2840,70 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
 
     // ── languages ──────────────────────────────────────────────────────
     languages: {
-      createDiagnosticCollection(name: string) {
+      createDiagnosticCollection(name?: string) {
+        // VS Code allows an unnamed collection; we still need a stable,
+        // unique owner so the bridge can scope Monaco markers per-collection.
+        const collName = name || `dc-${_nextDiagnosticCollectionId++}`;
         const diags = new Map<string, Diagnostic[]>();
-        diagnosticCollections.set(name, diags);
+        diagnosticCollections.set(collName, diags);
+        // Publish (or, with an empty list, CLEAR) markers for one file.
+        // Critically we send `name` so the bridge uses it as the Monaco
+        // marker owner — previously every collection shared one owner, so
+        // ESLint and the TS extension clobbered each other's squiggles on
+        // the same file. And delete/clear/dispose previously only mutated
+        // the local map and never told the bridge, so stale squiggles
+        // lingered after a linter fixed the errors.
+        const publish = (fsPath: string, list: Diagnostic[]) => {
+          rpcRequest('languages/publishDiagnostics', {
+            name: collName,
+            uri: fsPath,
+            diagnostics: list.map((d) => ({
+              range: { start: { line: d.range.start.line, character: d.range.start.character },
+                       end: { line: d.range.end.line, character: d.range.end.character } },
+              message: d.message,
+              severity: d.severity,
+              source: d.source,
+              code: d.code,
+            })),
+          }).catch(() => {});
+        };
+        const setOne = (uri: Uri, list: Diagnostic[] | undefined | null) => {
+          if (list && list.length) {
+            diags.set(uri.fsPath, list);
+            publish(uri.fsPath, list);
+          } else {
+            // undefined/empty clears this file's markers for this owner.
+            diags.delete(uri.fsPath);
+            publish(uri.fsPath, []);
+          }
+        };
         return {
-          name,
-          set(uri: Uri, diagnostics: Diagnostic[]) {
-            diags.set(uri.fsPath, diagnostics);
-            rpcRequest('languages/publishDiagnostics', {
-              uri: uri.fsPath,
-              diagnostics: diagnostics.map((d) => ({
-                range: { start: { line: d.range.start.line, character: d.range.start.character },
-                         end: { line: d.range.end.line, character: d.range.end.character } },
-                message: d.message,
-                severity: d.severity,
-                source: d.source,
-                code: d.code,
-              })),
-            }).catch(() => {});
+          name: collName,
+          // VS Code overloads: set(uri, diags) AND set([[uri, diags], ...]).
+          set(arg1: any, arg2?: Diagnostic[]) {
+            if (Array.isArray(arg1)) {
+              for (const entry of arg1) {
+                if (Array.isArray(entry)) setOne(entry[0], entry[1]);
+              }
+            } else {
+              setOne(arg1, arg2);
+            }
           },
-          delete(uri: Uri) { diags.delete(uri.fsPath); },
-          clear() { diags.clear(); },
+          delete(uri: Uri) { diags.delete(uri.fsPath); publish(uri.fsPath, []); },
+          clear() {
+            for (const p of [...diags.keys()]) publish(p, []);
+            diags.clear();
+          },
           has(uri: Uri) { return diags.has(uri.fsPath); },
           get(uri: Uri) { return diags.get(uri.fsPath); },
           forEach(callback: (uri: Uri, diags: Diagnostic[]) => void) {
             diags.forEach((d, p) => callback(Uri.file(p), d));
           },
-          dispose() { diagnosticCollections.delete(name); },
+          dispose() {
+            for (const p of [...diags.keys()]) publish(p, []);
+            diags.clear();
+            diagnosticCollections.delete(collName);
+          },
         };
       },
 

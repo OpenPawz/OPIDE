@@ -1682,8 +1682,9 @@ async function handleShowTextDocument(params: any): Promise<void> {
 
 async function handlePublishDiagnostics(params: any): Promise<void> {
   try {
-    const { uri, diagnostics } = params || {}
-    if (!uri || !diagnostics) return
+    const { uri, diagnostics, name } = params || {}
+    // diagnostics may be an empty array (a clear) — only bail on null/undefined.
+    if (!uri || !Array.isArray(diagnostics)) return
 
     const monacoMod = await import('monaco-editor') as any
     const monaco = monacoMod.default || monacoMod
@@ -1715,8 +1716,13 @@ async function handlePublishDiagnostics(params: any): Promise<void> {
       code: d.code != null ? String(d.code) : undefined,
     }))
 
-    monaco.editor.setModelMarkers(model, 'extension-diagnostics', markers)
-    debugLog(`publishDiagnostics: set ${markers.length} markers for ${uri}`)
+    // Scope markers to the collection (per-extension owner) so two
+    // collections (e.g. ESLint + TS) don't clobber each other's squiggles
+    // on the same file. An empty `markers` array clears this owner's
+    // markers for the model (delete/clear/dispose on the collection).
+    const owner = name ? `ext:${name}` : 'extension-diagnostics'
+    monaco.editor.setModelMarkers(model, owner, markers)
+    debugLog(`publishDiagnostics: set ${markers.length} markers for ${uri} (owner=${owner})`)
   } catch (e) {
     debugLog(`publishDiagnostics failed: ${e}`)
   }
