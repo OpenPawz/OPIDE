@@ -1493,6 +1493,30 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _taskProviders = new Map<string, TaskProviderInst>();
   const _terminals = new Map<string, any>();
   let _nextTerminalId = 1;
+
+  // Merged environment-variable mutators across ALL extensions'
+  // context.environmentVariableCollection. VS Code applies these to every
+  // terminal an extension spawns — Claude Code sets its MCP port + auth
+  // token here so its CLI (launched in a terminal it creates) inherits
+  // them. Keyed `${extId}::${name}` so an extension's clear()/delete()
+  // only touches its own entries. createTerminal resolves these into the
+  // env it sends (see resolveTerminalEnvOverrides).
+  const _globalEnvMutators = new Map<string, { type: number; value: string }>();
+  /** Resolve the env-collection mutators into a flat { name: value } map,
+   * layered on top of `base`. append/prepend use the sidecar's own
+   * process.env as the inherited base (the PTY inherits a comparable env),
+   * matching VS Code's append/prepend-to-existing semantics closely. */
+  function resolveTerminalEnvOverrides(base?: Record<string, string>): Record<string, string> {
+    const out: Record<string, string> = { ...(base || {}) };
+    for (const [key, mut] of _globalEnvMutators) {
+      const name = key.slice(key.indexOf('::') + 2);
+      const inherited = out[name] ?? process.env[name] ?? '';
+      if (mut.type === 2) out[name] = inherited + mut.value;        // append
+      else if (mut.type === 3) out[name] = mut.value + inherited;   // prepend
+      else out[name] = mut.value;                                   // replace
+    }
+    return out;
+  }
   const onDidOpenTerminal = new VSCodeEvent<any>('onDidOpenTerminal');
   const onDidCloseTerminal = new VSCodeEvent<any>('onDidCloseTerminal');
   const onDidStartTask = new VSCodeEvent<any>('onDidStartTask');
@@ -2828,9 +2852,14 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           },
         };
         _terminals.set(tid, term);
+        // Merge every extension's environmentVariableCollection mutators on
+        // top of the terminal's own env. Without this, Claude Code's CLI
+        // (spawned in a terminal it creates) never received the MCP port /
+        // auth token it set via context.environmentVariableCollection.
+        const mergedEnv = resolveTerminalEnvOverrides(opts.env);
         rpcRequest('terminal/create', {
           id: tid, name: term.name, cwd: opts.cwd,
-          shellPath: opts.shellPath, shellArgs: opts.shellArgs, env: opts.env,
+          shellPath: opts.shellPath, shellArgs: opts.shellArgs, env: mergedEnv,
         }).catch(() => {});
         onDidOpenTerminal.fire(term);
         return term;
@@ -3674,17 +3703,23 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       // get()?.value works. Forwarding to actual terminal env is a TODO
       // for when extension-spawned terminals exist.
       const envMutators = new Map<string, { type: number; value: string; options: any }>();
+      // Mirror into the global registry (keyed by this extension's id) so
+      // createTerminal can apply these vars — see _globalEnvMutators.
+      const gkey = (name: string) => `${extensionId}::${name}`;
       const environmentVariableCollection: any = {
         persistent: true,
         description: undefined,
         replace(name: string, value: string, options?: any) {
           envMutators.set(name, { type: 1, value, options: options || {} });
+          _globalEnvMutators.set(gkey(name), { type: 1, value });
         },
         append(name: string, value: string, options?: any) {
           envMutators.set(name, { type: 2, value, options: options || {} });
+          _globalEnvMutators.set(gkey(name), { type: 2, value });
         },
         prepend(name: string, value: string, options?: any) {
           envMutators.set(name, { type: 3, value, options: options || {} });
+          _globalEnvMutators.set(gkey(name), { type: 3, value });
         },
         get(name: string) {
           return envMutators.get(name);
@@ -3694,9 +3729,14 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         },
         delete(name: string) {
           envMutators.delete(name);
+          _globalEnvMutators.delete(gkey(name));
         },
         clear() {
           envMutators.clear();
+          // Only drop THIS extension's entries from the global registry.
+          for (const k of [..._globalEnvMutators.keys()]) {
+            if (k.startsWith(`${extensionId}::`)) _globalEnvMutators.delete(k);
+          }
         },
         // GlobalEnvironmentVariableCollection extension: scoped variant
         // returns a (here: identical) collection for a given scope.
