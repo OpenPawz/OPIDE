@@ -318,6 +318,18 @@ async function dispatchToExtensionParticipantIfMatched(content: string): Promise
   if (!mention) return false
   if (!S.textarea) return false
 
+  // Capture PRIOR turns for the participant's history BEFORE we push the
+  // current user message and placeholder below. VS Code's
+  // ChatContext.history is prior turns only — the current prompt is
+  // passed separately as request.prompt. Computing this after the pushes
+  // (the previous bug) leaked two junk entries into history: the current
+  // user turn (a duplicate of the prompt, still carrying the "@mention"),
+  // and the "*Asking @…*" placeholder assistant bubble.
+  const history = S.messages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .slice(-10)
+    .map((m) => ({ role: m.role, content: m.content }))
+
   // Mirror the user's message in the chat thread, clear the textarea,
   // and create a placeholder assistant bubble that we'll mutate as
   // chunks arrive. We do NOT call setStreaming/showStreamingBubble
@@ -378,14 +390,6 @@ async function dispatchToExtensionParticipantIfMatched(content: string): Promise
   }
   window.addEventListener('opide-chat-participant-chunk', handleChunk)
   window.addEventListener('opide-chat-participant-end', handleEnd)
-
-  // Recent assistant turns become the "history" we hand the participant
-  // so it has continuity inside its own thread. We bound it to the last
-  // 10 turns to avoid blowing past extensions' own context limits.
-  const history = S.messages
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .slice(-10)
-    .map((m) => ({ role: m.role, content: m.content }))
 
   const { requestId } = dispatchToParticipant(mention.participantId, mention.prompt, history)
   if (!requestId) {
