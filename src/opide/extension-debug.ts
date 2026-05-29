@@ -14,11 +14,13 @@
 //     and emit lightweight session events to the sidecar.
 //   - stopSession / customRequest: thin wrappers over dap.rs.
 //
-// What's NOT in v1:
-//   - Reverse-direction protocol parsing (we don't translate every DAP
-//     event into vscode.debug.onDidReceiveDebugSessionCustomEvent).
-//     Adapters that use customEvent will reach extensions in raw form
-//     for now; richer translation is v2.
+// Reverse-direction events: every DAP event the adapter emits is
+// forwarded to the sidecar as a debug/sessionEvent, where the shim fires
+// vscode.debug.onDidReceiveDebugSessionCustomEvent. A `terminated`/`exited`
+// event (or an adapter-process exit via dap-exit) ends the session and
+// fires onDidTerminateDebugSession.
+//
+// What's NOT supported yet:
 //   - Inline implementation adapters (DebugAdapterInlineImplementation)
 //     would let an extension provide its own JS adapter; deferred.
 
@@ -32,6 +34,13 @@ interface SessionRecord {
   adapterId: string
   type: string
   unlisten?: UnlistenFn
+  /** Tauri listener for the adapter-process-exited event. Cleaned up
+   * alongside `unlisten` so a crashed adapter doesn't leak listeners. */
+  unlistenExit?: UnlistenFn
+  /** The session-event sink (forwards to the sidecar). Kept on the
+   * record so the dap-exit path can synthesize a `terminated` event when
+   * the adapter dies without sending one itself. */
+  onEvent: (event: any) => void
   pendingResponses: Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>
   nextSeq: number
 }
@@ -95,6 +104,7 @@ export async function startSession(
     sessionId,
     adapterId: start.adapter_id,
     type: adapterType,
+    onEvent,
     pendingResponses: new Map(),
     nextSeq: 1,
   }
@@ -122,6 +132,22 @@ export async function startSession(
         else pending.reject(new Error(msg.message || 'DAP request failed'))
       }
     }
+  })
+
+  // The adapter process can exit on its own (debuggee finished, adapter
+  // crashed, user killed it). dap.rs emits `dap-exit` in that case. If we
+  // don't listen, the dap-message listener and the _sessions entry leak,
+  // pending DAP requests hang until their 30s timeout, and the extension
+  // never learns the session ended. Synthesize a `terminated` event so
+  // the sidecar fires onDidTerminateDebugSession, then tear down.
+  rec.unlistenExit = await listen<any>('dap-exit', (e) => {
+    const payload: any = e.payload || {}
+    if (payload?.adapter_id !== rec.adapterId) return
+    if (!_sessions.has(sessionId)) return // already cleaned up via stopSession
+    try {
+      rec.onEvent({ kind: 'customEvent', sessionId, event: 'terminated', body: {} })
+    } catch { /* ignore sink errors */ }
+    cleanupSession(rec)
   })
 
   // Send 'initialize' + 'launch' (or 'attach') automatically. Most
@@ -165,13 +191,27 @@ async function sendDap(rec: SessionRecord, command: string, args: any): Promise<
   })
 }
 
+/** Detach listeners, reject dangling DAP requests, and drop the session
+ * record. Idempotent — safe to call from both stopSession and the
+ * dap-exit listener (whichever fires first wins; the other no-ops). */
+function cleanupSession(rec: SessionRecord): void {
+  if (!_sessions.has(rec.sessionId)) return
+  try { rec.unlisten?.() } catch { /* ignore */ }
+  try { rec.unlistenExit?.() } catch { /* ignore */ }
+  // Reject any in-flight requests so their callers don't wait 30s.
+  for (const [, pending] of rec.pendingResponses) {
+    try { pending.reject(new Error('Debug session ended')) } catch { /* ignore */ }
+  }
+  rec.pendingResponses.clear()
+  _sessions.delete(rec.sessionId)
+}
+
 export async function stopSession(sessionId: string): Promise<void> {
   const rec = _sessions.get(sessionId)
   if (!rec) return
   try { await sendDap(rec, 'disconnect', { restart: false, terminateDebuggee: true }) } catch { /* ignore */ }
-  try { rec.unlisten?.() } catch { /* ignore */ }
   await invoke('dap_stop', { adapterId: rec.adapterId }).catch(() => {})
-  _sessions.delete(sessionId)
+  cleanupSession(rec)
 }
 
 export async function customRequest(

@@ -1080,6 +1080,51 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         }
         break;
 
+      // ── Debug adapter events ───────────────────────────────────────
+      // The frontend forwards every DAP event the adapter emits as a
+      // debug/sessionEvent. Previously nothing consumed these, so
+      // vscode.debug.onDidReceiveDebugSessionCustomEvent NEVER fired for
+      // real adapter activity — extensions that listen for 'stopped',
+      // 'output', 'thread', or vendor-specific events (the JS debugger,
+      // most language debuggers) got silence. We also honour the DAP
+      // 'terminated'/'exited' events to end the session and fire
+      // onDidTerminateDebugSession when the adapter — not the extension —
+      // ends the run.
+      case 'debug/sessionEvent': {
+        const ev = params || {};
+        const sessionId: string | undefined = ev.sessionId;
+        // Find the session the extension knows about; if the session was
+        // started outside the extension (e.g. from the OPIDE UI) we
+        // synthesize a minimal stand-in so the event still carries one.
+        let session = sessionId ? _activeDebugSessions.get(sessionId) : undefined;
+        if (!session && sessionId) {
+          session = { id: sessionId, type: ev.sessionType || 'unknown', name: sessionId };
+        }
+        if (ev.kind === 'customEvent' && ev.event) {
+          onDidReceiveDebugSessionCustomEvent.fire({
+            session,
+            event: ev.event,
+            body: ev.body,
+          });
+          // A 'terminated' or 'exited' DAP event means the debuggee ended
+          // on its own. Mirror VS Code: drop the session and notify.
+          if ((ev.event === 'terminated' || ev.event === 'exited') && sessionId) {
+            const s = _activeDebugSessions.get(sessionId);
+            if (s) {
+              _activeDebugSessions.delete(sessionId);
+              onDidTerminateDebugSession.fire(s);
+              if (_activeDebugSession?.id === sessionId) {
+                _activeDebugSession = _activeDebugSessions.size > 0
+                  ? _activeDebugSessions.values().next().value
+                  : undefined;
+                onDidChangeActiveDebugSession.fire(_activeDebugSession);
+              }
+            }
+          }
+        }
+        break;
+      }
+
       // ── Phase C: tree-view children request ────────────────────────
       // The OPIDE sidebar asks for nodes under a parent (or root if
       // parentNodeId is undefined). We resolve through the matching
