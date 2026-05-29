@@ -860,7 +860,16 @@ export function registerOpideChat(): void {
           }
         }, 50)
       })
-      textarea.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend() } })
+      // Enter sends, Shift+Enter inserts a newline. Skip while an IME
+      // composition is active (e.isComposing / keyCode 229) — otherwise
+      // pressing Enter to confirm a Japanese/Chinese/Korean candidate would
+      // fire off a half-composed message.
+      textarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+          e.preventDefault()
+          doSend()
+        }
+      })
       textarea.addEventListener('focus', () => { updateContextPills() })
 
       // ── Focus theft protection ──
