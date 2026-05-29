@@ -1730,6 +1730,18 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           if (parentNodeId && _treeItems.has(parentNodeId)) {
             parentElement = _treeItems.get(parentNodeId)!.element;
           }
+          // A root fetch (no parent) happens on initial load and on every
+          // tree/refresh. Each getChildren mints fresh node ids, so without
+          // evicting this view's old entries here, _treeItems grew without
+          // bound for any tree that refreshes (git status, file watchers,
+          // test explorer). After a root refresh the frontend re-fetches
+          // from the new root and discards the old ids, so dropping them is
+          // safe.
+          if (!parentNodeId) {
+            for (const [nid, rec] of _treeItems) {
+              if (rec.provider === inst) _treeItems.delete(nid);
+            }
+          }
           let children: any[] = [];
           try {
             const r = inst.provider.getChildren?.(parentElement);
