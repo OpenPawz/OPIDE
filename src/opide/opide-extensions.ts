@@ -963,9 +963,11 @@ function renderDetailView(container: HTMLElement): void {
       link.textContent = 'Repository'
       link.style.cssText = 'color:#E8B931;cursor:pointer;text-decoration:none'
       link.addEventListener('click', () => {
-        // Repository link click. Silent failure means clicking does nothing
-        // and the user has no signal — log so we can debug.
-        invoke('ide_run_command', { command: `open "${ext.repository}"`, cwd: '/' }).catch((e) => {
+        // Open via the OS opener with the URL as a distinct argv entry (no
+        // shell). The repository URL comes from marketplace metadata, so the
+        // old `ide_run_command('open "<url>")` path was a shell-injection
+        // vector (a hostile listing could set repository to $(...)).
+        invoke('open_external', { url: ext.repository }).catch((e) => {
           console.warn('[opide-extensions] open repository link failed:', ext.repository, e)
         })
       })
