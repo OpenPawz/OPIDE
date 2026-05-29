@@ -165,10 +165,16 @@ impl StdioTransport {
                         }
                         Ok(None) => {
                             info!("[mcp] Stdout closed (server exited)");
+                            // Drain pending requests: dropping their oneshot
+                            // senders makes every in-flight send_request fail
+                            // fast ("Response channel dropped") instead of
+                            // hanging until its full timeout (up to 120s).
+                            pending.lock().await.clear();
                             break;
                         }
                         Err(e) => {
                             error!("[mcp] Read error: {}", e);
+                            pending.lock().await.clear();
                             break;
                         }
                     }
