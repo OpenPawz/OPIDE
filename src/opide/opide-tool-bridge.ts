@@ -389,15 +389,27 @@ function showReviewToolbar(
   acceptBtn.addEventListener('click', async () => {
     acceptBtn.textContent = 'Applying...'
     acceptBtn.disabled = true
-    await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: true })
-    cleanup()
+    // Always clean up, even if the response invoke fails — otherwise the
+    // UI stays stuck on "Applying..." and the diff models leak.
+    try {
+      await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: true })
+    } catch (e) {
+      console.warn('[edit-review] accept response failed:', e)
+    } finally {
+      cleanup()
+    }
   })
 
   rejectBtn.addEventListener('click', async () => {
     rejectBtn.textContent = 'Rejected'
     rejectBtn.disabled = true
-    await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: false })
-    cleanup()
+    try {
+      await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: false })
+    } catch (e) {
+      console.warn('[edit-review] reject response failed:', e)
+    } finally {
+      cleanup()
+    }
   })
 
   toolbar.appendChild(label)
@@ -469,15 +481,27 @@ function openStandaloneDiffEditor(
   acceptBtn.addEventListener('click', async () => {
     acceptBtn.textContent = 'Applying...'
     acceptBtn.disabled = true
-    await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: true })
-    cleanup()
+    // Always clean up, even if the response invoke fails — otherwise the
+    // UI stays stuck on "Applying..." and the diff models leak.
+    try {
+      await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: true })
+    } catch (e) {
+      console.warn('[edit-review] accept response failed:', e)
+    } finally {
+      cleanup()
+    }
   })
 
   rejectBtn.addEventListener('click', async () => {
     rejectBtn.textContent = 'Rejected'
     rejectBtn.disabled = true
-    await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: false })
-    cleanup()
+    try {
+      await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: false })
+    } catch (e) {
+      console.warn('[edit-review] reject response failed:', e)
+    } finally {
+      cleanup()
+    }
   })
 }
 
