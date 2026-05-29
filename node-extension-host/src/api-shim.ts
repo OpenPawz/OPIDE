@@ -1493,6 +1493,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _taskProviders = new Map<string, TaskProviderInst>();
   const _terminals = new Map<string, any>();
   let _nextTerminalId = 1;
+  let _nextProgressId = 1;
 
   // Merged environment-variable mutators across ALL extensions'
   // context.environmentVariableCollection. VS Code applies these to every
@@ -2498,6 +2499,44 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       },
       showInputBox(options?: any): Promise<string | undefined> {
         return rpcRequest('window/showInputBox', { options });
+      },
+
+      // vscode.window.withProgress(options, task). This was previously only
+      // an auto-stub that returned undefined WITHOUT invoking the task — so
+      // any extension that ran its work inside the callback (Cline, Continue,
+      // Roo all do) silently did nothing. We must call task(progress, token)
+      // and return its result. Progress is surfaced as a transient status-bar
+      // message (best-effort, non-spammy); cancellation isn't driven yet so
+      // the token never fires.
+      async withProgress(_options: any, task: (progress: any, token: any) => any): Promise<any> {
+        const title = (_options && _options.title) || '';
+        const statusId = `progress-${_nextProgressId++}`;
+        const setStatus = (msg: string) => {
+          rpcRequest('window/statusBarItem', {
+            id: statusId,
+            text: `$(sync~spin) ${msg}`,
+            alignment: 'left',
+            priority: 1000,
+          }).catch(() => {});
+        };
+        if (title) setStatus(title);
+        const progress = {
+          report(value: { message?: string; increment?: number }) {
+            if (value && typeof value.message === 'string') {
+              setStatus(title ? `${title}: ${value.message}` : value.message);
+            }
+          },
+        };
+        const token = {
+          isCancellationRequested: false,
+          onCancellationRequested: () => ({ dispose() { /* no-op */ } }),
+        };
+        try {
+          return await Promise.resolve(task(progress, token));
+        } finally {
+          // Clear the transient status entry.
+          rpcRequest('window/statusBarItemDispose', { id: statusId }).catch(() => {});
+        }
       },
 
       // VS Code's createOutputChannel has two shapes:

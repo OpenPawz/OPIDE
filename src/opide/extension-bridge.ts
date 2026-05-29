@@ -527,6 +527,18 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
+    case 'window/statusBarItemDispose': {
+      // Remove a status bar entry by id (used by withProgress to clear its
+      // transient spinner when the task completes).
+      const dispId = params?.id
+      if (dispId) {
+        const d = _statusBarDisposables.get(dispId)
+        if (d) { try { d.dispose() } catch { /* ignore */ } _statusBarDisposables.delete(dispId) }
+      }
+      if (id) sendResponse(id, null)
+      break
+    }
+
     case 'window/showTextDocument': {
       handleShowTextDocument(params).then(() => {
         if (id) sendResponse(id, null)
