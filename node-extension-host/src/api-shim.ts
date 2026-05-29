@@ -705,6 +705,36 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       bridge.send({ jsonrpc: '2.0', id, result: { items } });
       return;
     }
+    if (method === 'languages/provideCompletionItems') {
+      const items = await provideCompletions(params);
+      bridge.send({ jsonrpc: '2.0', id, result: { items } });
+      return;
+    }
+    if (method === 'languages/provideHover') {
+      const r = await provideHover(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideDefinition') {
+      const r = await provideLocations(params, _definitionProviders, 'provideDefinition');
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideReferences') {
+      const r = await provideReferences(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideDocumentSymbols') {
+      const r = await provideDocumentSymbols(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideDocumentFormattingEdits') {
+      const r = await provideFormattingEdits(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
     // Unknown — respond with null so the caller doesn't time out.
     bridge.send({ jsonrpc: '2.0', id, result: null });
   }
@@ -781,6 +811,237 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       start: { line: fallbackPos.line, character: fallbackPos.character },
       end: { line: fallbackPos.line, character: fallbackPos.character },
     };
+  }
+
+  // ── Static language-feature provider servicing ───────────────────────
+  // Shared helpers used by the provide* handlers above. Coordinates stay
+  // in VS Code's 0-based form on the wire; the frontend converts to/from
+  // Monaco's 1-based form. Enum values (CompletionItemKind, SymbolKind)
+  // pass through unchanged because the workbench's `monaco-editor` is
+  // aliased to @codingame/monaco-vscode-api, which uses the real VS Code
+  // enums — same numeric values.
+
+  function makeCancel(): any {
+    return { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) };
+  }
+
+  /** Get the open TextDocument for a uri, or build one from disk via the
+   * frontend's fs/readFile RPC. Mirrors the inline-completion path. */
+  async function resolveDoc(uri: string, languageId: string): Promise<any | null> {
+    let doc = openDocuments.get(uri);
+    if (doc) return doc;
+    try {
+      const text = await rpcRequest('fs/readFile', { path: uri });
+      const decoded = typeof text === 'string' ? Buffer.from(text, 'base64').toString('utf-8') : '';
+      doc = new TextDocument(Uri.file(uri), languageId || 'plaintext', 1, decoded);
+      openDocuments.set(uri, doc);
+      return doc;
+    } catch {
+      return null;
+    }
+  }
+
+  function providerMatchesLang(rec: { languages: string[] }, languageId: string): boolean {
+    return rec.languages.includes(languageId) || rec.languages.includes('*');
+  }
+
+  function serializeRangeStrict(range: any): any {
+    if (!range?.start || !range?.end) return undefined;
+    return {
+      start: { line: range.start.line, character: range.start.character },
+      end: { line: range.end.line, character: range.end.character },
+    };
+  }
+
+  /** vscode.Location | LocationLink → { uri, range } the frontend expects. */
+  function serializeLocation(loc: any): any {
+    if (!loc) return null;
+    const uri = loc.uri ?? loc.targetUri;
+    const range = loc.range ?? loc.targetRange;
+    const uriStr = uri?.fsPath ?? uri?.path ?? (typeof uri === 'string' ? uri : '');
+    return { uri: uriStr, range: serializeRangeStrict(range) };
+  }
+
+  async function provideCompletions(params: any): Promise<any[]> {
+    const { uri, position, languageId, context } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    const ctx = context || { triggerKind: 0, triggerCharacter: undefined };
+    const merged: any[] = [];
+    for (const rec of _completionProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideCompletionItems?.(doc, pos, cancel, ctx));
+        const list = Array.isArray(r) ? r : (r?.items || []);
+        for (const item of list) {
+          // VS Code label can be a string or { label, detail, description }.
+          const label = typeof item.label === 'string' ? item.label : (item.label?.label ?? '');
+          // insertText can be a SnippetString ({ value }) — flag it so the
+          // frontend sets Monaco's InsertAsSnippet rule (otherwise the user
+          // sees the literal `${1:...}` placeholders).
+          const isSnippet = !!item.insertText && typeof item.insertText === 'object' && 'value' in item.insertText;
+          const insertText = typeof item.insertText === 'string'
+            ? item.insertText
+            : (item.insertText?.value ?? label);
+          const documentation = typeof item.documentation === 'string'
+            ? item.documentation
+            : (item.documentation?.value ?? undefined);
+          merged.push({
+            label,
+            kind: item.kind,
+            insertText,
+            insertTextIsSnippet: isSnippet,
+            detail: item.detail,
+            documentation,
+            sortText: item.sortText,
+            filterText: item.filterText,
+            range: serializeRangeStrict(item.range),
+          });
+        }
+      } catch (e: any) {
+        bridge.log(`completion provider failed: ${e?.message || e}`);
+      }
+    }
+    return merged;
+  }
+
+  async function provideHover(params: any): Promise<any> {
+    const { uri, position, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return null;
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    for (const rec of _hoverProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideHover?.(doc, pos, cancel));
+        if (r?.contents) {
+          // contents: (MarkdownString | MarkedString | string)[]
+          const arr = Array.isArray(r.contents) ? r.contents : [r.contents];
+          const contents = arr.map((c: any) => (typeof c === 'string' ? c : (c?.value ?? '')));
+          return { contents, range: serializeRangeStrict(r.range) };
+        }
+      } catch (e: any) {
+        bridge.log(`hover provider failed: ${e?.message || e}`);
+      }
+    }
+    return null;
+  }
+
+  /** Definition (and similar) — call providers, flatten to Location[]. */
+  async function provideLocations(
+    params: any,
+    registry: Map<string, { provider: any; languages: string[] }>,
+    method: string,
+  ): Promise<any[]> {
+    const { uri, position, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    const out: any[] = [];
+    for (const rec of registry.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve((rec.provider as any)[method]?.(doc, pos, cancel));
+        if (!r) continue;
+        const list = Array.isArray(r) ? r : [r];
+        for (const loc of list) {
+          const s = serializeLocation(loc);
+          if (s) out.push(s);
+        }
+      } catch (e: any) {
+        bridge.log(`${method} provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
+  async function provideReferences(params: any): Promise<any[]> {
+    const { uri, position, languageId, context } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    const refCtx = context || { includeDeclaration: true };
+    const out: any[] = [];
+    for (const rec of _referenceProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideReferences?.(doc, pos, refCtx, cancel));
+        if (!r) continue;
+        for (const loc of (Array.isArray(r) ? r : [r])) {
+          const s = serializeLocation(loc);
+          if (s) out.push(s);
+        }
+      } catch (e: any) {
+        bridge.log(`reference provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
+  function serializeSymbol(sym: any): any {
+    // DocumentSymbol has range/selectionRange/children; SymbolInformation
+    // has location.range and no children. Normalize to the frontend shape.
+    const range = sym.range ?? sym.location?.range;
+    const selectionRange = sym.selectionRange ?? range;
+    return {
+      name: sym.name ?? '',
+      detail: sym.detail ?? '',
+      kind: sym.kind,
+      range: serializeRangeStrict(range),
+      selectionRange: serializeRangeStrict(selectionRange),
+      tags: sym.tags ?? [],
+      children: Array.isArray(sym.children) ? sym.children.map(serializeSymbol) : [],
+    };
+  }
+
+  async function provideDocumentSymbols(params: any): Promise<any[]> {
+    const { uri, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const out: any[] = [];
+    for (const rec of _documentSymbolProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideDocumentSymbols?.(doc, cancel));
+        if (!Array.isArray(r)) continue;
+        for (const sym of r) out.push(serializeSymbol(sym));
+      } catch (e: any) {
+        bridge.log(`documentSymbol provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
+  async function provideFormattingEdits(params: any): Promise<any[]> {
+    const { uri, languageId, options } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const out: any[] = [];
+    for (const rec of _formattingProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(
+          rec.provider.provideDocumentFormattingEdits?.(doc, options || {}, cancel),
+        );
+        if (!Array.isArray(r)) continue;
+        for (const edit of r) {
+          out.push({ range: serializeRangeStrict(edit.range), newText: edit.newText ?? '' });
+        }
+        // First provider that returns edits wins (VS Code formatting is
+        // single-provider; multiple registered providers are unusual).
+        if (out.length > 0) break;
+      } catch (e: any) {
+        bridge.log(`formatting provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
   }
 
   // Event dispatchers
@@ -991,6 +1252,23 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   }
   const _inlineCompletionProviders = new Map<string, InlineCompletionProviderRec>();
   let _nextInlineCompletionId = 1;
+
+  // Static language-feature providers. Previously the register* methods
+  // for these DISCARDED the provider and returned a no-op disposable, and
+  // there was no sidecar handler for the provide* requests — so the
+  // frontend wired Monaco providers that called back, the sidecar never
+  // answered, and every request timed out (30s) into an empty result. The
+  // whole static language-provider surface from extensions was dead. We
+  // store providers here (keyed like inline) and service the requests in
+  // handleRequest below.
+  interface LangProviderRec { provider: any; languages: string[]; selector: any; }
+  const _completionProviders = new Map<string, LangProviderRec>();
+  const _hoverProviders = new Map<string, LangProviderRec>();
+  const _definitionProviders = new Map<string, LangProviderRec>();
+  const _referenceProviders = new Map<string, LangProviderRec>();
+  const _documentSymbolProviders = new Map<string, LangProviderRec>();
+  const _formattingProviders = new Map<string, LangProviderRec>();
+  let _nextLangProviderId = 1;
 
   /** VS Code DocumentSelector accepts strings, arrays, or objects with
    * `language`, `scheme`, `pattern`. We flatten into a list of language
@@ -2406,20 +2684,40 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       },
 
       registerCompletionItemProvider(selector: any, provider: any, ...triggerChars: string[]) {
+        const id = `cmp-${_nextLangProviderId++}`;
+        _completionProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerCompletionProvider', {
           selector, triggerCharacters: triggerChars,
         }).catch(() => {});
-        return { dispose: () => {} };
+        return { dispose: () => { _completionProviders.delete(id); } };
       },
 
       registerHoverProvider(selector: any, provider: any) {
+        const id = `hov-${_nextLangProviderId++}`;
+        _hoverProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerHoverProvider', { selector }).catch(() => {});
-        return { dispose: () => {} };
+        return { dispose: () => { _hoverProviders.delete(id); } };
       },
 
       registerDefinitionProvider(selector: any, provider: any) {
+        const id = `def-${_nextLangProviderId++}`;
+        _definitionProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerDefinitionProvider', { selector }).catch(() => {});
-        return { dispose: () => {} };
+        return { dispose: () => { _definitionProviders.delete(id); } };
+      },
+
+      registerReferenceProvider(selector: any, provider: any) {
+        const id = `ref-${_nextLangProviderId++}`;
+        _referenceProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerReferenceProvider', { selector }).catch(() => {});
+        return { dispose: () => { _referenceProviders.delete(id); } };
+      },
+
+      registerDocumentSymbolProvider(selector: any, provider: any) {
+        const id = `sym-${_nextLangProviderId++}`;
+        _documentSymbolProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerDocumentSymbolProvider', { selector }).catch(() => {});
+        return { dispose: () => { _documentSymbolProviders.delete(id); } };
       },
 
       registerCodeActionsProvider(selector: any, provider: any, metadata?: any) {
@@ -2428,8 +2726,10 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       },
 
       registerDocumentFormattingEditProvider(selector: any, provider: any) {
+        const id = `fmt-${_nextLangProviderId++}`;
+        _formattingProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerFormattingProvider', { selector }).catch(() => {});
-        return { dispose: () => {} };
+        return { dispose: () => { _formattingProviders.delete(id); } };
       },
 
       // P1: vscode.languages.registerInlineCompletionItemProvider —

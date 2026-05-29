@@ -1767,6 +1767,14 @@ async function handleRegisterLanguageProvider(
                     label: item.label || '',
                     kind: item.kind ?? monaco.languages.CompletionItemKind.Text,
                     insertText: item.insertText || item.label || '',
+                    // When the extension returned a SnippetString, tell
+                    // Monaco to interpret ${1:..} placeholders rather than
+                    // inserting them literally. (kind values pass through
+                    // unchanged: monaco-editor is aliased to the codingame
+                    // build, which uses VS Code's own enum values.)
+                    insertTextRules: item.insertTextIsSnippet
+                      ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                      : undefined,
                     detail: item.detail,
                     documentation: item.documentation,
                     sortText: item.sortText,
