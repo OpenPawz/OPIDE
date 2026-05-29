@@ -319,21 +319,46 @@ enum TextEditorCursorStyle {
 }
 
 /**
- * Compute the webview-resource URL for a local fsPath. Mirrors the
- * algorithm in monaco-vscode-api's
- * vs/workbench/contrib/webview/common/webview.js#asWebviewUri so the
- * URL we hand to the extension matches the format the workbench
- * webview's service worker recognises and routes to localResourceRoots.
+ * Compute the webview-resource URL for a Uri. Mirrors the algorithm in
+ * monaco-vscode-api's vs/workbench/contrib/webview/common/webview.js#
+ * asWebviewUri EXACTLY so the URL we hand the extension matches the
+ * format the workbench webview routes to localResourceRoots:
  *
- * For a `file:///path/to/foo` URI:
- *   https://file+.vscode-resource.vscode-cdn.net/path/to/foo
- */
-function fsPathToWebviewUrl(fsPath: string): string {
-  if (!fsPath) return '';
-  // Normalise to forward slashes; ensure leading slash.
-  let p = fsPath.replace(/\\/g, '/');
+ *   authority = `${scheme}+${encodeAuthority(authority)}.vscode-resource.vscode-cdn.net`
+ *
+ * For `file:///path/to/foo` → https://file+.vscode-resource.vscode-cdn.net/path/to/foo
+ *
+ * Earlier this took only a fsPath string: it ignored the scheme (so an
+ * http/https Uri got mangled into a bogus cdn URL instead of passing
+ * through), dropped the authority (wrong for UNC paths), and lost any
+ * query/fragment. Operating on the full Uri fixes all three. */
+const WEBVIEW_RESOURCE_AUTHORITY = 'vscode-resource.vscode-cdn.net';
+function encodeWebviewAuthority(authority: string): string {
+  // Same per-char encoding VS Code uses: alphanumerics pass through,
+  // everything else becomes `-<4-hex>`.
+  return authority.replace(/./g, (char) => {
+    const code = char.charCodeAt(0);
+    const isAlnum = (code >= 0x61 && code <= 0x7a) // a-z
+      || (code >= 0x41 && code <= 0x5a) // A-Z
+      || (code >= 0x30 && code <= 0x39); // 0-9
+    return isAlnum ? char : '-' + code.toString(16).padStart(4, '0');
+  });
+}
+function uriToWebviewUrl(uri: Uri): string {
+  if (!uri) return '';
+  // http/https resources are already loadable as-is — VS Code returns
+  // them unchanged rather than wrapping them.
+  if (uri.scheme === 'http' || uri.scheme === 'https') {
+    return uri.toString();
+  }
+  const authority = `${uri.scheme}+${encodeWebviewAuthority(uri.authority || '')}.${WEBVIEW_RESOURCE_AUTHORITY}`;
+  let p = (uri.path || '').replace(/\\/g, '/');
   if (!p.startsWith('/')) p = '/' + p;
-  return `https://file+.vscode-resource.vscode-cdn.net${p}`;
+  let url = `https://${authority}${p}`;
+  // Uri.parse stores query/fragment with their leading ? / # already.
+  if (uri.query) url += uri.query.startsWith('?') ? uri.query : `?${uri.query}`;
+  if (uri.fragment) url += uri.fragment.startsWith('#') ? uri.fragment : `#${uri.fragment}`;
+  return url;
 }
 
 /** CSP source matching the webview-resource URLs above. Extensions
@@ -1224,7 +1249,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
             // the scheme our protocol handler serves.
             cspSource: WEBVIEW_CSP_SOURCE,
             asWebviewUri(uri: Uri) {
-              return Uri.parse(fsPathToWebviewUrl(uri.fsPath));
+              return Uri.parse(uriToWebviewUrl(uri));
             },
             postMessage(msg: any) {
               return rpcRequest('webviewView/postMessage', { viewId: params?.viewId, message: msg })
@@ -1989,7 +2014,7 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           // load. We have a custom Tauri-registered `opide-ext://`
           // protocol that serves files from ~/.opide/extensions/<id>/.
           asWebviewUri(uri: Uri) {
-            return Uri.parse(fsPathToWebviewUrl(uri.fsPath));
+            return Uri.parse(uriToWebviewUrl(uri));
           },
           cspSource: WEBVIEW_CSP_SOURCE,
         };
