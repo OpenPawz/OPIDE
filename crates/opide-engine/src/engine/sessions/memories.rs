@@ -258,12 +258,20 @@ impl SessionStore {
     ) -> EngineResult<Vec<Memory>> {
         let conn = self.conn.lock();
 
-        // FTS5 match query — escape special characters
+        // FTS5 match query. Quote EACH whitespace token as a literal phrase
+        // (escaping internal quotes) so FTS5 special characters — : ( ) * - and
+        // the bareword operators AND/OR/NOT — in the user's query can't be
+        // parsed as query syntax. Previously only quotes were escaped, so a
+        // token like `foo:bar`, `arr[0]`, or `c++` produced an FTS5 syntax
+        // error and the whole recall silently failed. Join tokens with OR.
         let fts_query = query
-            .replace('"', "\"\"")
             .split_whitespace()
+            .map(|tok| format!("\"{}\"", tok.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" OR ");
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let sql = if let Some(aid) = agent_id {
             // Filter: memories with matching agent_id OR no agent_id (shared)
