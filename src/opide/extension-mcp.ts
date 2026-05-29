@@ -461,6 +461,28 @@ async function getExtensionsBase(): Promise<string> {
   return `${home}/.opide/extensions`
 }
 
+/** Install a local .vsix file: extract it into the extensions directory and
+ * restart the host so the scanner picks it up. This is the real fallback for
+ * installVsixFile when the workbench's IExtensionManagementService.installVSIX
+ * isn't available — previously the fallback sent an extension/installVsix RPC
+ * the sidecar never handled (silent 30s timeout). */
+export async function installVsixFromPath(vsixPath: string): Promise<void> {
+  const log = (msg: string) => invoke('ext_host_log', { message: `[install-vsix] ${msg}` }).catch(() => {})
+  const extBase = await getExtensionsBase()
+  // Derive a stable target dir from the file name. The scanner reads the real
+  // id (publisher.name) from each extracted package.json, so the directory
+  // name itself doesn't need to match the extension id.
+  const base = (vsixPath.split('/').pop() || 'extension')
+    .replace(/\.vsix$/i, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '-')
+  const targetDir = `${extBase}/${base}`
+  await log(`Extracting ${vsixPath} → ${targetDir}`)
+  await invoke('ext_extract_vsix', { vsixPath, targetDir })
+  await log('Extraction complete; restarting extension host')
+  const { restartExtensionHost } = await import('./extension-bridge.ts')
+  await restartExtensionHost()
+}
+
 /** Check for a matching adapter and register it as an MCP server */
 async function registerAdapterForExtension(extensionId: string, _extDir: string): Promise<void> {
   const log = (msg: string) => invoke('ext_host_log', { message: `[adapter] ${msg}` }).catch(() => {})

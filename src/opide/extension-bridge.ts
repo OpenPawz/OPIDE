@@ -2662,9 +2662,10 @@ export async function installVsixFile(vsixPath: string): Promise<void> {
     console.warn('[ext-bridge] Workbench VSIX install failed, falling back to manual:', e)
   }
 
-  // Fallback: extract .vsix manually (it's just a zip)
-  // The sidecar can handle this with a dedicated command
-  if (_running) {
-    await sendRequest('extension/installVsix', { path: vsixPath })
-  }
+  // Fallback: extract the .vsix natively into the extensions dir and restart
+  // the host so the scanner picks it up. Previously this sent an
+  // extension/installVsix RPC the sidecar never handled — the request just
+  // timed out. installVsixFromPath does the real extract + restart.
+  const { installVsixFromPath } = await import('./extension-mcp.ts')
+  await installVsixFromPath(vsixPath)
 }
