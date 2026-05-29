@@ -426,6 +426,13 @@ pub async fn run_agent_turn(
         // Extract the confirmed model name from the API response
         let confirmed_model: Option<String> = chunks.iter().find_map(|c| c.model.clone());
 
+        // The final finish/stop reason for this round (last non-None). Used to
+        // surface max-token truncation, which was otherwise silently returned
+        // as if the response were complete (OpenAI "length" / Anthropic
+        // "max_tokens"; Google already emits an explicit error chunk).
+        let round_finish_reason: Option<String> =
+            chunks.iter().rev().find_map(|c| c.finish_reason.clone());
+
         for chunk in &chunks {
             // Accumulate text deltas
             if let Some(dt) = &chunk.delta_text {
@@ -701,6 +708,23 @@ pub async fn run_agent_turn(
                     round
                 );
                 final_text = helpers::empty_response_fallback();
+            }
+
+            // Surface max-token truncation. Without this the user got a
+            // silently cut-off answer with no indication it was incomplete.
+            if matches!(
+                round_finish_reason.as_deref(),
+                Some("length") | Some("max_tokens") | Some("max_output_tokens")
+            ) && !final_text.is_empty()
+            {
+                warn!(
+                    "[engine] Response truncated at round {} (finish_reason={:?})",
+                    round, round_finish_reason
+                );
+                final_text.push_str(
+                    "\n\n_⚠️ Response truncated — hit the model's max output token limit. \
+                     Ask me to continue, or raise the output limit in Settings._",
+                );
             }
 
             // Add assistant message to history

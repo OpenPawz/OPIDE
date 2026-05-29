@@ -751,6 +751,56 @@ impl OpenAiProvider {
                                 self.circuit.record_success();
                                 return Ok(chunks);
                             }
+                            "response.incomplete" => {
+                                // The Responses API emits this (instead of
+                                // response.completed) when the answer was cut
+                                // off — e.g. incomplete_details.reason ==
+                                // "max_output_tokens". Surface the reason so the
+                                // agent loop can flag the truncation; previously
+                                // this was ignored and the response just ended
+                                // silently as if complete.
+                                let usage_obj = if v["response"].get("usage").is_some() {
+                                    &v["response"]["usage"]
+                                } else {
+                                    &v["usage"]
+                                };
+                                let usage = {
+                                    let u = usage_obj;
+                                    let input_tok = u["input_tokens"].as_u64().unwrap_or(0);
+                                    let output_tok = u["output_tokens"].as_u64().unwrap_or(0);
+                                    if input_tok > 0 || output_tok > 0 {
+                                        Some(TokenUsage {
+                                            input_tokens: input_tok,
+                                            output_tokens: output_tok,
+                                            total_tokens: u["total_tokens"]
+                                                .as_u64()
+                                                .unwrap_or(input_tok + output_tok),
+                                            ..Default::default()
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                };
+                                let model_name = v["response"]["model"]
+                                    .as_str()
+                                    .or_else(|| v["model"].as_str())
+                                    .map(|s| s.to_string());
+                                let reason = v["response"]["incomplete_details"]["reason"]
+                                    .as_str()
+                                    .unwrap_or("max_output_tokens")
+                                    .to_string();
+                                chunks.push(StreamChunk {
+                                    delta_text: None,
+                                    tool_calls: vec![],
+                                    finish_reason: Some(reason),
+                                    usage,
+                                    model: model_name,
+                                    thought_parts: vec![],
+                                    thinking_text: None,
+                                });
+                                self.circuit.record_success();
+                                return Ok(chunks);
+                            }
                             _ => {} // Ignore other event types
                         }
                     }
