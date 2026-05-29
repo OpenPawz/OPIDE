@@ -66,13 +66,24 @@ export async function doSend(): Promise<void> {
 
   const context = await _gatherIdeContext()
 
-  let attachBlock = ''
+  // Convert attachments into the engine's ChatAttachment format so the agent
+  // loop turns them into real multimodal content blocks (images → vision,
+  // PDFs → document, text → inlined). Previously the frontend inlined them as
+  // text and DROPPED image data entirely ("image data omitted"), so pasting
+  // an image into a vision model did nothing.
+  const chatAttachments: { mimeType: string; content: string; name?: string }[] = []
   if (S.attachments.length > 0) {
     for (const att of S.attachments) {
       if (att.isImage) {
-        attachBlock += `[Attached image: ${att.name}]\n(image data omitted from text context)\n\n`
+        // content is a data URL: "data:image/png;base64,XXXX" — split it into
+        // the mime type + raw base64 the engine expects.
+        const m = att.content.match(/^data:([^;]+);base64,(.*)$/s)
+        if (m) chatAttachments.push({ mimeType: m[1], content: m[2], name: att.name })
       } else {
-        attachBlock += `[Attached file: ${att.name}]\n\`\`\`\n${att.content.slice(0, 8000)}\n\`\`\`\n\n`
+        // Text file content is raw text; the engine decodes base64, so encode
+        // it (UTF-8 safe). Let it be inlined as a fenced block server-side.
+        const b64 = btoa(unescape(encodeURIComponent(att.content)))
+        chatAttachments.push({ mimeType: 'text/plain', content: b64, name: att.name })
       }
     }
     S.attachments = []
@@ -123,7 +134,7 @@ export async function doSend(): Promise<void> {
     ? `⚡ REDIRECT — STOP YOUR CURRENT TASK ⚡\n\nThe user is redirecting you. Read this carefully and respond to it directly before doing anything else. Do not continue your previous task unless the user's message explicitly asks you to.\n\nUser message:\n${content}`
     : content
 
-  const parts = [context ? `[IDE Context]\n${context}` : '', attachBlock, messageContent].filter(Boolean)
+  const parts = [context ? `[IDE Context]\n${context}` : '', messageContent].filter(Boolean)
   const fullMessage = parts.join('\n\n')
 
   const baseSystemPrompt = S.selectedAgent?.system_prompt || buildSystemPrompt(getWorkspace())
@@ -161,6 +172,7 @@ export async function doSend(): Promise<void> {
         thinking_level: S.thinkingLevel,
         workspace_path: getWorkspace() ?? undefined,
         is_redirect: isMidStreamRedirect || isDeepSession,
+        attachments: chatAttachments,
       },
     })
     // Engine echoes back the same session_id; reassigning is a no-op but
