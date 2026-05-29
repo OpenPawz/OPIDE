@@ -794,6 +794,41 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
       bridge.send({ jsonrpc: '2.0', id, result: r });
       return;
     }
+    if (method === 'languages/provideImplementation') {
+      const r = await provideLocations(params, _implementationProviders, 'provideImplementation');
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideTypeDefinition') {
+      const r = await provideLocations(params, _typeDefinitionProviders, 'provideTypeDefinition');
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideDeclaration') {
+      const r = await provideLocations(params, _declarationProviders, 'provideDeclaration');
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideDocumentHighlights') {
+      const r = await provideDocumentHighlights(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideFoldingRanges') {
+      const r = await provideFoldingRanges(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideDocumentLinks') {
+      const r = await provideDocumentLinks(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
+    if (method === 'languages/provideInlayHints') {
+      const r = await provideInlayHints(params);
+      bridge.send({ jsonrpc: '2.0', id, result: r });
+      return;
+    }
     // Unknown — respond with null so the caller doesn't time out.
     bridge.send({ jsonrpc: '2.0', id, result: null });
   }
@@ -1235,6 +1270,113 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
     return out;
   }
 
+  async function provideDocumentHighlights(params: any): Promise<any[]> {
+    const { uri, position, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const pos = new Position(position?.line ?? 0, position?.character ?? 0);
+    const cancel = makeCancel();
+    for (const rec of _documentHighlightProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideDocumentHighlights?.(doc, pos, cancel));
+        if (Array.isArray(r) && r.length) {
+          return r.map((h: any) => ({ range: serializeRangeStrict(h.range), kind: h.kind ?? 0 }));
+        }
+      } catch (e: any) {
+        bridge.log(`documentHighlight provider failed: ${e?.message || e}`);
+      }
+    }
+    return [];
+  }
+
+  async function provideFoldingRanges(params: any): Promise<any[]> {
+    const { uri, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const out: any[] = [];
+    for (const rec of _foldingRangeProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideFoldingRanges?.(doc, {}, cancel));
+        if (Array.isArray(r)) {
+          // FoldingRange uses 0-based LINE numbers; kind is a FoldingRangeKind
+          // ('comment' | 'imports' | 'region') or undefined.
+          for (const f of r) out.push({ start: f.start, end: f.end, kind: f?.kind?.value ?? f?.kind });
+        }
+      } catch (e: any) {
+        bridge.log(`foldingRange provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
+  async function provideDocumentLinks(params: any): Promise<any[]> {
+    const { uri, languageId } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const out: any[] = [];
+    for (const rec of _documentLinkProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const r = await Promise.resolve(rec.provider.provideDocumentLinks?.(doc, cancel));
+        if (Array.isArray(r)) {
+          for (let link of r) {
+            if (!link?.target && typeof rec.provider.resolveDocumentLink === 'function') {
+              try {
+                const resolved = await Promise.resolve(rec.provider.resolveDocumentLink(link, cancel));
+                if (resolved) link = resolved;
+              } catch { /* keep unresolved */ }
+            }
+            const target = link?.target?.toString?.() ?? (typeof link?.target === 'string' ? link.target : undefined);
+            out.push({ range: serializeRangeStrict(link?.range), target, tooltip: link?.tooltip });
+          }
+        }
+      } catch (e: any) {
+        bridge.log(`documentLink provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
+  async function provideInlayHints(params: any): Promise<any[]> {
+    const { uri, languageId, range } = params || {};
+    const doc = await resolveDoc(uri, languageId);
+    if (!doc) return [];
+    const cancel = makeCancel();
+    const r = range
+      ? new Range(range.start?.line ?? 0, range.start?.character ?? 0, range.end?.line ?? 0, range.end?.character ?? 0)
+      : new Range(0, 0, 1_000_000, 0);
+    const out: any[] = [];
+    for (const rec of _inlayHintsProviders.values()) {
+      if (!providerMatchesLang(rec, languageId)) continue;
+      try {
+        const hints = await Promise.resolve(rec.provider.provideInlayHints?.(doc, r, cancel));
+        if (Array.isArray(hints)) {
+          for (const h of hints) {
+            // label: string | InlayHintLabelPart[]
+            const label = typeof h?.label === 'string'
+              ? h.label
+              : (Array.isArray(h?.label) ? h.label.map((p: any) => p?.value ?? '').join('') : '');
+            out.push({
+              position: { line: h?.position?.line ?? 0, character: h?.position?.character ?? 0 },
+              label,
+              kind: h?.kind ?? 1, // 1=Type, 2=Parameter
+              paddingLeft: !!h?.paddingLeft,
+              paddingRight: !!h?.paddingRight,
+              tooltip: typeof h?.tooltip === 'string' ? h.tooltip : h?.tooltip?.value,
+            });
+          }
+        }
+      } catch (e: any) {
+        bridge.log(`inlayHints provider failed: ${e?.message || e}`);
+      }
+    }
+    return out;
+  }
+
   async function provideSignatureHelp(params: any): Promise<any> {
     const { uri, position, languageId } = params || {};
     const doc = await resolveDoc(uri, languageId);
@@ -1495,6 +1637,13 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const _renameProviders = new Map<string, LangProviderRec>();
   const _signatureHelpProviders = new Map<string, LangProviderRec>();
   const _codeLensProviders = new Map<string, LangProviderRec>();
+  const _implementationProviders = new Map<string, LangProviderRec>();
+  const _typeDefinitionProviders = new Map<string, LangProviderRec>();
+  const _declarationProviders = new Map<string, LangProviderRec>();
+  const _documentHighlightProviders = new Map<string, LangProviderRec>();
+  const _foldingRangeProviders = new Map<string, LangProviderRec>();
+  const _documentLinkProviders = new Map<string, LangProviderRec>();
+  const _inlayHintsProviders = new Map<string, LangProviderRec>();
   let _nextLangProviderId = 1;
 
   /** VS Code DocumentSelector accepts strings, arrays, or objects with
@@ -3280,6 +3429,49 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         _codeLensProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
         rpcRequest('languages/registerCodeLensProvider', { selector }).catch(() => {});
         return { dispose: () => { _codeLensProviders.delete(id); } };
+      },
+
+      registerImplementationProvider(selector: any, provider: any) {
+        const id = `impl-${_nextLangProviderId++}`;
+        _implementationProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerImplementationProvider', { selector }).catch(() => {});
+        return { dispose: () => { _implementationProviders.delete(id); } };
+      },
+      registerTypeDefinitionProvider(selector: any, provider: any) {
+        const id = `tdef-${_nextLangProviderId++}`;
+        _typeDefinitionProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerTypeDefinitionProvider', { selector }).catch(() => {});
+        return { dispose: () => { _typeDefinitionProviders.delete(id); } };
+      },
+      registerDeclarationProvider(selector: any, provider: any) {
+        const id = `decl-${_nextLangProviderId++}`;
+        _declarationProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerDeclarationProvider', { selector }).catch(() => {});
+        return { dispose: () => { _declarationProviders.delete(id); } };
+      },
+      registerDocumentHighlightProvider(selector: any, provider: any) {
+        const id = `dh-${_nextLangProviderId++}`;
+        _documentHighlightProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerDocumentHighlightProvider', { selector }).catch(() => {});
+        return { dispose: () => { _documentHighlightProviders.delete(id); } };
+      },
+      registerFoldingRangeProvider(selector: any, provider: any) {
+        const id = `fold-${_nextLangProviderId++}`;
+        _foldingRangeProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerFoldingRangeProvider', { selector }).catch(() => {});
+        return { dispose: () => { _foldingRangeProviders.delete(id); } };
+      },
+      registerDocumentLinkProvider(selector: any, provider: any) {
+        const id = `dl-${_nextLangProviderId++}`;
+        _documentLinkProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerDocumentLinkProvider', { selector }).catch(() => {});
+        return { dispose: () => { _documentLinkProviders.delete(id); } };
+      },
+      registerInlayHintsProvider(selector: any, provider: any) {
+        const id = `ih-${_nextLangProviderId++}`;
+        _inlayHintsProviders.set(id, { provider, languages: selectorToLanguageIds(selector), selector });
+        rpcRequest('languages/registerInlayHintsProvider', { selector }).catch(() => {});
+        return { dispose: () => { _inlayHintsProviders.delete(id); } };
       },
 
       registerSignatureHelpProvider(selector: any, provider: any, ...rest: any[]) {

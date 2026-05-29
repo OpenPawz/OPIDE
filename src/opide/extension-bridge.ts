@@ -615,6 +615,41 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       if (id) sendResponse(id, null)
       break
     }
+    case 'languages/registerImplementationProvider': {
+      handleRegisterLanguageProvider('implementation', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerTypeDefinitionProvider': {
+      handleRegisterLanguageProvider('typeDefinition', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerDeclarationProvider': {
+      handleRegisterLanguageProvider('declaration', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerDocumentHighlightProvider': {
+      handleRegisterLanguageProvider('documentHighlight', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerFoldingRangeProvider': {
+      handleRegisterLanguageProvider('foldingRange', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerDocumentLinkProvider': {
+      handleRegisterLanguageProvider('documentLink', params)
+      if (id) sendResponse(id, null)
+      break
+    }
+    case 'languages/registerInlayHintsProvider': {
+      handleRegisterLanguageProvider('inlayHints', params)
+      if (id) sendResponse(id, null)
+      break
+    }
 
     // P1: inline completions. Carries providerId + languages so the
     // sidecar can route provideInlineCompletionItems back to the
@@ -2188,6 +2223,149 @@ async function handleRegisterLanguageProvider(
                 return { lenses, dispose() {} }
               } catch {
                 return { lenses: [], dispose() {} }
+              }
+            },
+          })
+          break
+
+        case 'implementation':
+        case 'typeDefinition':
+        case 'declaration': {
+          // All three return Location[]; only the RPC method + Monaco
+          // register fn differ. Map locations the same way as definition.
+          const rpcMethod = type === 'implementation' ? 'languages/provideImplementation'
+            : type === 'typeDefinition' ? 'languages/provideTypeDefinition'
+            : 'languages/provideDeclaration'
+          const provideFn = async (model: any, position: any) => {
+            try {
+              const result = await sendRequest(rpcMethod, {
+                uri: model.uri.fsPath || model.uri.path,
+                position: { line: position.lineNumber - 1, character: position.column - 1 },
+                languageId: lang,
+              })
+              if (!result) return null
+              return (Array.isArray(result) ? result : [result]).map((loc: any) => ({
+                uri: monaco.Uri.file(loc.uri || loc.path || ''),
+                range: {
+                  startLineNumber: (loc.range?.start?.line ?? 0) + 1,
+                  startColumn: (loc.range?.start?.character ?? 0) + 1,
+                  endLineNumber: (loc.range?.end?.line ?? 0) + 1,
+                  endColumn: (loc.range?.end?.character ?? 0) + 1,
+                },
+              }))
+            } catch {
+              return null
+            }
+          }
+          if (type === 'implementation') monaco.languages.registerImplementationProvider(lang, { provideImplementation: provideFn })
+          else if (type === 'typeDefinition') monaco.languages.registerTypeDefinitionProvider(lang, { provideTypeDefinition: provideFn })
+          else monaco.languages.registerDeclarationProvider(lang, { provideDeclaration: provideFn })
+          break
+        }
+
+        case 'documentHighlight':
+          monaco.languages.registerDocumentHighlightProvider(lang, {
+            provideDocumentHighlights: async (model: any, position: any) => {
+              try {
+                const result = await sendRequest('languages/provideDocumentHighlights', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  position: { line: position.lineNumber - 1, character: position.column - 1 },
+                  languageId: lang,
+                })
+                return (Array.isArray(result) ? result : []).map((h: any) => ({
+                  range: {
+                    startLineNumber: (h.range?.start?.line ?? 0) + 1,
+                    startColumn: (h.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (h.range?.end?.line ?? 0) + 1,
+                    endColumn: (h.range?.end?.character ?? 0) + 1,
+                  },
+                  kind: h.kind ?? 0,
+                }))
+              } catch {
+                return []
+              }
+            },
+          })
+          break
+
+        case 'foldingRange':
+          monaco.languages.registerFoldingRangeProvider(lang, {
+            provideFoldingRanges: async (model: any) => {
+              try {
+                const result = await sendRequest('languages/provideFoldingRanges', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  languageId: lang,
+                })
+                const kindMap: Record<string, any> = {
+                  comment: monaco.languages.FoldingRangeKind?.Comment,
+                  imports: monaco.languages.FoldingRangeKind?.Imports,
+                  region: monaco.languages.FoldingRangeKind?.Region,
+                }
+                // FoldingRange uses 0-based lines; Monaco wants 1-based.
+                return (Array.isArray(result) ? result : []).map((f: any) => ({
+                  start: (f.start ?? 0) + 1,
+                  end: (f.end ?? 0) + 1,
+                  kind: typeof f.kind === 'string' ? kindMap[f.kind] : undefined,
+                }))
+              } catch {
+                return []
+              }
+            },
+          })
+          break
+
+        case 'documentLink':
+          monaco.languages.registerLinkProvider(lang, {
+            provideLinks: async (model: any) => {
+              try {
+                const result = await sendRequest('languages/provideDocumentLinks', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  languageId: lang,
+                })
+                const links = (Array.isArray(result) ? result : []).map((l: any) => ({
+                  range: {
+                    startLineNumber: (l.range?.start?.line ?? 0) + 1,
+                    startColumn: (l.range?.start?.character ?? 0) + 1,
+                    endLineNumber: (l.range?.end?.line ?? 0) + 1,
+                    endColumn: (l.range?.end?.character ?? 0) + 1,
+                  },
+                  url: l.target || undefined,
+                  tooltip: l.tooltip || undefined,
+                }))
+                return { links, dispose() {} }
+              } catch {
+                return { links: [], dispose() {} }
+              }
+            },
+          })
+          break
+
+        case 'inlayHints':
+          monaco.languages.registerInlayHintsProvider(lang, {
+            provideInlayHints: async (model: any, range: any) => {
+              try {
+                const result = await sendRequest('languages/provideInlayHints', {
+                  uri: model.uri.fsPath || model.uri.path,
+                  range: {
+                    start: { line: range.startLineNumber - 1, character: range.startColumn - 1 },
+                    end: { line: range.endLineNumber - 1, character: range.endColumn - 1 },
+                  },
+                  languageId: lang,
+                })
+                const hints = (Array.isArray(result) ? result : []).map((h: any) => ({
+                  position: {
+                    lineNumber: (h.position?.line ?? 0) + 1,
+                    column: (h.position?.character ?? 0) + 1,
+                  },
+                  label: h.label ?? '',
+                  kind: h.kind ?? 1,
+                  paddingLeft: !!h.paddingLeft,
+                  paddingRight: !!h.paddingRight,
+                  tooltip: h.tooltip || undefined,
+                }))
+                return { hints, dispose() {} }
+              } catch {
+                return { hints: [], dispose() {} }
               }
             },
           })
