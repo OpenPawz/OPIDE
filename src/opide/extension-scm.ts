@@ -31,7 +31,7 @@ interface ResourceState {
   command?: any
 }
 interface InputBoxState { value: string; placeholder: string; enabled: boolean; visible: boolean }
-interface GroupRec { id: string; label: string; resources: ResourceState[] }
+interface GroupRec { id: string; label: string; resources: ResourceState[]; hideWhenEmpty?: boolean }
 interface ScmRec {
   id: string; label: string; rootUri?: string;
   groups: Map<string, GroupRec>; count: number;
@@ -125,11 +125,23 @@ function rerender(): void {
     }
 
     for (const g of sc.groups.values()) {
+      // hideWhenEmpty groups vanish when they have no resources (VS Code
+      // behaviour); otherwise an empty group still shows.
+      if (g.hideWhenEmpty && g.resources.length === 0) continue
       const groupEl = document.createElement('div')
       groupEl.style.cssText = 'padding:2px 12px 6px 12px;'
       const gh = document.createElement('div')
-      gh.style.cssText = 'color:var(--vscode-descriptionForeground);font-size:11px;text-transform:uppercase;letter-spacing:0.05em;padding:4px 0;'
-      gh.textContent = g.label
+      gh.style.cssText = 'display:flex;align-items:center;gap:6px;color:var(--vscode-descriptionForeground);font-size:11px;text-transform:uppercase;letter-spacing:0.05em;padding:4px 0;'
+      const ghLabel = document.createElement('span')
+      ghLabel.textContent = g.label
+      gh.appendChild(ghLabel)
+      // Per-group resource count badge (VS Code shows one on each group).
+      if (g.resources.length > 0) {
+        const badge = document.createElement('span')
+        badge.textContent = String(g.resources.length)
+        badge.style.cssText = 'min-width:16px;text-align:center;padding:0 5px;border-radius:9px;font-size:10px;line-height:15px;background:var(--vscode-badge-background,#4d4d4d);color:var(--vscode-badge-foreground,#fff);'
+        gh.appendChild(badge)
+      }
       groupEl.appendChild(gh)
       for (const r of g.resources) {
         const row = document.createElement('div')
@@ -197,8 +209,15 @@ export function handle(method: string, params: any): void {
     }
     case 'scm/createGroup': {
       const sc = _scms.get(params.id); if (!sc) return
-      sc.groups.set(params.groupKey, { id: params.groupId, label: params.groupLabel, resources: [] })
+      sc.groups.set(params.groupKey, { id: params.groupId, label: params.groupLabel, resources: [], hideWhenEmpty: false })
       rerender()
+      break
+    }
+    case 'scm/setGroupHideWhenEmpty': {
+      for (const sc of _scms.values()) {
+        const g = sc.groups.get(params.groupKey)
+        if (g) { g.hideWhenEmpty = !!params.hideWhenEmpty; rerender(); return }
+      }
       break
     }
     case 'scm/setResourceStates': {

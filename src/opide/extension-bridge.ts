@@ -934,9 +934,14 @@ async function routeNotification(method: string, params: any, id?: number): Prom
     case 'scm/setStatusBar':
     case 'scm/setInputBox':
     case 'scm/setAcceptCommand':
+    case 'scm/setGroupHideWhenEmpty':
     case 'scm/disposeGroup':
     case 'scm/disposeSourceControl': {
       handleScm(method, params)
+      // statusBarCommands render in the workbench status bar (not the SCM
+      // panel), so route those through IStatusbarService here.
+      if (method === 'scm/setStatusBar') void handleScmStatusBar(params)
+      else if (method === 'scm/disposeSourceControl') disposeScmStatusBar(params?.id)
       if (id) sendResponse(id, null)
       break
     }
@@ -1247,6 +1252,66 @@ async function handleTerminal(method: string, params: any): Promise<void> {
 // Phase F-H handlers
 function handleScm(method: string, params: any): void {
   void getScm().then((s) => s.handle(method, params))
+}
+
+// SourceControl.statusBarCommands render in the workbench status bar (bottom),
+// not the SCM panel. We register each as an IStatusbarService entry keyed by
+// the source-control id so re-setting replaces them and disposing the source
+// control clears them. Clicking an entry runs the (workbench-registered)
+// extension command, with its arguments.
+const _scmStatusDisposables = new Map<string, any[]>()
+
+async function handleScmStatusBar(params: any): Promise<void> {
+  try {
+    const scmId: string | undefined = params?.id
+    if (!scmId) return
+    // Replace any previous entries for this source control.
+    const prev = _scmStatusDisposables.get(scmId)
+    if (prev) for (const d of prev) { try { d.dispose() } catch { /* ignore */ } }
+    _scmStatusDisposables.set(scmId, [])
+
+    const commands = params?.commands
+    if (!Array.isArray(commands) || commands.length === 0) return
+
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IStatusbarService, StatusbarAlignment } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/workbench/services/statusbar/browser/statusbar'
+    )
+    if (!IStatusbarService) return
+    const statusbar = StandaloneServices.get(IStatusbarService) as any
+    if (!statusbar?.addEntry) return
+
+    const list: any[] = []
+    commands.forEach((cmd: any, i: number) => {
+      if (!cmd) return
+      const entryId = `scm:${scmId}:${i}`
+      const entry = {
+        name: entryId,
+        text: cmd.title || cmd.command || '',
+        tooltip: cmd.tooltip || cmd.title || '',
+        command: cmd.command
+          ? { id: cmd.command, title: cmd.title || cmd.command, arguments: cmd.arguments }
+          : undefined,
+      }
+      try {
+        list.push(statusbar.addEntry(entry, entryId, StatusbarAlignment?.LEFT ?? 0, 100))
+      } catch (e) {
+        debugLog(`scm status entry add failed: ${e}`)
+      }
+    })
+    _scmStatusDisposables.set(scmId, list)
+  } catch (e) {
+    debugLog(`scm setStatusBar failed: ${e}`)
+  }
+}
+
+function disposeScmStatusBar(scmId?: string): void {
+  if (!scmId) return
+  const list = _scmStatusDisposables.get(scmId)
+  if (list) {
+    for (const d of list) { try { d.dispose() } catch { /* ignore */ } }
+    _scmStatusDisposables.delete(scmId)
+  }
 }
 function handleTests(method: string, params: any): void {
   void getTests().then((t) => t.handle(method, params))

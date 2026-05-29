@@ -3375,8 +3375,9 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           set statusBarCommands(v: any[]) { inst.statusBarCommands = v; rpcRequest('scm/setStatusBar', { id, commands: v }).catch(() => {}); },
           createResourceGroup(groupId: string, groupLabel: string) {
             const groupKey = `${id}:${groupId}:${_nextScmGroupId++}`;
-            const group = {
-              id: groupId, label: groupLabel, hideWhenEmpty: false,
+            const group: any = {
+              id: groupId, label: groupLabel,
+              _hideWhenEmpty: false,
               resourceStates: [] as any[],
               dispose() {
                 inst.resourceGroups.delete(groupKey);
@@ -3385,6 +3386,17 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
             };
             inst.resourceGroups.set(groupKey, group);
             rpcRequest('scm/createGroup', { id, groupId, groupLabel, groupKey }).catch(() => {});
+            // hideWhenEmpty: forward changes so the panel can drop the group
+            // when it has no resources (e.g. "Staged Changes" when nothing's
+            // staged). Extensions usually set this right after creation.
+            Object.defineProperty(group, 'hideWhenEmpty', {
+              enumerable: true,
+              get() { return group._hideWhenEmpty; },
+              set(v: boolean) {
+                group._hideWhenEmpty = !!v;
+                rpcRequest('scm/setGroupHideWhenEmpty', { groupKey, hideWhenEmpty: !!v }).catch(() => {});
+              },
+            });
             // Define a setter via Object.defineProperty so assigning
             // resourceStates pushes to the bridge.
             Object.defineProperty(group, 'resourceStates', {
