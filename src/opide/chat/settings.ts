@@ -76,9 +76,13 @@ export function renderProviderSetup(): void {
 
   let selectedProvDef = PROVIDER_DEFS[0]
   const configArea = document.createElement('div')
+  // Generation guard: rapid tab clicks fire overlapping async builds; without
+  // this each cleared configArea and appended its own content, leaving two
+  // providers' fields interleaved. Only the latest build renders.
+  let buildGen = 0
 
   async function buildConfigArea(pDef: typeof PROVIDER_DEFS[0]): Promise<void> {
-    configArea.innerHTML = ''
+    const gen = ++buildGen
 
     // Load existing saved provider data
     let existing: any = null
@@ -86,6 +90,9 @@ export function renderProviderSetup(): void {
       const config = await invoke<any>('engine_get_config')
       existing = config?.providers?.find((p: any) => p.id === pDef.id) ?? null
     } catch { /* no config yet */ }
+    if (gen !== buildGen) return // superseded by a newer tab click
+
+    configArea.innerHTML = ''
 
     const keyLabel = lbl('API Key')
     configArea.appendChild(keyLabel)
@@ -208,6 +215,10 @@ export function renderProviderSetup(): void {
         await invoke('engine_set_config', { config: { ...config, default_provider: pDef.id, default_model: model } })
         S.selectedModel = model
         S.needsProviderSetup = false
+        // Refresh the top-bar model dropdown so the just-enabled models (and
+        // the new default) appear immediately — previously they only showed
+        // up after an app restart.
+        import('./index.ts').then(({ updateModelSelect }) => updateModelSelect()).catch(() => {})
         renderMessagesFull()
         S.textarea?.focus()
       } catch (e) {

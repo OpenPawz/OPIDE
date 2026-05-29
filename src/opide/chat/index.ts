@@ -103,7 +103,7 @@ async function loadModels(): Promise<void> {
   } catch { /* config not ready */ }
 }
 
-async function updateModelSelect(): Promise<void> {
+export async function updateModelSelect(): Promise<void> {
   if (!S.modelSelect) return
   try {
     const config = await invoke<any>('engine_get_config')
