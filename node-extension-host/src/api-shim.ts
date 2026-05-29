@@ -765,6 +765,43 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
   const onDidChangeConfig = new VSCodeEvent<any>('onDidChangeConfiguration');
   const onDidChangeActiveEditor = new VSCodeEvent<any>('onDidChangeActiveTextEditor');
 
+  // Live configuration snapshot — the full merged config tree the
+  // frontend pushes from the workbench's IConfigurationService (at
+  // startup via `configuration/snapshot` and on every change). Without
+  // this, getConfiguration().get() only ever saw hardcoded defaults and
+  // never the user's / workspace's real settings. Stored as the nested
+  // object VS Code uses (e.g. { editor: { fontSize: 13 }, myExt: {...} }).
+  let _configSnapshot: Record<string, any> = {};
+  /** Resolve a dotted config key (e.g. "editor.fontSize") against the
+   * snapshot. Tries the flat key first (some layers flatten), then
+   * walks the nested tree. Returns undefined if unset. */
+  function resolveConfig(fullKey: string): any {
+    if (!fullKey) return undefined;
+    if (Object.prototype.hasOwnProperty.call(_configSnapshot, fullKey)) {
+      return _configSnapshot[fullKey];
+    }
+    let cur: any = _configSnapshot;
+    for (const seg of fullKey.split('.')) {
+      if (cur == null || typeof cur !== 'object') return undefined;
+      cur = cur[seg];
+    }
+    return cur;
+  }
+  /** Write-through into the snapshot so a get() right after an update()
+   * sees the new value without waiting for the frontend to echo a
+   * configuration/snapshot back. */
+  function setConfigLocal(fullKey: string, value: any): void {
+    if (!fullKey) return;
+    const segs = fullKey.split('.');
+    let cur: any = _configSnapshot;
+    for (let i = 0; i < segs.length - 1; i++) {
+      const s = segs[i];
+      if (cur[s] == null || typeof cur[s] !== 'object') cur[s] = {};
+      cur = cur[s];
+    }
+    cur[segs[segs.length - 1]] = value;
+  }
+
   // Document registry — keeps content cached so getText() is synchronous
   const openDocuments = new Map<string, TextDocument>();
 
@@ -1013,8 +1050,34 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         onDidSaveTextDoc.fire(params);
         break;
 
+      case 'configuration/snapshot':
+        // Full config tree pushed by the frontend (startup + on change).
+        // Replace the snapshot wholesale; cheap and avoids drift.
+        if (params && typeof params.config === 'object' && params.config) {
+          _configSnapshot = params.config;
+        }
+        // Fire the change event with a VS Code-shaped affectsConfiguration
+        // so extensions re-read. We don't know exactly which keys changed
+        // on a wholesale snapshot, so affectsConfiguration returns true.
+        onDidChangeConfig.fire({ affectsConfiguration: (_section?: string) => true });
+        break;
+
       case 'configuration/didChange':
-        onDidChangeConfig.fire(params);
+        // Targeted change notification (optionally carries changed keys).
+        // If it includes an updated config tree, merge it in.
+        if (params && typeof params.config === 'object' && params.config) {
+          _configSnapshot = params.config;
+        }
+        {
+          const changed: string[] = Array.isArray(params?.affectedKeys) ? params.affectedKeys : [];
+          onDidChangeConfig.fire({
+            affectsConfiguration: (sectionArg?: string) => {
+              if (!sectionArg) return true;
+              if (changed.length === 0) return true;
+              return changed.some((k) => k === sectionArg || k.startsWith(`${sectionArg}.`));
+            },
+          });
+        }
         break;
 
       // ── Phase C: tree-view children request ────────────────────────
@@ -1486,27 +1549,51 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
           stylelint: { enable: true },
         };
 
+        const fullKeyFor = (key: string) => (section ? `${section}.${key}` : key);
         return {
           get<T>(key: string, defaultValue?: T): T {
-            // Check known defaults first (extension configs that must return real values)
+            // 1. Real user/workspace value from the live snapshot wins.
+            const live = resolveConfig(fullKeyFor(key));
+            if (live !== undefined) return live as T;
+            // 2. Known defaults for extensions we special-case.
             const sectionDefaults = section ? knownDefaults[section] : undefined;
             if (sectionDefaults && key in sectionDefaults) {
               return sectionDefaults[key] as T;
             }
-            // For *.enable keys, default to true (extensions should be enabled)
+            // 3. *.enable keys default to true (extensions enabled).
             if (key === 'enable' && defaultValue === undefined) {
               return true as T;
             }
+            // 4. The caller's own default.
             return defaultValue as T;
           },
           has(key: string): boolean {
+            if (resolveConfig(fullKeyFor(key)) !== undefined) return true;
             const sectionDefaults = section ? knownDefaults[section] : undefined;
             return !!(sectionDefaults && key in sectionDefaults);
           },
           update(key: string, value: any, target?: ConfigurationTarget): Promise<void> {
+            // Optimistically reflect the write locally so an immediate
+            // get() sees it, then persist through the frontend.
+            setConfigLocal(fullKeyFor(key), value);
             return rpcRequest('configuration/update', { section, key, value, target });
           },
-          inspect(key: string) { return undefined; },
+          inspect(key: string) {
+            // Minimal VS Code-shaped inspect: extensions use it to tell a
+            // user-set value from a default. We expose the merged value as
+            // globalValue when present; precise per-scope values would need
+            // IConfigurationService.inspect plumbed through the bridge.
+            const live = resolveConfig(fullKeyFor(key));
+            const sectionDefaults = section ? knownDefaults[section] : undefined;
+            const def = sectionDefaults && key in sectionDefaults ? sectionDefaults[key] : undefined;
+            return {
+              key: fullKeyFor(key),
+              defaultValue: def,
+              globalValue: live,
+              workspaceValue: undefined,
+              workspaceFolderValue: undefined,
+            };
+          },
         };
       },
 

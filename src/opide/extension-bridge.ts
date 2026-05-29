@@ -462,6 +462,10 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       // appear because they activate on `onView:<id>` which only
       // fires when the user clicks a slot that was never mounted.
       void registerAllContributedViews(ready.extensions)
+      // Push the real merged configuration so extensions read actual
+      // user/workspace settings (and get change notifications) rather
+      // than the shim's hardcoded defaults.
+      void pushConfigSnapshot()
       for (const cb of _readyListeners) {
         cb(ready.extensions)
       }
@@ -2142,6 +2146,85 @@ async function handleConfigurationUpdate(params: any): Promise<void> {
     debugLog(`configuration/update: ${fullKey} = ${JSON.stringify(value)}`)
   } catch (e) {
     debugLog(`configuration/update failed: ${e}`)
+  }
+}
+
+// Push the workbench's full merged configuration tree to the sidecar so
+// extensions' getConfiguration().get() reads the user's / workspace's
+// REAL settings instead of hardcoded defaults — and fires
+// onDidChangeConfiguration when they change. Without this, the sidecar's
+// _configSnapshot is empty and every read falls through to a default.
+//
+// We resolve IConfigurationService and call getValue() with no args,
+// which VS Code defines as "the full merged configuration object" (the
+// nested { editor: {...}, myExt: {...} } tree the shim walks). On the
+// first call we also subscribe to onDidChangeConfiguration to re-push
+// (debounced) with the changed keys so the shim can target
+// affectsConfiguration precisely.
+let _configSnapshotWired = false
+let _configPushTimer: ReturnType<typeof setTimeout> | null = null
+let _pendingAffectedKeys = new Set<string>()
+
+async function getConfigurationService(): Promise<any | null> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { IConfigurationService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration'
+    )
+    if (!IConfigurationService) return null
+    const svc = StandaloneServices.get(IConfigurationService) as any
+    return svc ?? null
+  } catch {
+    return null
+  }
+}
+
+async function pushConfigSnapshot(): Promise<void> {
+  try {
+    const configService = await getConfigurationService()
+    if (!configService?.getValue) return
+
+    // getValue() with no key returns the full merged config tree.
+    const config = configService.getValue()
+    sendNotification('configuration/snapshot', { config })
+    debugLog('configuration/snapshot pushed')
+
+    if (!_configSnapshotWired && typeof configService.onDidChangeConfiguration === 'function') {
+      _configSnapshotWired = true
+      configService.onDidChangeConfiguration((e: any) => {
+        // Collect changed keys so the shim can answer
+        // affectsConfiguration precisely. affectedKeys is a Set in VS
+        // Code; tolerate array/iterable/undefined shapes.
+        try {
+          const keys = e?.affectedKeys
+          if (keys) {
+            for (const k of keys) _pendingAffectedKeys.add(String(k))
+          }
+        } catch { /* ignore malformed event */ }
+        // Debounce: settings edits often fire a burst of events.
+        if (_configPushTimer) clearTimeout(_configPushTimer)
+        _configPushTimer = setTimeout(() => {
+          _configPushTimer = null
+          void pushConfigChange()
+        }, 150)
+      })
+    }
+  } catch (e) {
+    debugLog(`configuration/snapshot failed: ${e}`)
+  }
+}
+
+async function pushConfigChange(): Promise<void> {
+  try {
+    const configService = await getConfigurationService()
+    if (!configService?.getValue) return
+    const config = configService.getValue()
+    const affectedKeys = [..._pendingAffectedKeys]
+    _pendingAffectedKeys = new Set<string>()
+    sendNotification('configuration/didChange', { config, affectedKeys })
+    debugLog(`configuration/didChange pushed (${affectedKeys.length} keys)`)
+  } catch (e) {
+    debugLog(`configuration/didChange failed: ${e}`)
   }
 }
 
