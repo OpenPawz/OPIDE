@@ -2275,6 +2275,22 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
 
       rootPath: workspacePath || undefined,
 
+      // workspace.getWorkspaceFolder(uri) → the folder containing uri, else
+      // undefined. Was an auto-stub returning undefined for everything, so
+      // extensions that resolve a file's owning folder (to scope settings,
+      // run a tool, compute relative paths) treated every file as outside the
+      // workspace and skipped it.
+      getWorkspaceFolder(uri: any): any {
+        if (!workspacePath) return undefined;
+        const p = uri?.fsPath ?? uri?.path ?? (typeof uri === 'string' ? uri : '');
+        if (!p) return undefined;
+        const root = workspacePath.replace(/[/\\]+$/, '');
+        if (p === root || p.startsWith(root + '/') || p.startsWith(root + '\\')) {
+          return { uri: Uri.file(workspacePath), name: path.basename(workspacePath), index: 0 };
+        }
+        return undefined;
+      },
+
       getConfiguration(section?: string) {
         // Known configuration defaults for extensions running in OPIDE
         const knownDefaults: Record<string, Record<string, any>> = {
@@ -3030,6 +3046,49 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         };
       },
 
+      // vscode.commands.registerTextEditorCommand — like registerCommand, but
+      // the handler gets (textEditor, edit, ...args) and edits made via the
+      // edit builder are applied to the active document afterward. Was an
+      // auto-stub (the command never registered), so these commands didn't
+      // appear in the palette and did nothing when invoked.
+      registerTextEditorCommand(
+        command: string,
+        callback: (editor: any, edit: any, ...args: any[]) => any,
+      ): { dispose(): void } {
+        commandRegistry.set(command, (...args: any[]) => {
+          const editor = _activeTextEditor;
+          if (!editor) { bridge.log(`textEditorCommand ${command}: no active editor`); return undefined; }
+          const edits: any[] = [];
+          const editBuilder = {
+            replace(range: any, newText: string) { edits.push({ range, newText }); },
+            insert(position: any, newText: string) { edits.push({ range: { start: position, end: position }, newText }); },
+            delete(range: any) { edits.push({ range, newText: '' }); },
+            setEndOfLine() { /* unsupported */ },
+          };
+          const result = callback(editor, editBuilder, ...args);
+          if (edits.length > 0) {
+            const uri = editor.document?.uri;
+            const uriStr = uri?.fsPath ?? uri?.toString?.() ?? '';
+            bridge.send({
+              jsonrpc: '2.0', method: 'textDocument/applyEdits',
+              params: {
+                uri: uriStr,
+                edits: edits.map((e) => ({
+                  range: {
+                    start: { line: e.range.start.line, character: e.range.start.character },
+                    end: { line: e.range.end.line, character: e.range.end.character },
+                  },
+                  newText: e.newText,
+                })),
+              },
+            });
+          }
+          return result;
+        });
+        rpcRequest('commands/register', { command }).catch(() => {});
+        return { dispose: () => { commandRegistry.delete(command); } };
+      },
+
       async executeCommand<T>(command: string, ...args: any[]): Promise<T> {
         // Check local registry first
         if (commandRegistry.has(command)) {
@@ -3046,6 +3105,18 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
 
     // ── languages ──────────────────────────────────────────────────────
     languages: {
+      // languages.getLanguages() → registered language ids. Was an auto-stub
+      // returning undefined, so `(await getLanguages()).includes('python')`
+      // threw "Cannot read properties of undefined (reading 'includes')".
+      getLanguages(): Promise<string[]> {
+        return Promise.resolve([
+          'plaintext', 'json', 'jsonc', 'javascript', 'javascriptreact', 'typescript',
+          'typescriptreact', 'html', 'css', 'scss', 'less', 'python', 'rust', 'go',
+          'java', 'c', 'cpp', 'csharp', 'php', 'ruby', 'shellscript', 'powershell',
+          'yaml', 'xml', 'markdown', 'sql', 'swift', 'kotlin', 'dart', 'lua', 'r',
+          'perl', 'dockerfile', 'makefile', 'toml', 'ini', 'bat', 'vue', 'svelte',
+        ]);
+      },
       createDiagnosticCollection(name?: string) {
         // VS Code allows an unnamed collection; we still need a stable,
         // unique owner so the bridge can scope Monaco markers per-collection.
