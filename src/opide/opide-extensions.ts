@@ -1198,7 +1198,13 @@ export function registerOpideExtensions(): void {
 
       loadInstalledIds().then(() => render())
 
-      return { dispose() {} }
+      return {
+        dispose() {
+          // Cancel a pending search so it doesn't fire doSearch() into a
+          // detached panel after the view closes.
+          if (_debounceTimer) { clearTimeout(_debounceTimer); _debounceTimer = null }
+        },
+      }
     },
   })
 
