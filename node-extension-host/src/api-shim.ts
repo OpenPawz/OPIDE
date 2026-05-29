@@ -2539,6 +2539,89 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         }
       },
 
+      // vscode.window.createQuickPick() — the builder-style picker. Was an
+      // auto-stub returning undefined, so `createQuickPick().items = [...]`
+      // threw "Cannot set properties of undefined", which can abort an
+      // extension's activation outright. Return a real object whose show()
+      // delegates to the workbench quick-pick and fires selection/accept (or
+      // hide on cancel), covering the common create→set items→show→accept
+      // flow. (Live filtering / dynamically-updated items aren't bridged.)
+      createQuickPick(): any {
+        const onDidChangeValue = new VSCodeEvent<string>('qp.onDidChangeValue');
+        const onDidAccept = new VSCodeEvent<void>('qp.onDidAccept');
+        const onDidChangeSelection = new VSCodeEvent<any[]>('qp.onDidChangeSelection');
+        const onDidChangeActive = new VSCodeEvent<any[]>('qp.onDidChangeActive');
+        const onDidHide = new VSCodeEvent<void>('qp.onDidHide');
+        const onDidTriggerButton = new VSCodeEvent<any>('qp.onDidTriggerButton');
+        const onDidTriggerItemButton = new VSCodeEvent<any>('qp.onDidTriggerItemButton');
+        const qp: any = {
+          value: '', placeholder: '', title: undefined,
+          items: [], selectedItems: [], activeItems: [],
+          canSelectMany: false, busy: false, enabled: true, ignoreFocusOut: false,
+          step: undefined, totalSteps: undefined, buttons: [],
+          matchOnDescription: false, matchOnDetail: false, keepScrollPosition: false,
+          onDidChangeValue: onDidChangeValue.event,
+          onDidAccept: onDidAccept.event,
+          onDidChangeSelection: onDidChangeSelection.event,
+          onDidChangeActive: onDidChangeActive.event,
+          onDidHide: onDidHide.event,
+          onDidTriggerButton: onDidTriggerButton.event,
+          onDidTriggerItemButton: onDidTriggerItemButton.event,
+          show() {
+            rpcRequest('window/showQuickPick', {
+              items: qp.items || [],
+              options: {
+                placeHolder: qp.placeholder, title: qp.title,
+                canPickMany: qp.canSelectMany, ignoreFocusOut: qp.ignoreFocusOut,
+              },
+            }).then((picked: any) => {
+              if (picked == null) { onDidHide.fire(); return; }
+              const arr = Array.isArray(picked) ? picked : [picked];
+              qp.selectedItems = arr; qp.activeItems = arr;
+              onDidChangeSelection.fire(arr);
+              onDidAccept.fire();
+            }).catch(() => onDidHide.fire());
+          },
+          hide() { onDidHide.fire(); },
+          dispose() { /* nothing persistent */ },
+        };
+        return qp;
+      },
+
+      // vscode.window.createInputBox() — builder-style input. Same crash
+      // class as createQuickPick. show() delegates to the workbench input box.
+      createInputBox(): any {
+        const onDidChangeValue = new VSCodeEvent<string>('ib.onDidChangeValue');
+        const onDidAccept = new VSCodeEvent<void>('ib.onDidAccept');
+        const onDidHide = new VSCodeEvent<void>('ib.onDidHide');
+        const onDidTriggerButton = new VSCodeEvent<any>('ib.onDidTriggerButton');
+        const ib: any = {
+          value: '', placeholder: '', title: undefined, prompt: undefined, password: false,
+          buttons: [], step: undefined, totalSteps: undefined,
+          enabled: true, busy: false, ignoreFocusOut: false, valueSelection: undefined,
+          onDidChangeValue: onDidChangeValue.event,
+          onDidAccept: onDidAccept.event,
+          onDidHide: onDidHide.event,
+          onDidTriggerButton: onDidTriggerButton.event,
+          show() {
+            rpcRequest('window/showInputBox', {
+              options: {
+                value: ib.value, prompt: ib.prompt, placeHolder: ib.placeholder,
+                password: ib.password, title: ib.title, ignoreFocusOut: ib.ignoreFocusOut,
+              },
+            }).then((val: any) => {
+              if (val == null) { onDidHide.fire(); return; }
+              ib.value = val;
+              onDidChangeValue.fire(val);
+              onDidAccept.fire();
+            }).catch(() => onDidHide.fire());
+          },
+          hide() { onDidHide.fire(); },
+          dispose() { /* nothing persistent */ },
+        };
+        return ib;
+      },
+
       // VS Code's createOutputChannel has two shapes:
       //   createOutputChannel(name)                        → OutputChannel
       //   createOutputChannel(name, { log: true })         → LogOutputChannel
