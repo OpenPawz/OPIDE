@@ -2107,8 +2107,19 @@ function convertWorkspaceEdit(edit: any, monaco: any): any {
 
 async function handleConfigurationUpdate(params: any): Promise<void> {
   try {
-    const { section, value } = params || {}
-    if (!section) return
+    const { section, key, value, target } = params || {}
+    // The shim's getConfiguration(section).update(key, value) sends
+    // section + key SEPARATELY. The VS Code config store is keyed by
+    // the FULL dotted path (`section.key`). Previously this handler
+    // ignored `key` and called updateValue(section, value), which
+    // clobbered the entire section with a scalar (e.g.
+    // getConfiguration('myExt').update('flag', true) wrote
+    // myExt = true instead of myExt.flag = true). Reconstruct the
+    // dotted key. Either part may be absent: getConfiguration().update(
+    // 'a.b', v) sends only key; getConfiguration('a.b').update('', v)
+    // sends only section.
+    const fullKey = [section, key].filter((p) => p != null && p !== '').join('.')
+    if (!fullKey) return
 
     const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
     const { IConfigurationService } = await import(
@@ -2119,8 +2130,16 @@ async function handleConfigurationUpdate(params: any): Promise<void> {
     const configService = StandaloneServices.get(IConfigurationService) as any
     if (!configService?.updateValue) return
 
-    await configService.updateValue(section, value)
-    debugLog(`configuration/update: ${section} = ${JSON.stringify(value)}`)
+    // ConfigurationTarget: 1=Application/Global(User), 2=User, 3=Workspace,
+    // 4=WorkspaceFolder. monaco-vscode-api's updateValue takes the target
+    // as the 3rd arg; pass it through when the extension specified one so
+    // the write lands in the right scope (User vs Workspace).
+    if (target != null) {
+      await configService.updateValue(fullKey, value, target)
+    } else {
+      await configService.updateValue(fullKey, value)
+    }
+    debugLog(`configuration/update: ${fullKey} = ${JSON.stringify(value)}`)
   } catch (e) {
     debugLog(`configuration/update failed: ${e}`)
   }
