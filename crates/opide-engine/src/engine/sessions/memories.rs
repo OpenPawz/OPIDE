@@ -46,9 +46,14 @@ impl SessionStore {
             params![id, content, category, importance as i32, embedding, aid],
         )?;
 
-        // Sync FTS5 index
+        // Sync FTS5 index. memories_fts has no unique constraint on `id`
+        // (id is UNINDEXED), so INSERT OR REPLACE doesn't replace by id — it
+        // just appends a duplicate row keyed on a fresh rowid. Delete the
+        // existing row(s) first so re-storing the same id is a true upsert,
+        // not a source of duplicate keyword-search hits + index bloat.
+        conn.execute("DELETE FROM memories_fts WHERE id = ?1", params![id]).ok();
         conn.execute(
-            "INSERT OR REPLACE INTO memories_fts (id, content, category, agent_id) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO memories_fts (id, content, category, agent_id) VALUES (?1, ?2, ?3, ?4)",
             params![id, content, category, aid],
         ).ok(); // Best-effort FTS sync
         Ok(())
@@ -97,9 +102,11 @@ impl SessionStore {
                 id
             )));
         }
-        // Sync FTS5 index
+        // Sync FTS5 index (delete-then-insert; see store_memory — INSERT OR
+        // REPLACE appends a duplicate FTS row rather than replacing by id).
+        conn.execute("DELETE FROM memories_fts WHERE id = ?1", params![id]).ok();
         conn.execute(
-            "INSERT OR REPLACE INTO memories_fts (id, content, category, agent_id) \
+            "INSERT INTO memories_fts (id, content, category, agent_id) \
              SELECT id, content, category, agent_id FROM memories WHERE id = ?1",
             params![id],
         )
