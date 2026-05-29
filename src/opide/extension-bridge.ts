@@ -779,24 +779,10 @@ async function routeNotification(method: string, params: any, id?: number): Prom
       break
     }
 
-    // ── Secrets (stored in memory for now) ───────────────────────
-    case 'secrets/get': {
-      const key = params?.key || ''
-      if (id) sendResponse(id, _secretStore.get(key) ?? null)
-      break
-    }
-    case 'secrets/store': {
-      const storeKey = params?.key || ''
-      const storeVal = params?.value ?? ''
-      _secretStore.set(storeKey, storeVal)
-      if (id) sendResponse(id, null)
-      break
-    }
-    case 'secrets/delete': {
-      _secretStore.delete(params?.key || '')
-      if (id) sendResponse(id, null)
-      break
-    }
+    // Secrets used to be handled here in an in-memory Map, but the shim
+    // now persists them per-extension to disk in the sidecar (Node), so
+    // there's no longer a secrets/* RPC to service. See createSecretStorage
+    // in node-extension-host/src/api-shim.ts.
 
     // ── Commands ─────────────────────────────────────────────────
     case 'commands/list': {
@@ -1467,10 +1453,6 @@ function handleDecorationSet(params: any): void {
 function handleDecorationDisposeType(params: any): void {
   void getDecorations().then((d) => d.disposeDecorationType(params?.typeId))
 }
-
-// ─── In-memory secret store ─────────────────────────────────────────────────
-
-const _secretStore = new Map<string, string>()
 
 // ─── Registered language providers (for proxying requests back to sidecar) ──
 

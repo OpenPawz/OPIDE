@@ -11,6 +11,7 @@
 import { IpcBridge } from './ipc-bridge';
 import { EventEmitter } from 'events';
 import * as path from 'path';
+import * as fs from 'fs';
 
 // ─── Event infrastructure ────────────────────────────────────────────────────
 
@@ -3077,14 +3078,17 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
         logPath: path.join(storagePath, 'logs'),
         logUri: Uri.file(path.join(storagePath, 'logs')),
         extensionMode: 1, // Production
-        workspaceState: createMemento(),
-        globalState: createMemento(),
-        secrets: {
-          get: (key: string) => rpcRequest('secrets/get', { extensionId, key }),
-          store: (key: string, value: string) => rpcRequest('secrets/store', { extensionId, key, value }),
-          delete: (key: string) => rpcRequest('secrets/delete', { extensionId, key }),
-          onDidChange: new VSCodeEvent<any>('onDidChange').event,
-        },
+        workspaceState: createMemento(path.join(storagePath, 'workspaceState.json')),
+        globalState: createMemento(path.join(globalStoragePath, 'globalState.json')),
+        // SecretStorage. Persisted to a per-extension JSON file in the
+        // sidecar (a Node process, like VS Code's own extension host) so
+        // API keys survive restarts. Previously this round-tripped to an
+        // in-memory Map in the FRONTEND that (a) lost everything on restart
+        // and (b) keyed by `key` alone — ignoring extensionId — so two
+        // extensions storing "apiKey" clobbered each other. The
+        // globalStoragePath is already per-extension, giving us isolation
+        // for free. onDidChange now actually fires on store/delete.
+        secrets: createSecretStorage(path.join(globalStoragePath, 'secrets.json')),
         asAbsolutePath: (relativePath: string) => path.join(extPath, relativePath),
       };
     },
@@ -3216,19 +3220,93 @@ export function createVSCodeApi(bridge: IpcBridge, extensionPath: string, worksp
 }
 
 // Simple in-memory memento (persists within session, not across restarts yet)
-function createMemento() {
+// A vscode.Memento (globalState / workspaceState). When `filePath` is
+// given, the contents are loaded from that JSON file on creation and
+// re-written on every update — so extension state (Continue/Cline config,
+// onboarding flags, model selections) survives a restart instead of being
+// silently lost. Without a path it behaves as a pure in-memory store.
+function createMemento(filePath?: string) {
   const store = new Map<string, any>();
+  if (filePath) {
+    try {
+      if (fs.existsSync(filePath)) {
+        const obj = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        if (obj && typeof obj === 'object') {
+          for (const [k, v] of Object.entries(obj)) store.set(k, v);
+        }
+      }
+    } catch { /* corrupt/partial state — start fresh rather than crash activate */ }
+  }
+  const persist = () => {
+    if (!filePath) return;
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, JSON.stringify(Object.fromEntries(store)), 'utf-8');
+    } catch { /* best-effort; a failed write must not break update() */ }
+  };
   return {
     get<T>(key: string, defaultValue?: T): T {
       return store.has(key) ? store.get(key) : (defaultValue as T);
     },
     update(key: string, value: any): Promise<void> {
-      store.set(key, value);
+      // VS Code: updating with `undefined` removes the key.
+      if (value === undefined) store.delete(key);
+      else store.set(key, value);
+      persist();
       return Promise.resolve();
     },
     keys(): readonly string[] {
       return [...store.keys()];
     },
     setKeysForSync(keys: string[]): void {},
+  };
+}
+
+// A vscode.SecretStorage backed by a per-extension JSON file. The caller
+// passes a path under the extension's globalStoragePath, so two extensions
+// can't see or clobber each other's secrets. get/store/delete are async
+// (VS Code's contract) and onDidChange fires on store/delete so extensions
+// that watch for key rotation react. Plaintext-on-disk is the same
+// fallback VS Code uses when no OS keychain is available — and is strictly
+// better than the previous in-memory store that lost keys every restart.
+function createSecretStorage(filePath: string) {
+  const onDidChange = new VSCodeEvent<{ key: string }>('secrets.onDidChange');
+  let cache: Record<string, string> | null = null;
+  const load = (): Record<string, string> => {
+    if (cache) return cache;
+    cache = {};
+    try {
+      if (fs.existsSync(filePath)) {
+        const obj = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        if (obj && typeof obj === 'object') cache = obj as Record<string, string>;
+      }
+    } catch { /* corrupt store — start empty rather than crash */ }
+    return cache;
+  };
+  const save = () => {
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, JSON.stringify(cache ?? {}), 'utf-8');
+    } catch { /* best-effort */ }
+  };
+  return {
+    get(key: string): Promise<string | undefined> {
+      return Promise.resolve(load()[key]);
+    },
+    store(key: string, value: string): Promise<void> {
+      const s = load();
+      s[key] = value;
+      save();
+      onDidChange.fire({ key });
+      return Promise.resolve();
+    },
+    delete(key: string): Promise<void> {
+      const s = load();
+      delete s[key];
+      save();
+      onDidChange.fire({ key });
+      return Promise.resolve();
+    },
+    onDidChange: onDidChange.event,
   };
 }
