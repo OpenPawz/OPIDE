@@ -184,10 +184,32 @@ impl SessionStore {
     /// Delete an agent from a specific project.
     pub fn delete_agent(&self, project_id: &str, agent_id: &str) -> EngineResult<()> {
         let conn = self.conn.lock();
-        conn.execute(
+        let removed = conn.execute(
             "DELETE FROM project_agents WHERE project_id=?1 AND agent_id=?2",
             params![project_id, agent_id],
         )?;
+        // Clean up the agent's soul/persona files when it leaves its LAST
+        // project. agent_files are keyed by agent_id alone (shared across the
+        // agent's project memberships) with no FK to cascade, so a deleted
+        // agent's files would otherwise orphan forever. Guards:
+        //   - removed > 0: only when we actually removed a membership (so a
+        //     no-op delete, e.g. for the built-in agent, never touches files).
+        //   - agent_id != "default": never delete the main agent's persona.
+        //   - remaining == 0 (fail-safe to 1 on query error): only when no
+        //     other project still references this agent.
+        if removed > 0 && agent_id != "default" {
+            let remaining: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM project_agents WHERE agent_id=?1",
+                    params![agent_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(1);
+            if remaining == 0 {
+                conn.execute("DELETE FROM agent_files WHERE agent_id=?1", params![agent_id])
+                    .ok();
+            }
+        }
         Ok(())
     }
 
