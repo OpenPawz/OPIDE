@@ -145,21 +145,27 @@ pub async fn run_agent_turn(
                     the max tool rounds in Settings → Engine (currently {}).",
                     max_rounds, max_rounds
                 );
-                // Emit the fallback text so the frontend shows *something*
-                fire(
-                    app_handle,
-                    EngineEvent::Complete {
-                        session_id: session_id.to_string(),
-                        run_id: run_id.to_string(),
-                        text: final_text.clone(),
-                        tool_calls_count: 0,
-                        usage: None,
-                        model: None,
-                        total_rounds: Some(round),
-                        max_rounds: Some(max_rounds),
-                    },
-                );
             }
+            // Always emit Complete so the frontend unlocks. The Ok-branch
+            // caller in commands/chat.rs does NOT fire its own Complete — it
+            // relies on run_agent_turn emitting one before returning Ok. The
+            // prior code only fired Complete when final_text was empty, so a
+            // run that produced text in an earlier round and then kept calling
+            // tools until the cap returned with no terminal event, leaving the
+            // chat hung in the streaming state (input locked, spinner forever).
+            fire(
+                app_handle,
+                EngineEvent::Complete {
+                    session_id: session_id.to_string(),
+                    run_id: run_id.to_string(),
+                    text: final_text.clone(),
+                    tool_calls_count: 0,
+                    usage: None,
+                    model: None,
+                    total_rounds: Some(round),
+                    max_rounds: Some(max_rounds),
+                },
+            );
             return Ok(final_text);
         }
 
@@ -924,11 +930,26 @@ pub async fn run_agent_turn(
                             "[engine] Model ignored tool-loop redirect — hard-breaking agent turn"
                         );
                         messages.pop(); // remove the repeated assistant message
-                        return Ok(
-                            "I was stuck calling the same tools repeatedly and couldn't make \
-                            progress. Please try rephrasing your request or switching context."
-                                .to_string(),
+                        let stuck = "I was stuck calling the same tools repeatedly and couldn't \
+                            make progress. Please try rephrasing your request or switching context."
+                            .to_string();
+                        // Emit Complete before returning — the Ok-branch caller
+                        // does not fire its own terminal event, so returning Ok
+                        // bare here left the chat hung in the streaming state.
+                        fire(
+                            app_handle,
+                            EngineEvent::Complete {
+                                session_id: session_id.to_string(),
+                                run_id: run_id.to_string(),
+                                text: stuck.clone(),
+                                tool_calls_count: 0,
+                                usage: None,
+                                model: confirmed_model.clone(),
+                                total_rounds: Some(round),
+                                max_rounds: Some(max_rounds),
+                            },
                         );
+                        return Ok(stuck);
                     }
 
                     warn!(
