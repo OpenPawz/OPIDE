@@ -341,10 +341,11 @@ fn extractive_summarize(memories: &[&RetrievedMemory], max_chars: usize) -> Stri
             break;
         }
     }
-    if combined.len() > max_chars {
-        combined.truncate(max_chars);
-        combined.push('…');
-    }
+    // safe_truncate_in_place floors to a char boundary before truncating;
+    // String::truncate(max_chars) panics when max_chars lands inside a
+    // multi-byte codepoint, and `combined` is built from arbitrary memory /
+    // summary text (emoji, accents, CJK).
+    crate::engine::util::safe_truncate_in_place(&mut combined, max_chars, "…");
     combined
 }
 
@@ -360,10 +361,11 @@ fn compress_summaries(summaries: &[&str], max_chars: usize) -> String {
             break;
         }
     }
-    if combined.len() > max_chars {
-        combined.truncate(max_chars);
-        combined.push('…');
-    }
+    // safe_truncate_in_place floors to a char boundary before truncating;
+    // String::truncate(max_chars) panics when max_chars lands inside a
+    // multi-byte codepoint, and `combined` is built from arbitrary memory /
+    // summary text (emoji, accents, CJK).
+    crate::engine::util::safe_truncate_in_place(&mut combined, max_chars, "…");
     combined
 }
 
