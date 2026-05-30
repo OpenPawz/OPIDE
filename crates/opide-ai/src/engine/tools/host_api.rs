@@ -750,7 +750,10 @@ impl opide_sandbox::HostApi for OpideHostApi {
             use tauri::Emitter;
             let args_preview = {
                 let s = serde_json::to_string(args).unwrap_or_default();
-                if s.len() > 120 { format!("{}…", &s[..117]) } else { s }
+                // floor to a char boundary — JSON args can contain non-ASCII
+                // (paths/content with accents, emoji, CJK), and a raw &s[..117]
+                // panics when byte 117 lands inside a multi-byte codepoint.
+                if s.len() > 120 { format!("{}…", &s[..s.floor_char_boundary(117)]) } else { s }
             };
             let _ = self.app_handle.emit("sandbox-subtool-start", serde_json::json!({
                 "tool_name": name,
