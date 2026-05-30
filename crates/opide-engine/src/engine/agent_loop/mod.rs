@@ -413,7 +413,13 @@ pub async fn run_agent_turn(
                             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                             continue;
                         }
+                        // Non-transient (auth, 400 bad request, etc.) or final
+                        // attempt: stop. Retrying a non-retryable error with the
+                        // identical payload just burns quota/latency and delays
+                        // surfacing the failure — the prior code fell through and
+                        // let the `for` loop fire all 3 calls regardless.
                         last_err = err_str;
+                        break;
                     }
                 }
             }
