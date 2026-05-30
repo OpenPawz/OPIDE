@@ -82,7 +82,7 @@ impl CognitiveState {
                 &self.agent_id,
                 cognitive_event::CognitiveEventKind::SensoryPromoted {
                     entry_preview: if content.len() > 60 {
-                        format!("{}…", &content[..60])
+                        format!("{}…", crate::engine::util::safe_truncate(&content, 60))
                     } else {
                         content
                     },

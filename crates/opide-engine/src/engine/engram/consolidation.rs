@@ -837,7 +837,7 @@ fn extract_object(mem: &EpisodicMemory) -> String {
             // Truncate full content to keep object reasonable
             let full = &mem.content.full;
             if full.len() > 200 {
-                format!("{}...", &full[..200])
+                format!("{}...", crate::engine::util::safe_truncate(full, 200))
             } else {
                 full.clone()
             }
@@ -883,7 +883,7 @@ fn detect_gaps(store: &SessionStore) -> EngineResult<Vec<KnowledgeGap>> {
 
         for (id, content) in rows {
             let snippet = if content.len() > 80 {
-                format!("{}...", &content[..80])
+                format!("{}...", crate::engine::util::safe_truncate(&content, 80))
             } else {
                 content
             };

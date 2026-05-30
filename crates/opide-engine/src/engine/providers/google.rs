@@ -594,7 +594,7 @@ impl GoogleProvider {
                         } else {
                             log::debug!(
                                 "[engine] Google SSE: {}... ({}b)",
-                                &data[..500],
+                                crate::engine::util::safe_truncate(data, 500),
                                 data.len()
                             );
                         }

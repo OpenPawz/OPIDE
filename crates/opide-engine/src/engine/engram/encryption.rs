@@ -1132,7 +1132,7 @@ pub async fn llm_pii_scan(
             LLM_PII_SYSTEM_PROMPT,
             // Truncate to avoid token waste — PII is usually in the first ~500 chars
             if content.len() > 1000 {
-                &content[..1000]
+                crate::engine::util::safe_truncate(content, 1000)
             } else {
                 content
             }

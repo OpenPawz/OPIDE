@@ -77,7 +77,7 @@ fn build_summary_prompt(messages: &[StoredMessage]) -> Vec<Message> {
         if msg.role == "tool" {
             let name = msg.name.as_deref().unwrap_or("unknown");
             let output_preview = if msg.content.len() > 200 {
-                format!("{}… (truncated)", &msg.content[..200])
+                format!("{}… (truncated)", crate::engine::util::safe_truncate(&msg.content, 200))
             } else {
                 msg.content.clone()
             };
@@ -87,7 +87,7 @@ fn build_summary_prompt(messages: &[StoredMessage]) -> Vec<Message> {
             ));
         } else {
             let content_preview = if msg.content.len() > 500 {
-                format!("{}… (truncated)", &msg.content[..500])
+                format!("{}… (truncated)", crate::engine::util::safe_truncate(&msg.content, 500))
             } else {
                 msg.content.clone()
             };
