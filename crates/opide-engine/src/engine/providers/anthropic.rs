@@ -93,7 +93,7 @@ impl AnthropicProvider {
     }
 
     fn format_messages(messages: &[Message]) -> (Option<String>, Vec<Value>) {
-        let mut system = None;
+        let mut system: Option<String> = None;
         let mut formatted = Vec::new();
 
         let mut idx = 0;
@@ -101,7 +101,24 @@ impl AnthropicProvider {
             let msg = &messages[idx];
 
             if msg.role == Role::System {
-                system = Some(msg.content.as_text());
+                // Anthropic has a single top-level `system` field, so multiple
+                // system messages must be MERGED, not overwritten. The agent
+                // loop injects system messages mid-run every round (working
+                // memory / OPIDE_NOTES re-injection, momentum anchors,
+                // circuit-breaker nudges) on top of the main system prompt at
+                // index 0. Overwriting dropped the main prompt entirely after
+                // the first injection — the model lost its platform
+                // instructions, tool descriptions, persona, and workspace
+                // context. (Google's format_messages already merges; this
+                // brings Anthropic in line.)
+                let text = msg.content.as_text();
+                match &mut system {
+                    Some(existing) => {
+                        existing.push_str("\n\n");
+                        existing.push_str(&text);
+                    }
+                    None => system = Some(text),
+                }
                 idx += 1;
                 continue;
             }
@@ -779,5 +796,58 @@ impl AiProvider for AnthropicProvider {
     ) -> Result<Vec<StreamChunk>, ProviderError> {
         self.chat_stream_inner(messages, tools, model, temperature, thinking_level, tool_choice)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::types::{Message, MessageContent, Role};
+
+    fn sys(text: &str) -> Message {
+        Message {
+            role: Role::System,
+            content: MessageContent::Text(text.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Text(text.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn multiple_system_messages_are_merged_not_overwritten() {
+        // The main system prompt plus a mid-run injected nudge (working-memory
+        // re-injection, momentum anchor, circuit-breaker, etc.). Both must
+        // survive into the single Anthropic `system` field.
+        let messages = vec![
+            sys("MAIN PROMPT: you are the IDE agent with tools X, Y, Z."),
+            user("do the thing"),
+            sys("[SYSTEM] momentum check: keep going, do not restart."),
+        ];
+        let (system, formatted) = AnthropicProvider::format_messages(&messages);
+        let system = system.expect("system prompt must be present");
+        assert!(
+            system.contains("MAIN PROMPT"),
+            "main system prompt must not be dropped: {system}"
+        );
+        assert!(
+            system.contains("momentum check"),
+            "injected system nudge must be merged in: {system}"
+        );
+        // The user message is the only non-system turn.
+        assert_eq!(formatted.len(), 1);
+        assert_eq!(formatted[0]["role"].as_str(), Some("user"));
     }
 }
