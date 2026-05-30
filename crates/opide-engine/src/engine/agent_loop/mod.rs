@@ -1078,7 +1078,7 @@ pub async fn run_agent_turn(
                 let js_code = sandbox_enforcement::build_single_tool_sandbox_code(tc);
                 let batch_tc = sandbox_enforcement::make_execute_code_call(&js_code);
                 let tool_timer = telem::ToolTimer::start(&tc.function.name);
-                let result = crate::engine::tools::execute_tool(
+                let mut result = crate::engine::tools::execute_tool(
                     &batch_tc,
                     app_handle,
                     agent_id,
@@ -1088,6 +1088,27 @@ pub async fn run_agent_turn(
                     tool_timer.finish(&telem_collector, &telem_root_id, result.success);
                 tool_duration_total_ms += tool_ms;
                 tool_call_count += 1;
+
+                // Cap result size to avoid context blowouts, matching the
+                // default per-tool loop's 50KB ceiling. The force-sandbox path
+                // previously pushed unbounded IDE output (e.g. a large git diff
+                // or command dump) straight into message history. UTF-8 safe.
+                const MAX_TOOL_RESULT_BYTES: usize = 50_000;
+                if result.output.len() > MAX_TOOL_RESULT_BYTES {
+                    let original_len = result.output.len();
+                    let mut cut = MAX_TOOL_RESULT_BYTES;
+                    while cut > 0 && !result.output.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    result.output = format!(
+                        "{}...\n\n[TRUNCATED: result was {} bytes, capped at {}. Use more specific queries.]",
+                        &result.output[..cut], original_len, MAX_TOOL_RESULT_BYTES
+                    );
+                    warn!(
+                        "[engine] Forced IDE tool result truncated: {} was {} bytes → {}",
+                        tc.function.name, original_len, MAX_TOOL_RESULT_BYTES
+                    );
+                }
 
                 // Emit the tool result so the activity feed can stop the
                 // running timer and flip the row to done. The ToolRequest
