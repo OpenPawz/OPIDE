@@ -155,9 +155,20 @@ impl SessionStore {
     /// Delete a dashboard and all its canvas components.
     pub fn delete_dashboard(&self, id: &str) -> EngineResult<bool> {
         let conn = self.conn.lock();
-        // Delete child components first.
+        // Delete all dashboard-owned children first. foreign_keys is OFF, so
+        // the declared CASCADE never fires; canvas_components was handled but
+        // dashboard_tabs and dashboard_windows (both keyed by dashboard_id)
+        // were leaking and orphaning on every dashboard delete.
         conn.execute(
             "DELETE FROM canvas_components WHERE dashboard_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM dashboard_tabs WHERE dashboard_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM dashboard_windows WHERE dashboard_id = ?1",
             params![id],
         )?;
         let deleted = conn.execute("DELETE FROM dashboards WHERE id = ?1", params![id])?;
