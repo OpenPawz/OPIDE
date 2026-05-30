@@ -124,6 +124,16 @@ impl SessionStore {
     pub fn delete_session(&self, id: &str) -> EngineResult<()> {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
+        // The per-session Agent Canvas is owned by the session (cf.
+        // clear_canvas_session), but delete_session wasn't removing it, so a
+        // deleted session's canvas components orphaned. Delete them inline —
+        // calling clear_canvas_session here would re-lock the non-reentrant
+        // mutex and deadlock. (tasks/trade_history only reference session_id as
+        // context and are independent records, so they're intentionally kept.)
+        conn.execute(
+            "DELETE FROM canvas_components WHERE session_id = ?1",
+            params![id],
+        )?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(())
     }
