@@ -269,6 +269,23 @@ async fn execute_fetch(
         reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(8)
+            // §Security: re-validate every redirect hop. is_ssrf_target /
+            // check_dns_rebinding above only vet the *original* URL; reqwest's
+            // default policy would then follow a 302 to
+            // http://169.254.169.254/ or http://localhost/ straight into the
+            // internal target. Block any hop that resolves to an SSRF target
+            // and cap the chain ourselves. (Residual: a redirect to an
+            // attacker hostname that DNS-rebinds to a private IP isn't caught
+            // here — the policy closure is sync and can't await a DNS lookup.)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if is_ssrf_target(attempt.url().as_str()) {
+                    attempt.error("SSRF blocked: redirect to internal/private address")
+                } else if attempt.previous().len() > 10 {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .expect("Failed to build fetch client")
     });
