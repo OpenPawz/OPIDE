@@ -107,7 +107,7 @@ pub async fn run_agent_turn(
                     );
                 } else {
                     let preview = if final_text.len() > 400 {
-                        format!("{}…", &final_text[..400])
+                        format!("{}…", &final_text[..final_text.floor_char_boundary(400)])
                     } else {
                         final_text.clone()
                     };
@@ -197,7 +197,7 @@ pub async fn run_agent_turn(
                     )
                 } else {
                     let preview = if final_text.len() > 600 {
-                        format!("{}…", &final_text[..600])
+                        format!("{}…", &final_text[..final_text.floor_char_boundary(600)])
                     } else {
                         final_text.clone()
                     };
@@ -263,7 +263,11 @@ pub async fn run_agent_turn(
                     if !notes.is_empty() {
                         // Cap at 12 000 chars to avoid blowing the context budget
                         let notes_trimmed = if notes.len() > 12_000 {
-                            format!("{}…[truncated — {} chars total]", &notes[..12_000], notes.len())
+                            format!(
+                                "{}…[truncated — {} chars total]",
+                                &notes[..notes.floor_char_boundary(12_000)],
+                                notes.len()
+                            )
                         } else {
                             notes.clone()
                         };
