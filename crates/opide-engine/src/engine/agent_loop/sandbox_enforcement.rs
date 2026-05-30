@@ -100,6 +100,15 @@ fn js_quote_json(args: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\x08' => out.push_str("\\b"),
             '\x0c' => out.push_str("\\f"),
+            // U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR are valid
+            // unescaped inside JSON strings (so a model can emit them in tool
+            // args), but in pre-ES2019 JS they are line terminators that are
+            // illegal unescaped inside a string literal. Since this output is
+            // embedded as a double-quoted JS literal for JSON.parse(...), an
+            // unescaped one would break the literal at lex time — the classic
+            // "JSON is not a subset of JS" hazard. Escape them explicitly.
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             c if (c as u32) < 0x20 => {
                 out.push_str(&format!("\\u{:04x}", c as u32));
             }
@@ -441,6 +450,19 @@ mod tests {
         let q = js_quote_json("line1\nline2\ttab");
         assert!(q.contains("\\n"));
         assert!(q.contains("\\t"));
+    }
+
+    #[test]
+    fn js_quote_json_escapes_line_and_paragraph_separators() {
+        // U+2028 / U+2029 are legal unescaped in JSON but break a pre-ES2019
+        // JS string literal. They must be emitted as   /   so the
+        // generated JSON.parse("...") literal survives the JS lexer.
+        let q = js_quote_json("before\u{2028}after\u{2029}end");
+        assert!(q.contains("\\u2028"), "U+2028 must be escaped: {}", q);
+        assert!(q.contains("\\u2029"), "U+2029 must be escaped: {}", q);
+        // The raw separators must NOT appear unescaped in the output.
+        assert!(!q.contains('\u{2028}'));
+        assert!(!q.contains('\u{2029}'));
     }
 
     // ── B196 auto-approve scope ────────────────────────────────
