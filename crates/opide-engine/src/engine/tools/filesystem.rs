@@ -12,6 +12,27 @@ use log::{info, warn};
 // silently skipped the path OPIDE actually uses.
 use crate::engine::util::{looks_like_credential_value, SENSITIVE_PATHS};
 
+/// Lexically fold `.` and `..` path components without touching the
+/// filesystem. Used to confine paths that don't exist yet (and therefore
+/// can't be canonicalized): a trailing `..` must not survive into the
+/// `Path::starts_with` workspace check, which only compares component
+/// prefixes and would otherwise be fooled by `<workspace>/../escape`.
+/// `..` pops the previous component and never walks above the path root.
+fn lexical_normalize(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Resolve a raw path (absolute or relative to agent workspace) into a
 /// canonicalized `PathBuf`.  Returns `Err` if the path escapes the agent
 /// workspace via `..` traversal or targets a sensitive location.
@@ -48,11 +69,20 @@ fn resolve_and_validate(
             })?;
             canon_parent.join(resolved.file_name().unwrap_or_default())
         } else {
-            // Parent doesn't exist yet — use the raw resolved path but check for `..`
-            resolved.clone()
+            // Neither the target nor its parent exists, so the filesystem
+            // can't resolve `..` for us. Fold `.`/`..` lexically before the
+            // confinement check below. Without this, a path like
+            // `<workspace>/../../../etc/cron.d/x` (parent absent) keeps its
+            // `..` components, and `Path::starts_with` — a purely lexical
+            // *prefix* check — returns true for it, so `in_workspace` passes
+            // and the allowlist/sensitive gates are skipped. The OS would then
+            // resolve `..` at create_dir_all/write time and escape the
+            // workspace. write_file is tier-2 auto-approved, so this happened
+            // with no user prompt.
+            lexical_normalize(&resolved)
         }
     } else {
-        resolved.clone()
+        lexical_normalize(&resolved)
     };
 
     // B132: enforce workspace confinement on every call, not only when the
@@ -536,5 +566,41 @@ async fn execute_delete_file(args: &serde_json::Value, agent_id: &str) -> Engine
         std::fs::remove_file(&resolved)
             .map_err(|e| format!("Failed to delete file '{}': {}", path, e))?;
         Ok(format!("Deleted file '{}'", path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lexical_normalize;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn folds_parent_segments_so_starts_with_cannot_be_fooled() {
+        let ws = Path::new("/data/agents/x/workspace");
+        // A traversal that escapes the workspace once `..` is resolved.
+        let escaping = Path::new("/data/agents/x/workspace/../../../../etc/cron.d/evil");
+        let folded = lexical_normalize(escaping);
+        // After folding, the path no longer has the workspace as a prefix,
+        // so the confinement check (starts_with) correctly rejects it.
+        assert_eq!(folded, PathBuf::from("/etc/cron.d/evil"));
+        assert!(
+            !folded.starts_with(ws),
+            "folded escape path must not be confined to the workspace"
+        );
+    }
+
+    #[test]
+    fn keeps_legitimate_in_workspace_paths() {
+        let ws = Path::new("/data/agents/x/workspace");
+        let inside = Path::new("/data/agents/x/workspace/sub/./file.txt");
+        let folded = lexical_normalize(inside);
+        assert_eq!(folded, PathBuf::from("/data/agents/x/workspace/sub/file.txt"));
+        assert!(folded.starts_with(ws));
+    }
+
+    #[test]
+    fn parent_dir_never_walks_above_root() {
+        let folded = lexical_normalize(Path::new("/../../../etc/passwd"));
+        assert_eq!(folded, PathBuf::from("/etc/passwd"));
     }
 }
