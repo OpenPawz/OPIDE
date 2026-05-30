@@ -1077,12 +1077,36 @@ pub async fn run_agent_turn(
 
                 let js_code = sandbox_enforcement::build_single_tool_sandbox_code(tc);
                 let batch_tc = sandbox_enforcement::make_execute_code_call(&js_code);
+                let tool_timer = telem::ToolTimer::start(&tc.function.name);
                 let result = crate::engine::tools::execute_tool(
                     &batch_tc,
                     app_handle,
                     agent_id,
                 )
                 .await;
+                let tool_ms =
+                    tool_timer.finish(&telem_collector, &telem_root_id, result.success);
+                tool_duration_total_ms += tool_ms;
+                tool_call_count += 1;
+
+                // Emit the tool result so the activity feed can stop the
+                // running timer and flip the row to done. The ToolRequest
+                // above started a 1-second duration ticker keyed by tool_call_id;
+                // without a matching ToolResultEvent the row spins until the
+                // run's final Complete clears every timer. (The default per-tool
+                // loop below already does this; the force-sandbox branch was
+                // missing it.)
+                fire(
+                    app_handle,
+                    EngineEvent::ToolResultEvent {
+                        session_id: session_id.to_string(),
+                        run_id: run_id.to_string(),
+                        tool_call_id: tc.id.clone(),
+                        output: result.output.clone(),
+                        success: result.success,
+                        duration_ms: Some(tool_ms),
+                    },
+                );
 
                 messages.push(Message {
                     role: Role::Tool,
@@ -1232,12 +1256,17 @@ pub async fn run_agent_turn(
                 thought_parts: Vec::new(),
             };
 
+            let batch_timer = telem::ToolTimer::start("execute_code");
             let result = crate::engine::tools::execute_tool(
                 &batch_tc,
                 app_handle,
                 agent_id,
             )
             .await;
+            let batch_ms =
+                batch_timer.finish(&telem_collector, &telem_root_id, result.success);
+            tool_duration_total_ms += batch_ms;
+            tool_call_count += 1;
 
             // The assistant message with tool_calls was already pushed earlier in this
             // iteration (in the tool-call collection block above). Do NOT push it again —
@@ -1306,6 +1335,24 @@ pub async fn run_agent_turn(
                     format!("(batched with {} — sandbox output couldn't be split)",
                         tool_calls[0].function.name)
                 };
+
+                // Emit a per-tool result so each tool's activity-feed row
+                // stops its running timer and flips to done. The batch fired a
+                // ToolRequest per tool above; without a matching ToolResultEvent
+                // every batched tool spins until the run's final Complete. The
+                // batch ran as one sandbox call, so per-tool success/duration
+                // aren't individually known — report the batch outcome on each.
+                fire(
+                    app_handle,
+                    EngineEvent::ToolResultEvent {
+                        session_id: session_id.to_string(),
+                        run_id: run_id.to_string(),
+                        tool_call_id: tc.id.clone(),
+                        output: tc_output.clone(),
+                        success: result.success,
+                        duration_ms: Some(batch_ms),
+                    },
+                );
 
                 messages.push(Message {
                     role: Role::Tool,
