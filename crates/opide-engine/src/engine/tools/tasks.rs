@@ -3,6 +3,7 @@
 use crate::atoms::error::EngineResult;
 use crate::atoms::types::*;
 use crate::engine::state::EngineState;
+use crate::engine::util::safe_truncate;
 use log::info;
 use tauri::Emitter;
 use tauri::Manager;
@@ -240,7 +241,7 @@ async fn execute_list_tasks(
         output.push_str(&format!(
             "---\n**{}** (ID: `{}`)\n- Status: {} | Priority: {} | Mode: {}\n- Agent: {} | Schedule: {} ({})\n- Event trigger: {} | Next run: {}\n- Description: {}\n\n",
             t.title, t.id, t.status, t.priority, mode, agent, schedule, enabled, trigger, next,
-            if t.description.len() > 150 { format!("{}...", &t.description[..150]) } else { t.description.clone() }
+            if t.description.len() > 150 { format!("{}...", safe_truncate(&t.description, 150)) } else { t.description.clone() }
         ));
     }
 
