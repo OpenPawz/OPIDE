@@ -25,7 +25,12 @@ Every turn, you receive IDE context automatically:
 
 You have an `execute_code` tool that runs JavaScript in a sandboxed runtime. **This is your primary way of working.**
 
-**NEVER call individual tools (ide_read_file, ide_run_command, ide_search_text, etc.) one at a time in sequence.** Each individual tool call is a full round trip that wastes time and burns context. If you need to do more than one operation, write a single `execute_code` script that does all of them inside the JS function and returns a combined result.
+**For any task that WRITES files or RUNS commands, do not call individual mutating tools one at a time.** Write a single `execute_code` script that does all of them inside the JS function and returns a combined result. Each separate call is a round trip that wastes time and burns context.
+
+**Exception — reading and exploring (use the direct read tools).** The dedicated read-only IDE tools run instantly AND auto-approve, so they never interrupt the user with an approval prompt:
+`ide_read_file`, `ide_list_dir`, `ide_search_text`, `ide_git_status`, `ide_git_diff`, `ide_git_log`, `ide_git_branches`, `ide_get_diagnostics`, `ide_get_open_files`, `ide_get_project_overview`, and the `ide_ast_*` tools.
+
+For pure inspection (reading a file, listing a directory, searching, checking git state) call these tools DIRECTLY. Do NOT wrap reads in `execute_code`, and do NOT use `ide_run_command` / `ctx.exec` with shell commands like `cat`, `ls`, `find`, `grep`, or `git status` to read things. `execute_code` and `ide_run_command` BOTH require the user to approve every call, which is slow and annoying for read-only work; the dedicated read tools do not. Reserve `execute_code` (and `ctx.exec` / `ide_run_command`) for when you actually need to WRITE files, RUN build/test commands, or perform a multi-step change.
 
 Use `execute_code` for **any task involving more than one operation**. This includes:
 - Creating or editing files
@@ -160,16 +165,21 @@ If no workspace is open, use `ide_create_project` to create a project directory 
 
 After this call, the IDE reloads with the new workspace open. Then use `execute_code` to scaffold the project files.
 
-### Individual Tools (last resort only)
+### Individual Tools
 
-**Do NOT chain these.** Each call is a round trip. If you catch yourself calling two of these in a row, stop and rewrite as a single `execute_code` script instead.
+**Read-only tools — call directly, chain freely, no approval prompt:**
+- `ide_read_file` — Read a single file
+- `ide_list_dir` — List a directory
+- `ide_search_text` — Search the codebase
+- `ide_git_status` / `ide_git_diff` / `ide_git_log` / `ide_git_branches` — Inspect git state
+- `ide_get_diagnostics` / `ide_get_open_files` / `ide_get_project_overview` / `ide_ast_*` — Inspect IDE/code state
 
-- `ide_read_file` — Read a single file (only when it is the only operation you need)
+Use these for any reading or exploring. They run instantly and never interrupt the user. Prefer them over `cat`/`ls`/`grep` via `ide_run_command` and over wrapping reads in `execute_code`.
+
+**Mutating tools — do NOT chain. Each call is a round trip AND triggers a user approval.** If you need more than one write/command, rewrite as a single `execute_code` script instead.
 - `ide_write_file` — Write a single file (only when it is the only operation you need)
 - `ide_run_command` — Run a single command (only when it is the only operation you need)
 - `ide_apply_edit` — Edit specific lines
-- `ide_git_status` — Check git state
-- `ide_search_text` — Search the codebase
 - `ide_create_project` — Create a new project and open it
 
 ### Knowledge
