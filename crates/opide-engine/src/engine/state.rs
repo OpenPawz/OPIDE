@@ -685,13 +685,36 @@ impl EngineState {
 
         let mut client = EmbeddingClient::new(&cfg);
 
-        // Build fallback from the user's configured chat provider (if any).
+        // Build fallback from a configured chat provider that can actually
+        // embed. The chat default may be a provider with NO embeddings
+        // endpoint (Moonshot/Kimi, Anthropic, DeepSeek, Grok, Claude Code) —
+        // in that case embeddings 403/404 forever even though another
+        // configured provider (e.g. Google) can embed. Prefer the default
+        // when it is capable, otherwise pick the first configured provider
+        // that is. (Custom/OpenRouter/Azure are left in as plausibly
+        // OpenAI-compatible embedders.)
+        fn lacks_embeddings(kind: ProviderKind) -> bool {
+            matches!(
+                kind,
+                ProviderKind::Moonshot
+                    | ProviderKind::Anthropic
+                    | ProviderKind::DeepSeek
+                    | ProviderKind::Grok
+                    | ProviderKind::ClaudeCode
+            )
+        }
         let engine_cfg = self.config.lock();
         let provider = engine_cfg
             .default_provider
             .as_ref()
             .and_then(|dp| engine_cfg.providers.iter().find(|p| &p.id == dp))
-            .or_else(|| engine_cfg.providers.first());
+            .filter(|p| !p.api_key.is_empty() && !lacks_embeddings(p.kind))
+            .or_else(|| {
+                engine_cfg
+                    .providers
+                    .iter()
+                    .find(|p| !p.api_key.is_empty() && !lacks_embeddings(p.kind))
+            });
 
         if let Some(p) = provider {
             if !p.api_key.is_empty() {

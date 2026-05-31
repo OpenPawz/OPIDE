@@ -406,6 +406,15 @@ impl EmbeddingClient {
         text: &str,
         fb: &OpenAiFallback,
     ) -> EngineResult<Vec<f32>> {
+        // Google's embeddings API is NOT OpenAI-compatible (it uses
+        // models/{model}:embedContent, not /embeddings). The Auto route ends
+        // at this function, so when the configured embedding provider is
+        // Google we must dispatch to the Gemini-specific path or every embed
+        // POSTs OpenAI-format to Google and fails.
+        if fb.base_url.contains("generativelanguage.googleapis.com") {
+            return self.embed_google(text, fb).await;
+        }
+
         let base = fb.base_url.trim_end_matches('/');
         let url = if base.contains(".azure.com") {
             // Azure: embeddings endpoint with api-version
