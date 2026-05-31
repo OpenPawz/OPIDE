@@ -143,6 +143,131 @@ async fn close_chat_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 
+/// Build the native application menu (macOS menu bar + Windows/Linux window
+/// menu).
+///
+/// Accelerator policy: OPIDE runs a full VS Code workbench in the webview, and
+/// VS Code owns all the editor keybindings (Cmd+S/N/W/Z/F, Cmd+Shift+P, …). A
+/// native menu accelerator would intercept the keystroke BEFORE the webview
+/// sees it, which breaks context-aware bindings and, worse, native Undo/Redo
+/// (Cmd+Z) and Close-Window (Cmd+W) would shadow Monaco's own undo stack and
+/// VS Code's close-tab. So the editor-action items carry NO accelerator (they
+/// stay clickable; the keys flow to VS Code). Only universally-safe predefined
+/// accelerators are kept (clipboard, Quit, Hide, Minimize, Fullscreen), which
+/// do the same thing whether the OS or the webview handles them.
+///
+/// Custom items carry a dotted id (e.g. `file.save`) forwarded to the frontend
+/// via `menu-action`, which runs the matching VS Code workbench command.
+fn build_app_menu(
+    handle: &tauri::AppHandle,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    // App menu (shown under the app name on macOS).
+    let app_menu = Submenu::with_items(
+        handle,
+        "OPIDE",
+        true,
+        &[
+            &PredefinedMenuItem::about(handle, Some("About OPIDE"), Some(AboutMetadata::default()))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "app.settings", "Settings…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::services(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::hide(handle, None)?,
+            &PredefinedMenuItem::hide_others(handle, None)?,
+            &PredefinedMenuItem::show_all(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::quit(handle, None)?,
+        ],
+    )?;
+
+    let file_menu = Submenu::with_items(
+        handle,
+        "File",
+        true,
+        &[
+            &MenuItem::with_id(handle, "file.new", "New File", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "file.open", "Open File…", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "file.openFolder", "Open Folder…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "file.save", "Save", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "file.saveAs", "Save As…", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "file.saveAll", "Save All", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "file.closeEditor", "Close Editor", true, None::<&str>)?,
+        ],
+    )?;
+
+    let edit_menu = Submenu::with_items(
+        handle,
+        "Edit",
+        true,
+        &[
+            // Undo/Redo dispatch VS Code commands (no accelerator) so they hit
+            // Monaco's undo stack, not the webview's DOM undo.
+            &MenuItem::with_id(handle, "edit.undo", "Undo", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "edit.redo", "Redo", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(handle)?,
+            // Clipboard is identical whether the OS or webview handles it, so
+            // the standard Cmd+X/C/V/A accelerators are safe to keep.
+            &PredefinedMenuItem::cut(handle, None)?,
+            &PredefinedMenuItem::copy(handle, None)?,
+            &PredefinedMenuItem::paste(handle, None)?,
+            &PredefinedMenuItem::select_all(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "edit.find", "Find", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "edit.replace", "Replace", true, None::<&str>)?,
+        ],
+    )?;
+
+    let view_menu = Submenu::with_items(
+        handle,
+        "View",
+        true,
+        &[
+            &MenuItem::with_id(handle, "view.commandPalette", "Command Palette…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "view.explorer", "Explorer", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "view.search", "Search", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "view.scm", "Source Control", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "view.terminal", "Toggle Terminal", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::fullscreen(handle, None)?,
+        ],
+    )?;
+
+    let window_menu = Submenu::with_items(
+        handle,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(handle, None)?,
+            &PredefinedMenuItem::maximize(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            // Custom (no Cmd+W accelerator) so VS Code's Cmd+W = close-tab is
+            // preserved; this closes the whole window when clicked.
+            &MenuItem::with_id(handle, "window.close", "Close Window", true, None::<&str>)?,
+        ],
+    )?;
+
+    let help_menu = Submenu::with_items(
+        handle,
+        "Help",
+        true,
+        &[
+            &MenuItem::with_id(handle, "help.docs", "OPIDE Documentation", true, None::<&str>)?,
+        ],
+    )?;
+
+    Menu::with_items(
+        handle,
+        &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu, &help_menu],
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Increase tokio worker thread stack size from 2MB to 8MB.
@@ -265,6 +390,17 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        // ── Native application menu ───────────────────────────────────────────
+        .menu(|handle| build_app_menu(handle))
+        .on_menu_event(|app, event| {
+            use tauri::Emitter;
+            // Predefined items (copy/paste/undo/quit/…) are handled natively by
+            // the OS and don't reach here. Custom items carry a dotted id
+            // (e.g. "file.save"); forward it to the frontend, which runs the
+            // matching VS Code workbench command.
+            let id = event.id().as_ref().to_string();
+            let _ = app.emit("menu-action", id);
+        })
         // ── Startup background tasks ──────────────────────────────────────────
         .setup(|app| {
             // Set OPIDE identity on the default agent

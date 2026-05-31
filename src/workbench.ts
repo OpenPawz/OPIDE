@@ -577,6 +577,14 @@ export async function initializeDeferredFeatures(): Promise<void> {
     console.warn('[opide] Workspace listener setup failed:', e)
   }
 
+  // ─── Wire the native application menu to workbench commands ────────────────
+  try {
+    const { listenForMenuActions } = await import('./opide/app-menu.ts')
+    await listenForMenuActions()
+  } catch (e) {
+    console.warn('[opide] App-menu listener setup failed:', e)
+  }
+
   // ─── Apply OPIDE theme colors ─────────────────────────────────────────────
   await updateUserConfiguration(JSON.stringify({
     'workbench.colorCustomizations': {
