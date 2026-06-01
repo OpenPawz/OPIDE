@@ -194,6 +194,73 @@ async function loadInstalledIds(): Promise<void> {
   }
 }
 
+/** Semver-ish compare: is `latest` strictly newer than `installed`? Compares
+ *  major.minor.patch numerically; non-numeric / missing parts count as 0. */
+function isNewerVersion(latest: string, installed: string): boolean {
+  const a = latest.split('.').map((n) => parseInt(n, 10) || 0)
+  const b = installed.split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < 3; i++) {
+    const x = a[i] || 0
+    const y = b[i] || 0
+    if (x > y) return true
+    if (x < y) return false
+  }
+  return false
+}
+
+/** Read an installed extension's on-disk version from its package.json. */
+async function readInstalledVersion(id: string): Promise<string | null> {
+  try {
+    const home = (await homeDir()).replace(/\/$/, '')
+    const path = `${home}/.opide/extensions/${id}/package.json`
+    const r = await invoke<{ content?: string }>('ide_read_file', { path })
+    if (!r?.content) return null
+    return JSON.parse(r.content).version ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Best-effort: if Open VSX has a newer version than what's installed, inject
+ *  an "Update" button into the card's action row. Failures are silent. */
+async function checkForUpdate(id: string, card: HTMLElement): Promise<void> {
+  try {
+    const installed = await readInstalledVersion(id)
+    if (!installed) return
+    const publisher = id.split('.')[0]
+    const name = id.split('.').slice(1).join('.')
+    const detail = await fetchExtensionDetail(publisher, name)
+    const latest: string | undefined = detail?.version
+    if (!latest || !isNewerVersion(latest, installed)) return
+
+    const actions = card.querySelector('.opide-ext-actions')
+    if (!actions) return
+    const updBtn = document.createElement('button')
+    updBtn.className = 'opide-ext-uninstall-btn'
+    updBtn.style.background = '#1f6feb'
+    updBtn.style.borderColor = '#1f6feb'
+    updBtn.style.color = '#fff'
+    updBtn.textContent = `Update → ${latest}`
+    updBtn.title = `Installed v${installed}, latest v${latest}`
+    updBtn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      updBtn.disabled = true
+      updBtn.textContent = 'Updating…'
+      try {
+        // Reinstalling from Open VSX pulls the latest VSIX over the old one.
+        await installExtensionFromOpenVsx(id)
+      } catch (err) {
+        console.warn('[opide-ext] update failed:', err)
+        updBtn.disabled = false
+        updBtn.textContent = `Update → ${latest}`
+      }
+    })
+    actions.insertBefore(updBtn, actions.firstChild)
+  } catch {
+    // best-effort — no update badge on error
+  }
+}
+
 /** Toggle an extension between enabled and disabled, persist the set, then
  *  restart the host so the change applies (a disabled extension is skipped on
  *  the host's next scan). */
@@ -874,6 +941,10 @@ function renderInstalledTab(list: HTMLElement): void {
     actions.appendChild(unBtn)
     card.appendChild(actions)
     list.appendChild(card)
+
+    // Best-effort: check Open VSX for a newer version and add an Update
+    // button if one exists. Skipped for disabled extensions.
+    if (!isDisabled) void checkForUpdate(id, card)
   }
 }
 
