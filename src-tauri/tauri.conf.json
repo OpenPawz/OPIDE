@@ -38,13 +38,20 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "DeveloperTool",
+    "copyright": "Copyright © 2026 OpenPawz. All rights reserved.",
+    "shortDescription": "AI-native IDE",
+    "longDescription": "OPIDE is an AI-native desktop IDE built on Rust and Tauri with the VS Code workbench, a multi-agent coding engine, and codebase-aware memory.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
   },
   "plugins": {
     "shell": {
