@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Hardened-runtime entitlements for OPIDE.
+
+	  OPIDE is NOT App-Sandboxed on purpose: it is an IDE that needs
+	  unrestricted access to the user's project files and the ability to spawn
+	  build tools, git, a node extension-host sidecar, the claude CLI, and PTY
+	  shells. App Sandbox would break all of that. Hardened runtime (which
+	  notarization requires) is separate from App Sandbox and is applied by the
+	  Tauri bundler at sign time; these keys relax only the specific
+	  hardened-runtime restrictions OPIDE's runtime hits.
+	-->
+
+	<!-- The QuickJS/WASM execute_code sandbox and the WebKit webview JIT
+	     compile and run code in memory at runtime. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- The JS/WASM runtimes allocate executable memory that is not backed by
+	     a signed Mach-O on disk. -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- Load the bundled Node sidecar / native node addons (*.node) and other
+	     dylibs that are not signed by this team. Without this the hardened
+	     runtime refuses to load them and the extension host fails to start. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!-- The extension host and tool subprocesses are launched with custom
+	     environment (PATH, NODE_OPTIONS, etc.). -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>
