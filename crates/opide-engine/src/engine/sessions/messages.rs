@@ -4,6 +4,39 @@ use crate::engine::types::{ContentBlock, Message, MessageContent, Role, StoredMe
 use rusqlite::params;
 use std::collections::HashMap;
 
+/// Encrypt a chat message's content at rest if it contains PII or credentials,
+/// reusing the engram memory-encryption tiering (`detect_pii` catches API
+/// keys/tokens/passwords as well as SSNs/emails/etc). A user can paste a secret
+/// into chat, and chat history was stored in the clear. Ordinary messages stay
+/// plaintext — chat has no FTS index, so there is no search cost. Falls back to
+/// plaintext if no key is available or encryption fails.
+fn encrypt_message_if_sensitive(content: &str) -> String {
+    use crate::engine::engram::encryption;
+    if content.is_empty() || !encryption::detect_pii(content).has_pii {
+        return content.to_string();
+    }
+    match encryption::get_memory_encryption_key()
+        .and_then(|key| encryption::encrypt_memory_content(content, key.as_slice()))
+    {
+        Ok(enc) => enc,
+        Err(_) => content.to_string(),
+    }
+}
+
+/// Decrypt a stored message content if it was encrypted. Legacy and
+/// non-sensitive (plaintext) messages pass through unchanged via the
+/// `is_encrypted` discriminator, so existing history keeps loading and no
+/// migration is needed.
+fn decrypt_message_content(raw: String) -> String {
+    use crate::engine::engram::encryption;
+    if !encryption::is_encrypted(&raw) {
+        return raw;
+    }
+    encryption::get_memory_encryption_key()
+        .and_then(|key| encryption::decrypt_memory_content(&raw, key.as_slice()))
+        .unwrap_or_else(|_| "[encrypted message — decryption key unavailable]".to_string())
+}
+
 impl SessionStore {
     // ── Message CRUD ───────────────────────────────────────────────────
 
@@ -13,6 +46,9 @@ impl SessionStore {
         // B190: persist tool_success alongside the message so the compression
         // heuristic and post-mortem inspection don't have to scrape content
         // for "ERROR" prefixes.
+        // Encrypt at rest if the message contains PII/credentials (e.g. a
+        // pasted API key) — non-sensitive messages stay plaintext.
+        let stored_content = encrypt_message_if_sensitive(&msg.content);
         conn.execute(
             "INSERT INTO messages (id, session_id, role, content, tool_calls_json, tool_call_id, name, tool_success)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -20,7 +56,7 @@ impl SessionStore {
                 msg.id,
                 msg.session_id,
                 msg.role,
-                msg.content,
+                stored_content,
                 msg.tool_calls_json,
                 msg.tool_call_id,
                 msg.name,
@@ -81,7 +117,7 @@ impl SessionStore {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
                     role: row.get(2)?,
-                    content: row.get(3)?,
+                    content: decrypt_message_content(row.get(3)?),
                     tool_calls_json: row.get(4)?,
                     tool_call_id: row.get(5)?,
                     name: row.get(6)?,
@@ -696,5 +732,25 @@ impl SessionStore {
                 i += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod message_crypto_tests {
+    use super::{decrypt_message_content, encrypt_message_if_sensitive};
+
+    #[test]
+    fn ordinary_chat_message_stays_plaintext() {
+        // No PII/credentials → stored as-is so chat stays fast and (if ever
+        // indexed) searchable. This is the common case.
+        let msg = "fix the off by one bug in the parser loop";
+        assert_eq!(encrypt_message_if_sensitive(msg), msg);
+    }
+
+    #[test]
+    fn legacy_plaintext_message_decrypts_to_itself() {
+        // Existing history has no aes/version prefix; it must load unchanged.
+        let msg = "hello, can you help me refactor this module?";
+        assert_eq!(decrypt_message_content(msg.to_string()), msg);
     }
 }
