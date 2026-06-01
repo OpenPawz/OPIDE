@@ -30,6 +30,18 @@ let _editReviewListenerReady: Promise<void> | null = null
 let _unlistenEditReview: (() => void) | null = null
 let _unlistenToolRequest: (() => void) | null = null
 
+// Batch decision for "Accept All" / "Reject All". When set, subsequent edit
+// reviews in the SAME agent turn auto-apply that decision without a prompt.
+// SAFETY: this is reset at every turn boundary (resetBatchEditDecision is
+// called both when a turn starts and when it completes — see chat/streaming),
+// so the flag can never leak across turns and silently auto-write future edits.
+let _batchEditDecision: boolean | null = null
+
+/** Clear any active Accept-All/Reject-All decision. Called at turn boundaries. */
+export function resetBatchEditDecision(): void {
+  _batchEditDecision = null
+}
+
 
 // Track the most recently active terminal ID so agent command output
 // can be routed to the terminal panel the user already has open.
@@ -53,6 +65,12 @@ export function initEditReviewListener(): void {
   _editReviewListenerReady = listen<EditReviewRequest>('ide-edit-review', async (event) => {
     const req = event.payload
     console.log('[opide-tool-bridge] Edit review request:', req.path, req.request_id)
+    // If the user chose Accept-All / Reject-All earlier this turn, apply it
+    // without prompting again.
+    if (_batchEditDecision !== null) {
+      await sendReviewResponse(req.request_id, _batchEditDecision)
+      return
+    }
     try {
       await showEditReview(req)
     } catch (e) {
@@ -412,9 +430,52 @@ function showReviewToolbar(
     }
   })
 
+  // ── Accept All / Reject All — applies to the rest of THIS turn's edits ──
+  // Sets a batch decision so subsequent reviews auto-apply without a prompt.
+  // The decision is cleared at the next turn boundary (see resetBatchEditDecision).
+  const acceptAllBtn = document.createElement('button')
+  acceptAllBtn.textContent = 'Accept All'
+  acceptAllBtn.title = 'Accept this and all remaining edits this turn without prompting again'
+  acceptAllBtn.style.cssText = `
+    padding: 6px 12px; border: 1px solid #2ea043; border-radius: 4px; cursor: pointer;
+    font-size: 12px; background: transparent; color: #2ea043;
+  `
+  acceptAllBtn.addEventListener('click', async () => {
+    _batchEditDecision = true
+    acceptAllBtn.disabled = true
+    try {
+      await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: true })
+    } catch (e) {
+      console.warn('[edit-review] accept-all response failed:', e)
+    } finally {
+      cleanup()
+    }
+  })
+
+  const rejectAllBtn = document.createElement('button')
+  rejectAllBtn.textContent = 'Reject All'
+  rejectAllBtn.title = 'Reject this and all remaining edits this turn without prompting again'
+  rejectAllBtn.style.cssText = `
+    padding: 6px 12px; border: 1px solid #da3633; border-radius: 4px; cursor: pointer;
+    font-size: 12px; background: transparent; color: #da3633;
+  `
+  rejectAllBtn.addEventListener('click', async () => {
+    _batchEditDecision = false
+    rejectAllBtn.disabled = true
+    try {
+      await invoke('ide_edit_review_response', { requestId: req.request_id, accepted: false })
+    } catch (e) {
+      console.warn('[edit-review] reject-all response failed:', e)
+    } finally {
+      cleanup()
+    }
+  })
+
   toolbar.appendChild(label)
   toolbar.appendChild(acceptBtn)
   toolbar.appendChild(rejectBtn)
+  toolbar.appendChild(acceptAllBtn)
+  toolbar.appendChild(rejectAllBtn)
   document.body.appendChild(toolbar)
 }
 

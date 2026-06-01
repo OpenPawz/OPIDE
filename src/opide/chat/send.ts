@@ -41,6 +41,9 @@ export async function doSend(): Promise<void> {
   const content = S.textarea.value.trim()
   if (!content) return
 
+  // New turn — never inherit a previous turn's Accept-All/Reject-All decision.
+  import('../opide-tool-bridge.ts').then(({ resetBatchEditDecision }) => resetBatchEditDecision()).catch(() => {})
+
   // Phase B.B1: extension chat participants. If the user typed
   // `@<id> <prompt>` and <id> is a registered participant, route the
   // prompt to that extension's handler instead of OPIDE's engine. The

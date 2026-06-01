@@ -464,6 +464,9 @@ function handleSurfaced(ev: Extract<EngineEvent, { kind: 'surfaced' }>): void {
 // ─── Finalize Streaming ──────────────────────────────────────────────────────
 
 function finalizeStreaming(ev: Extract<EngineEvent, { kind: 'complete' }>): void {
+  // Turn ended — clear any Accept-All/Reject-All decision so it can't carry
+  // into the next turn and silently auto-apply edits without review.
+  import('../opide-tool-bridge.ts').then(({ resetBatchEditDecision }) => resetBatchEditDecision()).catch(() => {})
   // Clear thinking timer (fires when model skips straight to complete with no deltas)
   if (S.thinkingTimerInterval !== null) {
     clearInterval(S.thinkingTimerInterval)
