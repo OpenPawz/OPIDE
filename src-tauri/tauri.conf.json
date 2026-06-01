@@ -21,7 +21,7 @@
         "fullscreen": false,
         "decorations": true,
         "center": true,
-        "additionalBrowserArgs": "--enable-features=SharedArrayBuffer --disable-web-security --allow-file-access-from-files",
+        "additionalBrowserArgs": "--enable-features=SharedArrayBuffer",
       "devtools": true
       }
     ],
