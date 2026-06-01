@@ -60,6 +60,7 @@ let _results: OvsxExtension[] = []
 let _loading = false
 let _activeTab: 'marketplace' | 'installed' = 'marketplace'
 let _installedIds = new Set<string>()
+let _disabledIds = new Set<string>()
 let _installStatus = new Map<string, InstallStatus>()
 let _debounceTimer: ReturnType<typeof setTimeout> | null = null
 let _detailView: OvsxExtension | null = null
@@ -182,6 +183,37 @@ async function loadInstalledIds(): Promise<void> {
     // makes ide_list_dir reject. That's not an error from the user's
     // perspective — they just have nothing installed.
     _installedIds = new Set()
+  }
+
+  // Load the user-disabled set so the installed tab can show the right toggle.
+  try {
+    const disabled = await invoke<string[]>('ext_get_disabled')
+    _disabledIds = new Set(disabled ?? [])
+  } catch {
+    _disabledIds = new Set()
+  }
+}
+
+/** Toggle an extension between enabled and disabled, persist the set, then
+ *  restart the host so the change applies (a disabled extension is skipped on
+ *  the host's next scan). */
+async function toggleExtensionEnabled(id: string, btn: HTMLButtonElement): Promise<void> {
+  const willDisable = !_disabledIds.has(id)
+  btn.disabled = true
+  btn.textContent = willDisable ? 'Disabling…' : 'Enabling…'
+  if (willDisable) _disabledIds.add(id)
+  else _disabledIds.delete(id)
+  try {
+    await invoke('ext_set_disabled', { disabled: Array.from(_disabledIds) })
+    const { restartExtensionHost } = await import('./extension-bridge.ts')
+    await restartExtensionHost()
+  } catch (e) {
+    console.warn('[opide-ext] toggle enabled failed:', e)
+    // Roll back the in-memory state so the UI matches reality.
+    if (willDisable) _disabledIds.delete(id)
+    else _disabledIds.add(id)
+  } finally {
+    render()
   }
 }
 
@@ -799,9 +831,11 @@ function renderInstalledTab(list: HTMLElement): void {
     card.appendChild(makeIconPlaceholder(id))
     const info = document.createElement('div')
     info.className = 'opide-ext-info'
+    const isDisabled = _disabledIds.has(id)
     const name = document.createElement('div')
     name.className = 'opide-ext-name'
-    name.textContent = id.split('.').slice(1).join('.') || id
+    name.textContent = (id.split('.').slice(1).join('.') || id) + (isDisabled ? '  (disabled)' : '')
+    if (isDisabled) name.style.opacity = '0.55'
     info.appendChild(name)
     const pub = document.createElement('div')
     pub.className = 'opide-ext-publisher'
@@ -811,11 +845,24 @@ function renderInstalledTab(list: HTMLElement): void {
     const actions = document.createElement('div')
     actions.className = 'opide-ext-actions'
 
-    // Show apply button if we have cached metadata
+    // Show apply button if we have cached metadata (only when enabled)
     const cached = _extMetadataCache.get(id)
-    if (cached) {
+    if (cached && !isDisabled) {
       addApplyButton(actions, cached)
     }
+
+    // Enable / Disable toggle (keeps the extension installed either way).
+    const toggleBtn = document.createElement('button')
+    toggleBtn.className = 'opide-ext-uninstall-btn'
+    toggleBtn.style.background = 'transparent'
+    toggleBtn.style.borderColor = '#888'
+    toggleBtn.style.color = '#ccc'
+    toggleBtn.textContent = isDisabled ? 'Enable' : 'Disable'
+    toggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      toggleExtensionEnabled(id, toggleBtn)
+    })
+    actions.appendChild(toggleBtn)
 
     const unBtn = document.createElement('button')
     unBtn.className = 'opide-ext-uninstall-btn'

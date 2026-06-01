@@ -109,6 +109,28 @@ function parseArgs(): { extensionsPath: string; workspacePath: string } {
   return { extensionsPath, workspacePath };
 }
 
+/**
+ * Read the set of user-disabled extension ids from
+ * `<.opide>/disabled-extensions.json` (a JSON array of ids). Disabled
+ * extensions are skipped during scan so they neither register UI nor activate.
+ *
+ * Fail-open: any error (missing file, bad JSON) returns an empty set, so every
+ * extension loads exactly as it did before this feature existed. A bug here can
+ * never prevent extensions from loading.
+ */
+function readDisabledSet(extensionsPath: string): Set<string> {
+  try {
+    const fs = require('fs');
+    const file = path.join(path.dirname(extensionsPath), 'disabled-extensions.json');
+    if (!fs.existsSync(file)) return new Set();
+    const arr = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (Array.isArray(arr)) return new Set(arr.map((x: any) => String(x)));
+  } catch {
+    // fail open — load everything
+  }
+  return new Set();
+}
+
 // ─── Extension activation ────────────────────────────────────────────────────
 
 interface ActivatedExtension {
@@ -209,9 +231,17 @@ async function main() {
     return originalLoad.call(this, request, parent, isMain);
   };
 
-  // Scan for installed extensions
-  const extensions = scanExtensions(extensionsPath);
-  bridge.log(`Found ${extensions.length} extension(s)`);
+  // Scan for installed extensions, then drop any the user has disabled.
+  const scanned = scanExtensions(extensionsPath);
+  const disabled = readDisabledSet(extensionsPath);
+  const extensions = scanned.filter((ext) => {
+    if (disabled.has(ext.id)) {
+      bridge.log(`  ${ext.id} — disabled by user, skipping`);
+      return false;
+    }
+    return true;
+  });
+  bridge.log(`Found ${scanned.length} extension(s), ${extensions.length} enabled`);
 
   for (const ext of extensions) {
     bridge.log(`  ${ext.id} — main: ${ext.main ? 'yes' : 'no (web-only)'}`);

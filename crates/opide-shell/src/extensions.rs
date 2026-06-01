@@ -206,3 +206,44 @@ pub async fn ext_extract_vsix(vsix_path: String, target_dir: String) -> Result<(
 
     Ok(())
 }
+
+// ── Enable / disable persistence ────────────────────────────────────────────
+//
+// Disabled extension ids live in ~/.opide/disabled-extensions.json (a JSON
+// array). The node extension host reads this file on startup (see
+// node-extension-host/src/bootstrap.ts) and skips any extension whose id is
+// listed, so a disabled extension neither registers UI nor activates. Toggling
+// here is followed by an extension-host restart on the frontend to apply.
+
+fn disabled_extensions_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".opide").join("disabled-extensions.json"))
+}
+
+/// Return the list of currently-disabled extension ids (empty if none / file
+/// missing). Fail-soft: a parse error reports no disabled extensions rather
+/// than erroring, matching the host's fail-open loader.
+#[tauri::command]
+pub fn ext_get_disabled() -> Result<Vec<String>, String> {
+    let path = match disabled_extensions_path() {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    Ok(serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default())
+}
+
+/// Persist the full set of disabled extension ids. The frontend sends the
+/// complete list (not a delta), so this overwrites.
+#[tauri::command]
+pub fn ext_set_disabled(disabled: Vec<String>) -> Result<(), String> {
+    let path = disabled_extensions_path().ok_or_else(|| "no home directory".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string(&disabled).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
