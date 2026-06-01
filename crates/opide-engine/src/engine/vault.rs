@@ -151,6 +151,38 @@ fn decrypt_aes_gcm(encoded: &str, key: &[u8]) -> EngineResult<String> {
     String::from_utf8(plaintext).map_err(|e| EngineError::Other(e.to_string()))
 }
 
+/// Encrypt a sensitive config blob (the engine config holds provider API
+/// keys) for at-rest storage. Returns the `aes:`-prefixed ciphertext, or the
+/// value unchanged if it is already encrypted or the vault key is unavailable
+/// (so config still saves rather than failing). Idempotent.
+pub fn encrypt_config_value(value: &str) -> String {
+    if value.starts_with(AES_PREFIX) {
+        return value.to_string(); // already encrypted
+    }
+    match get_vault_key().and_then(|k| encrypt_credential(value, &k)) {
+        Ok(enc) => enc,
+        Err(e) => {
+            log::warn!(
+                "[vault] Config encryption unavailable, storing plaintext: {}",
+                e
+            );
+            value.to_string()
+        }
+    }
+}
+
+/// Decrypt a config blob read from storage. Legacy plaintext (no `aes:`
+/// prefix) is returned unchanged, so existing configs keep loading and get
+/// re-encrypted on the next save.
+pub fn decrypt_config_value(stored: &str) -> EngineResult<String> {
+    if stored.starts_with(AES_PREFIX) {
+        let key = get_vault_key()?;
+        decrypt_credential(stored, &key)
+    } else {
+        Ok(stored.to_string()) // legacy plaintext
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +199,22 @@ mod tests {
         assert!(encrypted.starts_with(AES_PREFIX));
         let decrypted = decrypt_credential(&encrypted, &key).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_config_value_passes_through_legacy_plaintext() {
+        // Existing installs have a plaintext engine_config (no aes: prefix).
+        // It MUST load unchanged so users don't lose their saved providers on
+        // upgrade; it gets re-encrypted on the next save.
+        let plain = r#"{"providers":[{"id":"openai","api_key":"sk-test"}]}"#;
+        assert_eq!(decrypt_config_value(plain).unwrap(), plain);
+    }
+
+    #[test]
+    fn encrypt_config_value_is_idempotent_on_ciphertext() {
+        // An already-encrypted value must not be double-encrypted.
+        let already = format!("{}ZGVhZGJlZWY=", AES_PREFIX);
+        assert_eq!(encrypt_config_value(&already), already);
     }
 
     #[test]
