@@ -269,7 +269,67 @@ fn build_app_menu(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Install a process-wide panic hook that records crashes locally.
+///
+/// Privacy-first: OPIDE never phones home. Panics are written to a local
+/// `crash.log` in the data dir (always works, even before the logger is up,
+/// so users can voluntarily attach it to a bug report) and to the structured
+/// app log once `tauri_plugin_log` has initialised. Without this a panic in a
+/// background thread would vanish to stderr and the crash would be invisible.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Structured app log (file once the logger is registered).
+        log::error!(
+            "[panic] thread '{}' panicked at {}: {}\n{}",
+            thread, location, msg, backtrace
+        );
+
+        // Dedicated crash.log — append so successive crashes accumulate.
+        let dir = opide_engine::engine::paths::paw_data_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("crash.log"))
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                f,
+                "[{ts}] PANIC thread='{thread}' at {location}: {msg}\n{backtrace}\n"
+            );
+        }
+
+        // Preserve default behaviour (prints to stderr).
+        default_hook(info);
+    }));
+}
+
 pub fn run() {
+    // Record crashes locally before anything else can panic (startup
+    // `.expect()` calls, background threads, the tokio runtime).
+    install_panic_hook();
+
     // Increase tokio worker thread stack size from 2MB to 8MB.
     // Concurrent AI tool execution and sandbox operations need deep stacks.
     // Leak the runtime so it lives for the entire process lifetime.
