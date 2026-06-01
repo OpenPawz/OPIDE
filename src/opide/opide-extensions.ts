@@ -1216,8 +1216,60 @@ async function doUninstall(extensionId: string, btn: HTMLButtonElement): Promise
 
 // ─── Registration ────────────────────────────────────────────────────────────
 
+/**
+ * Bind Cmd/Ctrl+Shift+X to OPIDE's Extensions panel. OPIDE hides VS Code's
+ * built-in extensions viewlet, so its default Cmd+Shift+X would open nothing;
+ * this action overrides it (high keybinding weight) and focuses our panel via
+ * the auto-generated `opide.extensions.focus` command that every registered
+ * view gets.
+ */
+async function registerExtensionsKeybinding(): Promise<void> {
+  try {
+    const { Action2, registerAction2 } = (await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions'
+    )) as any
+    if (!registerAction2 || !Action2) return
+
+    registerAction2(
+      class extends Action2 {
+        constructor() {
+          super({
+            id: 'opide.openExtensions',
+            title: {
+              value: 'Extensions: Open OPIDE Marketplace',
+              original: 'Extensions: Open OPIDE Marketplace',
+            },
+            f1: true,
+            keybinding: {
+              // CtrlCmd(2048) | Shift(1024) | KeyX(54). High weight so it beats
+              // the hidden built-in extensions viewlet's Cmd+Shift+X.
+              primary: 2048 | 1024 | 54,
+              weight: 1000,
+            },
+          })
+        }
+        async run(): Promise<void> {
+          try {
+            const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+            const { ICommandService } = await import(
+              '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+            )
+            const commandService = StandaloneServices.get(ICommandService) as any
+            await commandService?.executeCommand?.('opide.extensions.focus')
+          } catch (e) {
+            console.warn('[opide-ext] open extensions via keybinding failed:', e)
+          }
+        }
+      },
+    )
+  } catch (e) {
+    console.warn('[opide-ext] extensions keybinding registration failed:', e)
+  }
+}
+
 export function registerOpideExtensions(): void {
   injectStyles()
+  void registerExtensionsKeybinding()
 
   registerCustomView({
     id: 'opide.extensions',
