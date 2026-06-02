@@ -574,27 +574,6 @@ function injectStyles(): void {
       height: 100%;
       overflow: hidden;
     }
-    /* Center-editor pane: let content flow at a readable width and let the
-       pane's own scrollbar do the scrolling (VS Code extension-editor look). */
-    .opide-ext-detail-editor-host {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 8px 24px 32px;
-    }
-    .opide-ext-detail-editor-host .opide-ext-detail {
-      height: auto;
-      overflow: visible;
-      max-width: 920px;
-      margin: 0 auto;
-    }
-    .opide-ext-detail-editor-host .opide-ext-detail-body {
-      flex: none;
-      overflow: visible;
-      padding: 16px 0;
-    }
-    .opide-ext-detail-editor-host .opide-ext-detail-header {
-      padding: 16px 0;
-    }
     .opide-ext-detail-header {
       padding: 16px;
       display: flex;
@@ -972,34 +951,12 @@ function renderInstalledTab(list: HTMLElement): void {
 // ─── Detail View ─────────────────────────────────────────────────────────────
 
 async function openDetail(ext: OvsxExtension): Promise<void> {
-  // Preferred: open as a tab in the center editor area (VS Code-style). The
-  // pane fetches its own README/contributions, so we just open the input.
-  try {
-    const ok = await ensureExtensionDetailEditor()
-    extLog(`openDetail: ensure=${ok} ctor=${!!_ExtDetailInputCtor}`)
-    if (ok) {
-      const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
-      const { IEditorService } = await import(
-        '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService'
-      )
-      const editorService = StandaloneServices.get(IEditorService) as any
-      extLog(`openDetail: editorService=${!!editorService} openEditor=${typeof editorService?.openEditor}`)
-      if (editorService?.openEditor && _ExtDetailInputCtor) {
-        const result = await editorService.openEditor(new _ExtDetailInputCtor(ext), { pinned: true })
-        extLog(`openDetail: openEditor returned ${result ? 'a pane' : 'null/undefined'}`)
-        if (result) return
-        extLog('openDetail: openEditor returned falsy — falling back to sidebar')
-      }
-    }
-  } catch (e) {
-    extLog(`openDetail: center-editor threw: MSG="${(e as Error)?.message ?? ''}" NAME="${(e as Error)?.name ?? ''}"`)
-  }
-
-  // Fallback: render the detail inline in the sidebar (original behaviour).
   _detailView = ext
   _detailReadme = ''
   _initialized = false
   render()
+
+  // Fetch full details + README
   try {
     const detail = await fetchExtensionDetail(ext.publisher, ext.name)
     if (detail.files?.readme) {
@@ -1014,28 +971,17 @@ async function openDetail(ext: OvsxExtension): Promise<void> {
   render()
 }
 
-function renderDetailView(
-  container: HTMLElement,
-  ext: OvsxExtension = _detailView!,
-  readme: string = _detailReadme,
-  opts: { showBack?: boolean; onBack?: () => void; contributions?: boolean } = {},
-): void {
-  const showBack = opts.showBack !== false
+function renderDetailView(container: HTMLElement): void {
+  const ext = _detailView!
   const detail = document.createElement('div')
   detail.className = 'opide-ext-panel opide-ext-detail'
 
-  // Back button — sidebar only. In the center-editor pane the tab's close
-  // button is "back", so we omit it there.
-  if (showBack) {
-    const back = document.createElement('button')
-    back.className = 'opide-ext-detail-back'
-    back.innerHTML = '← Extensions'
-    back.addEventListener(
-      'click',
-      opts.onBack ?? (() => { _detailView = null; _detailReadme = ''; _initialized = false; render() }),
-    )
-    detail.appendChild(back)
-  }
+  // Back button
+  const back = document.createElement('button')
+  back.className = 'opide-ext-detail-back'
+  back.innerHTML = '← Extensions'
+  back.addEventListener('click', () => { _detailView = null; _detailReadme = ''; _initialized = false; render() })
+  detail.appendChild(back)
 
   // Header
   const header = document.createElement('div')
@@ -1107,20 +1053,16 @@ function renderDetailView(
   // Body — README
   const body = document.createElement('div')
   body.className = 'opide-ext-detail-body'
-  if (readme) {
-    body.innerHTML = readme
+  if (_detailReadme) {
+    body.innerHTML = _detailReadme
   } else {
     body.innerHTML = '<div class="opide-ext-loading"><div class="opide-ext-spinner"></div></div>'
   }
-  // Trackpad scroll fix — sidebar only. In the center-editor pane the body
-  // doesn't scroll itself (the pane's scrollbar does), so hijacking wheel
-  // here would swallow scroll and freeze the page.
-  if (showBack) {
-    body.addEventListener('wheel', (e) => {
-      e.stopPropagation()
-      body.scrollTop += e.deltaY
-    }, { passive: false })
-  }
+  // Trackpad scroll fix
+  body.addEventListener('wheel', (e) => {
+    e.stopPropagation()
+    body.scrollTop += e.deltaY
+  }, { passive: false })
   detail.appendChild(body)
 
   // Tags / categories
@@ -1152,190 +1094,7 @@ function renderDetailView(
     detail.appendChild(sidebar)
   }
 
-  // Feature Contributions ("options to use them" — commands, settings,
-  // keybindings, languages the extension declares). Editor-pane only; async,
-  // best-effort, appended after the rest renders.
-  if (opts.contributions) {
-    void appendContributions(detail, ext)
-  }
-
   container.appendChild(detail)
-}
-
-// ─── Center-editor detail pane (VS Code-style extension editor) ───────────────
-//
-// Clicking an extension opens its detail as a tab in the center editor area
-// (like VS Code), instead of cramming it into the sidebar. Built on the
-// workbench's SimpleEditorPane primitive. Defined lazily so a missing export
-// can never break the whole extensions panel — openDetail falls back to the
-// sidebar renderer if registration fails.
-
-let _ExtDetailInputCtor: any = null
-let _editorPaneInit = false
-
-/** Diagnostic logger that reaches OPIDE.log (frontend console.warn does not). */
-function extLog(msg: string): void {
-  try { invoke('ext_host_log', { message: `[opide-ext-editor] ${msg}` }).catch(() => {}) } catch { /* ignore */ }
-  console.warn(`[opide-ext-editor] ${msg}`)
-}
-
-async function ensureExtensionDetailEditor(): Promise<boolean> {
-  if (_editorPaneInit) return !!_ExtDetailInputCtor
-  _editorPaneInit = true
-  try {
-    extLog('ensure: importing workbench primitives')
-    const wb: any = await import('@codingame/monaco-vscode-workbench-service-override')
-    const { SimpleEditorInput, SimpleEditorPane, registerEditorPane } = wb
-    const { URI } = await import('@codingame/monaco-vscode-api/vscode/vs/base/common/uri')
-    extLog(`ensure: types input=${typeof SimpleEditorInput} pane=${typeof SimpleEditorPane} reg=${typeof registerEditorPane}`)
-    if (!SimpleEditorInput || !SimpleEditorPane || !registerEditorPane) { extLog('ensure: missing primitive, abort'); return false }
-
-    class ExtDetailInput extends SimpleEditorInput {
-      ext: OvsxExtension
-      constructor(ext: OvsxExtension) {
-        super(URI.from({ scheme: 'opide-extension', path: `/${ext.id}` }))
-        this.ext = ext
-        this.setName(`Extension: ${ext.displayName}`)
-      }
-      get typeId(): string { return 'opide.extensionDetail' }
-      matches(other: any): boolean {
-        return other instanceof ExtDetailInput && other.ext?.id === this.ext?.id
-      }
-    }
-
-    class ExtDetailPane extends SimpleEditorPane {
-      initialize(): HTMLElement {
-        const el = document.createElement('div')
-        el.className = 'opide-ext-detail-editor-host'
-        el.style.cssText = 'outline:none'
-        el.tabIndex = -1
-        return el
-      }
-      async renderInput(input: any): Promise<{ dispose(): void }> {
-        const ext: OvsxExtension = input.ext
-        const draw = (md: string) => {
-          this.container.innerHTML = ''
-          renderDetailView(this.container, ext, md, { showBack: false, contributions: true })
-        }
-        draw('') // immediate header + spinner
-        try {
-          const d = await fetchExtensionDetail(ext.publisher, ext.name)
-          const md = d?.files?.readme
-            ? (marked.parse(await fetchReadme(d.files.readme)) as string)
-            : `<p>${ext.description ?? ''}</p>`
-          draw(md)
-        } catch {
-          draw(`<p>${ext.description ?? ''}</p>`)
-        }
-        return { dispose() { /* container cleared on next setInput */ } }
-      }
-    }
-
-    registerEditorPane('opide.extensionDetail', 'Extension', ExtDetailPane as any, [ExtDetailInput as any])
-    _ExtDetailInputCtor = ExtDetailInput
-    extLog('ensure: registerEditorPane OK')
-    return true
-  } catch (e) {
-    extLog(`ensure: registration threw: ${(e as Error)?.stack || (e as Error)?.message || e}`)
-    return false
-  }
-}
-
-/** Read an installed extension's contributes from its package.json and render
- * a "Feature Contributions" section (commands, settings, keybindings,
- * languages, themes). Best-effort: silently does nothing if not installed. */
-async function appendContributions(parent: HTMLElement, ext: OvsxExtension): Promise<void> {
-  try {
-    const home = await homeDir()
-    const pkgPath = `${home.replace(/\/$/, '')}/.opide/extensions/${ext.id}/package.json`
-    const raw: any = await invoke('ide_read_file', { path: pkgPath })
-    const text: string = typeof raw === 'string' ? raw : (raw?.content ?? '')
-    if (!text) return
-    const pkg = JSON.parse(text)
-    const c = pkg?.contributes || {}
-
-    const section = document.createElement('div')
-    section.style.cssText = 'margin-top:20px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08)'
-    const h = document.createElement('div')
-    h.textContent = 'Feature Contributions'
-    h.style.cssText = 'font-size:13px;font-weight:600;color:var(--vscode-foreground,#ccc);margin-bottom:10px'
-    section.appendChild(h)
-
-    let any = false
-    const subhead = (t: string) => {
-      const s = document.createElement('div')
-      s.textContent = t
-      s.style.cssText = 'font-size:11px;font-weight:600;color:#E8B931;margin:12px 0 4px'
-      section.appendChild(s)
-    }
-
-    // Commands — runnable
-    if (Array.isArray(c.commands) && c.commands.length) {
-      any = true
-      subhead(`Commands (${c.commands.length})`)
-      for (const cmd of c.commands.slice(0, 60)) {
-        const row = document.createElement('div')
-        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0;font-size:11px;color:var(--vscode-descriptionForeground,#9d9d9d)'
-        const label = document.createElement('span')
-        label.textContent = (cmd.title ? `${cmd.title}` : cmd.command) + (cmd.category ? `  ·  ${cmd.category}` : '')
-        label.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-        const run = document.createElement('button')
-        run.textContent = 'Run'
-        run.style.cssText = 'flex-shrink:0;background:transparent;border:1px solid var(--vscode-input-border,#3c3c3c);color:#E8B931;border-radius:10px;padding:1px 10px;font-size:10px;cursor:pointer'
-        run.addEventListener('click', async () => {
-          try {
-            const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
-            const { ICommandService } = await import('@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands')
-            const cs = StandaloneServices.get(ICommandService) as any
-            await cs?.executeCommand?.(cmd.command)
-          } catch (e) { console.warn('[opide-ext] run command failed:', cmd.command, e) }
-        })
-        row.appendChild(label); row.appendChild(run)
-        section.appendChild(row)
-      }
-    }
-
-    // Settings
-    const cfg = c.configuration
-    const props = Array.isArray(cfg) ? Object.assign({}, ...cfg.map((x: any) => x?.properties || {})) : (cfg?.properties || {})
-    const settingKeys = Object.keys(props || {})
-    if (settingKeys.length) {
-      any = true
-      subhead(`Settings (${settingKeys.length})`)
-      for (const key of settingKeys.slice(0, 40)) {
-        const row = document.createElement('div')
-        row.style.cssText = 'padding:3px 0;font-size:11px'
-        const k = document.createElement('code')
-        k.textContent = key
-        k.style.cssText = 'color:var(--vscode-foreground,#ccc);background:rgba(255,255,255,0.05);padding:1px 5px;border-radius:3px'
-        const desc = props[key]?.description || props[key]?.markdownDescription || ''
-        row.appendChild(k)
-        if (desc) {
-          const d = document.createElement('div')
-          d.textContent = String(desc).replace(/`/g, '')
-          d.style.cssText = 'color:var(--vscode-descriptionForeground,#9d9d9d);margin-top:2px'
-          row.appendChild(d)
-        }
-        section.appendChild(row)
-      }
-    }
-
-    // Languages / Themes / Keybindings — counts only
-    const counts: string[] = []
-    if (Array.isArray(c.languages) && c.languages.length) counts.push(`${c.languages.length} language${c.languages.length === 1 ? '' : 's'}`)
-    if (Array.isArray(c.themes) && c.themes.length) counts.push(`${c.themes.length} theme${c.themes.length === 1 ? '' : 's'}`)
-    if (Array.isArray(c.keybindings) && c.keybindings.length) counts.push(`${c.keybindings.length} keybinding${c.keybindings.length === 1 ? '' : 's'}`)
-    if (counts.length) {
-      any = true
-      subhead('Also contributes')
-      const p = document.createElement('div')
-      p.textContent = counts.join(', ')
-      p.style.cssText = 'font-size:11px;color:var(--vscode-descriptionForeground,#9d9d9d)'
-      section.appendChild(p)
-    }
-
-    if (any) parent.appendChild(section)
-  } catch { /* not installed / no package.json — nothing to show */ }
 }
 
 // ─── Actions ─────────────────────────────────────────────────────────────────
@@ -1687,9 +1446,6 @@ export function registerOpideExtensions(): void {
   injectStyles()
   void suppressBuiltinExtensionsViewlet()
   void registerExtensionsKeybinding()
-  // Register the center-editor detail pane eagerly so it's ready before the
-  // first click (and so failures are logged at startup, not on first use).
-  void ensureExtensionDetailEditor()
 
   registerCustomView({
     id: 'opide.extensions',
