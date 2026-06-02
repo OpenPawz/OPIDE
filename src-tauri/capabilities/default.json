@@ -3,6 +3,10 @@
   "identifier": "default",
   "description": "OPIDE file system and core permissions",
   "windows": ["main", "opide-chat-detached"],
+  "local": true,
+  "remote": {
+    "urls": ["http://localhost:*"]
+  },
   "permissions": [
     "core:default",
     "fs:default",

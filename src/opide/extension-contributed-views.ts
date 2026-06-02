@@ -81,6 +81,26 @@ export interface PreMountedSlot {
 const _slots = new Map<string, PreMountedSlot>() // viewId → slot
 const _registeredExtensions = new Set<string>()
 
+/** Full registration record for every contributed view — including ones
+ * currently hidden by a `when` clause. Kept so that when a context key
+ * flips at runtime (extension calls setContext during activation) we can
+ * mount a view that just became eligible, or tear one down that no longer
+ * is. Without this, extensions like Claude Code that pick their sidebar
+ * view via `claude-code:doesNotSupportSecondarySidebar` (set AFTER
+ * pre-mount runs) never get their real view mounted. */
+interface ViewRecord {
+  extensionId: string
+  view: ExtContributedView
+  containerId: string
+  location: ViewContainerLocation
+  containerCodiconId?: string
+  onViewActivated: (viewId: string) => void
+  /** The registerCustomView disposable while this view is mounted; null
+   * when the view is unmounted (its `when` clause is currently false). */
+  disposable: { dispose(): void } | null
+}
+const _viewRecords = new Map<string, ViewRecord>() // viewId → record
+
 /** Used by extension-webview-views and extension-tree-views when a
  * provider is registered dynamically. They look up the slot here; if
  * found they attach to it and skip creating a fresh registerCustomView. */
@@ -119,8 +139,22 @@ export function markSlotAttached(viewId: string, mounter: (root: HTMLElement) =>
 const _contextKeys = new Map<string, any>()
 
 export function setContextKey(key: string, value: any): void {
+  const prev = _contextKeys.get(key)
   _contextKeys.set(key, value)
+  // Re-evaluate contributed views whose `when` clause may now flip.
+  // Only when the value actually changed — extensions spam setContext
+  // with unchanged values and we don't want to thrash the workbench.
+  // `truthy` only cares about truthiness, so compare on that.
+  if (!!prev !== !!value || !_contextKeysSeen.has(key)) {
+    _contextKeysSeen.add(key)
+    try { reevaluateViews() } catch (e) {
+      logToFile(`reevaluateViews after setContext("${key}") threw: ${String((e as Error)?.message || e)}`)
+    }
+  }
 }
+/** Keys we've already evaluated at least once — so the very first
+ * setContext for a key (prev === undefined) still triggers a pass. */
+const _contextKeysSeen = new Set<string>()
 
 function evalWhen(expr: string | undefined): boolean {
   if (!expr) return true
@@ -201,131 +235,33 @@ export function registerExtensionContributions(
   for (const c of containers) containerById.set(c.id, c)
 
   for (const v of views) {
-    if (_slots.has(v.id)) continue // already mounted (re-scan case)
+    if (_viewRecords.has(v.id)) continue // already processed (re-scan case)
 
     const container = containerById.get(v.containerId)
     const surface = container?.surface ?? 'sidebar'
     const location = pickContainerLocation(surface)
 
-    const slot: PreMountedSlot = {
+    const record: ViewRecord = {
       extensionId,
-      viewId: v.id,
+      view: v,
       containerId: v.containerId,
-      type: v.type,
-      bodyMounter: null,
-      attached: false,
-      rootEl: null,
+      location,
+      containerCodiconId: container?.codiconId,
+      onViewActivated,
+      disposable: null,
     }
-    _slots.set(v.id, slot)
+    _viewRecords.set(v.id, record)
 
-    // Race resolution: if the extension activated BEFORE pre-mount and
-    // already registered a webview-view / tree-view provider, that
-    // registration is sitting in extension-webview-views' pending
-    // queue. Drain it now so the slot mounts the real iframe instead
-    // of a "Activating…" placeholder. drainPendingForSlot returns
-    // true if it attached; we still proceed with registerCustomView
-    // so the slot exists in the workbench either way.
-    if (v.type === 'webview') {
-      const viewIdCapture = v.id
-      void import('./extension-webview-views.ts')
-        .then((m) => m.drainPendingForSlot?.(viewIdCapture))
-        .catch((e) => {
-          logToFile(`drainPendingForSlot import failed: ${String((e as Error)?.message || e)}`)
-        })
-    }
-    // Tree views currently don't have a pending queue (the race
-    // window doesn't manifest the same way for them); revisit if a
-    // tree-only extension hits the same symptom.
-
-    // Each view becomes its own custom view in the workbench. We use
-    // viewId as the workbench id so the user can identify which
-    // extension's view they're looking at; collisions across
-    // extensions would already be a manifest-level conflict.
-    //
-    // Defensive: any single bad contribution (malformed icon path,
-    // duplicate view id, monaco-vscode-api throwing inside the
-    // workbench layout service) is caught so it can't take down the
-    // whole pre-mount loop. Failures land in OPIDE.log via
-    // ext_host_log so the user can see them when tailing.
-    //
-    // Skip pre-mounting views whose `when` clause is currently false.
-    // This prevents the empty "Claude Code" duplicate tab that appears
-    // because Claude Code declares a primary + secondary view, only
-    // one of which should render based on
-    // `claude-code:doesNotSupportSecondarySidebar`. Real VS Code
-    // doesn't show a tab for hidden-by-when views either.
-    //
-    // Caveat: when clauses can flip at runtime via setContext. We
-    // currently don't re-register views when that happens. If users
-    // start hitting this we can add a per-clause subscription that
-    // calls registerCustomView on transition false→true.
+    // Honour `when` clauses at pre-mount. A view whose `when` is
+    // currently false stays in _viewRecords but isn't mounted yet —
+    // reevaluateViews() mounts it later if a setContext flips the key.
+    // This prevents the empty duplicate "Claude Code" tab while still
+    // mounting the right view once the extension picks its sidebar.
     if (v.when && !evalWhen(v.when)) {
-      logToFile(`pre-mount skip ${v.id}: when="${v.when}" evaluates false`)
-      _slots.delete(v.id)
+      logToFile(`pre-mount defer ${v.id}: when="${v.when}" evaluates false (will mount if it flips)`)
       continue
     }
-    try {
-      registerCustomView({
-        id: `opide-ext-cv-${v.id}`,
-        name: v.name,
-        location,
-        icon: container?.codiconId || iconCodiconForView(v.type),
-        renderBody: (root: HTMLElement) => {
-          traceLog(`renderBody fired for ${v.id} (ext=${extensionId}), bodyMounter=${slot.bodyMounter ? 'set' : 'null'}, when=${v.when ?? 'none'}`)
-          slot.rootEl = root
-          try {
-            // Honour `when` clauses. If the expression is currently
-            // false we show a placeholder; we don't unregister the
-            // view because context keys can flip later (extensions
-            // toggle them via setContext).
-            const whenOk = evalWhen(v.when)
-            traceLog(`renderBody ${v.id} when="${v.when ?? ''}" → ${whenOk}`)
-            if (!whenOk) {
-              renderHidden(root, v.name, 'View hidden by `when` clause.')
-              return { dispose() { slot.rootEl = null } }
-            }
-            // Trigger lazy onView:<id> activation. Whatever extension
-            // owns this view will activate; its registerWebviewView /
-            // registerTreeDataProvider call attaches to the slot via
-            // markSlotAttached, then the slot's body gets re-rendered.
-            try { onViewActivated(v.id) } catch (actErr) {
-              logToFile(`onViewActivated(${v.id}) threw: ${String((actErr as Error)?.message || actErr)}`)
-            }
-            if (slot.bodyMounter) {
-              try { slot.bodyMounter(root) } catch (e) {
-                renderError(root, v.name, String((e as Error)?.message || e))
-              }
-            } else {
-              // Show a small "loading" affordance until activation
-              // completes. Most extensions take 50-300ms to wire up
-              // their provider; if it never attaches we leave the
-              // affordance — better than a blank panel.
-              renderLoading(root, v.name, extensionId)
-            }
-          } catch (renderErr) {
-            // Catch-all so a bad render can't take the workbench
-            // layout down. The slot stays registered; the user can
-            // close + reopen it after the cause is fixed.
-            logToFile(
-              `renderBody for ${v.id} (${extensionId}) threw: ` +
-              String((renderErr as Error)?.message || renderErr),
-            )
-            try { renderError(root, v.name, String((renderErr as Error)?.message || renderErr)) } catch { /* ignore */ }
-          }
-          return {
-            dispose() {
-              slot.rootEl = null
-            },
-          }
-        },
-      })
-    } catch (e) {
-      logToFile(
-        `registerCustomView for ${v.id} (${extensionId}) failed: ` +
-        String((e as Error)?.message || e),
-      )
-      _slots.delete(v.id)
-    }
+    mountViewSlot(record)
   }
 
   // Container icons (activity bar entries) — TODO. The AuxiliaryBar
@@ -334,6 +270,144 @@ export function registerExtensionContributions(
   // When we wire ViewContainerLocation.Sidebar registration, the
   // container.iconPath / codiconId are read here.
   void containerById
+}
+
+/** Register a slot + custom view for one contributed view. Idempotent:
+ * if a slot already exists for the view we leave it alone. Captures the
+ * registerCustomView disposable on the record so reevaluateViews() can
+ * tear it down if the view's `when` clause later goes false. */
+function mountViewSlot(record: ViewRecord): void {
+  const v = record.view
+  if (_slots.has(v.id)) return // already mounted
+
+  const slot: PreMountedSlot = {
+    extensionId: record.extensionId,
+    viewId: v.id,
+    containerId: record.containerId,
+    type: v.type,
+    bodyMounter: null,
+    attached: false,
+    rootEl: null,
+  }
+  _slots.set(v.id, slot)
+
+  // Race resolution: if the extension activated BEFORE this slot was
+  // mounted and already registered a webview-view provider, that
+  // registration is sitting in extension-webview-views' pending queue.
+  // Drain it now so the slot mounts the real iframe instead of a
+  // placeholder. This is also the path that attaches Claude Code's
+  // primary view when its `when` key flips after activation.
+  if (v.type === 'webview') {
+    const viewIdCapture = v.id
+    void import('./extension-webview-views.ts')
+      .then((m) => m.drainPendingForSlot?.(viewIdCapture))
+      .catch((e) => {
+        logToFile(`drainPendingForSlot import failed: ${String((e as Error)?.message || e)}`)
+      })
+  }
+  // Tree views currently don't have a pending queue (the race window
+  // doesn't manifest the same way for them).
+
+  // Each view becomes its own custom view in the workbench. Defensive:
+  // any single bad contribution is caught so it can't take down the
+  // whole pre-mount loop. Failures land in OPIDE.log via ext_host_log.
+  try {
+    const disposable = registerCustomView({
+      id: `opide-ext-cv-${v.id}`,
+      name: v.name,
+      location: record.location,
+      icon: record.containerCodiconId || iconCodiconForView(v.type),
+      renderBody: (root: HTMLElement) => {
+        traceLog(`renderBody fired for ${v.id} (ext=${record.extensionId}), bodyMounter=${slot.bodyMounter ? 'set' : 'null'}, when=${v.when ?? 'none'}`)
+        slot.rootEl = root
+        try {
+          // Honour `when` clauses. If currently false we show a
+          // placeholder; reevaluateViews() will unmount the slot
+          // entirely when the key flips, so this is a transient state.
+          const whenOk = evalWhen(v.when)
+          traceLog(`renderBody ${v.id} when="${v.when ?? ''}" → ${whenOk}`)
+          if (!whenOk) {
+            renderHidden(root, v.name, 'View hidden by `when` clause.')
+            return { dispose() { slot.rootEl = null } }
+          }
+          // Trigger lazy onView:<id> activation. Whatever extension
+          // owns this view will activate; its registerWebviewView /
+          // registerTreeDataProvider call attaches to the slot via
+          // markSlotAttached, then the slot's body gets re-rendered.
+          try { record.onViewActivated(v.id) } catch (actErr) {
+            logToFile(`onViewActivated(${v.id}) threw: ${String((actErr as Error)?.message || actErr)}`)
+          }
+          if (slot.bodyMounter) {
+            try { slot.bodyMounter(root) } catch (e) {
+              renderError(root, v.name, String((e as Error)?.message || e))
+            }
+          } else {
+            // Show a small "loading" affordance until activation
+            // completes. Most extensions take 50-300ms to wire up
+            // their provider; if it never attaches we leave the
+            // affordance — better than a blank panel.
+            renderLoading(root, v.name, record.extensionId)
+          }
+        } catch (renderErr) {
+          logToFile(
+            `renderBody for ${v.id} (${record.extensionId}) threw: ` +
+            String((renderErr as Error)?.message || renderErr),
+          )
+          try { renderError(root, v.name, String((renderErr as Error)?.message || renderErr)) } catch { /* ignore */ }
+        }
+        return {
+          dispose() {
+            slot.rootEl = null
+          },
+        }
+      },
+    })
+    record.disposable = (disposable as { dispose(): void }) ?? null
+  } catch (e) {
+    logToFile(
+      `registerCustomView for ${v.id} (${record.extensionId}) failed: ` +
+      String((e as Error)?.message || e),
+    )
+    _slots.delete(v.id)
+  }
+}
+
+/** Tear down a view's workbench slot (its tab + panel) when its `when`
+ * clause goes false. We dispose the registerCustomView registration so
+ * the dead tab disappears instead of lingering as a "hidden by `when`"
+ * placeholder. The ViewRecord stays so it can be re-mounted if the key
+ * flips back. */
+function unmountViewSlot(record: ViewRecord): void {
+  const viewId = record.view.id
+  try { record.disposable?.dispose() } catch (e) {
+    logToFile(`unmount ${viewId}: dispose threw ${String((e as Error)?.message || e)}`)
+  }
+  record.disposable = null
+  const slot = _slots.get(viewId)
+  if (slot?.rootEl) { try { slot.rootEl.innerHTML = '' } catch { /* ignore */ } }
+  _slots.delete(viewId)
+}
+
+/** Re-evaluate every contributed view's `when` clause after a context
+ * key changes. Mounts views that just became eligible (and drains any
+ * webview provider waiting in the pending queue), and unmounts views
+ * that are no longer eligible. This is what fixes extensions like Claude
+ * Code that call setContext('claude-code:doesNotSupportSecondarySidebar')
+ * DURING activation — i.e. after our pre-mount already ran. */
+function reevaluateViews(): void {
+  for (const record of _viewRecords.values()) {
+    const v = record.view
+    if (!v.when) continue // unconditional views never change eligibility
+    const whenOk = evalWhen(v.when)
+    const mounted = _slots.has(v.id)
+    if (whenOk && !mounted) {
+      logToFile(`reevaluate: mounting ${v.id} (when="${v.when}" now true)`)
+      mountViewSlot(record)
+    } else if (!whenOk && mounted) {
+      logToFile(`reevaluate: unmounting ${v.id} (when="${v.when}" now false)`)
+      unmountViewSlot(record)
+    }
+  }
 }
 
 // ─── Slot body helpers ─────────────────────────────────────────────────

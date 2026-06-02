@@ -164,21 +164,32 @@ export function renderProviderSetup(): void {
         await invoke('engine_upsert_provider', {
           provider: { id: pDef.id, name: pDef.label, kind: pDef.id, api_key: keyInp.value.trim(), base_url: urlInp.value.trim() }
         })
-        const models = await invoke<string[]>('engine_list_provider_models', { providerId: pDef.id })
+        // The backend returns objects ({ id, name, context_window, max_output }),
+        // not bare strings. Normalise to a string id/label so chips don't render
+        // as "[object Object]".
+        type DiscoveredModel = string | { id?: string; name?: string }
+        const raw = await invoke<DiscoveredModel[]>('engine_list_provider_models', { providerId: pDef.id })
+        const modelIdOf = (m: DiscoveredModel): string =>
+          typeof m === 'string' ? m : (m?.id || m?.name || '')
+        const modelLabelOf = (m: DiscoveredModel): string =>
+          typeof m === 'string' ? m : (m?.name || m?.id || '')
+        const models = raw
+          .map((m) => ({ id: modelIdOf(m), label: modelLabelOf(m) }))
+          .filter((m) => m.id)
         discoverBtn.textContent = `${models.length} models found`
 
         const chips = document.createElement('div')
         chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:8px'
         for (const m of models.slice(0, 40)) {
           const c = document.createElement('button')
-          c.textContent = m
+          c.textContent = m.label
           c.style.cssText = 'background:var(--vscode-input-background,#1e1e1e);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:10px;padding:2px 8px;font-size:10px;cursor:pointer'
           c.addEventListener('click', () => {
-            modelInp.value = m
+            modelInp.value = m.id
             // Ensure the picked model survives Save — without this it would be
             // set as default but absent from `enabled_models`, hidden from the
             // model-selector dropdown after save.
-            enabledSet.add(m)
+            enabledSet.add(m.id)
             chips.querySelectorAll('button').forEach(b => { (b as HTMLElement).style.background = 'var(--vscode-input-background,#1e1e1e)'; (b as HTMLElement).style.color = 'var(--vscode-input-foreground,#ccc)' })
             c.style.background = '#E8B931'
             c.style.color = '#000'
@@ -190,7 +201,14 @@ export function renderProviderSetup(): void {
         chips.classList.add('model-chips')
         configArea.insertBefore(chips, saveBtn)
       } catch (e) {
-        discoverBtn.textContent = `Error: ${String(e).slice(0, 60)}`
+        // Some providers (Claude Code CLI, Google) don't support live model
+        // listing. That's not a real error — the built-in preset checkboxes
+        // above already cover them — so keep the message soft and re-enable.
+        const msg = String(e)
+        const soft = /unsupported|not support|transport error|list_models/i.test(msg)
+        discoverBtn.textContent = soft
+          ? 'No live list — use the presets above'
+          : `Error: ${msg.slice(0, 60)}`
         discoverBtn.disabled = false
       }
     })

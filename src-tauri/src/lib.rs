@@ -325,6 +325,21 @@ fn install_panic_hook() {
     }));
 }
 
+/// Pick a free TCP port on the loopback interface for the in-process
+/// localhost asset server (release builds). Binding to port 0 lets the OS
+/// choose an available port; we read it back, then drop the listener so
+/// the localhost plugin can bind it. The tiny race window between drop and
+/// re-bind is acceptable on loopback. Falls back to a fixed high port if
+/// probing fails for any reason.
+#[cfg(not(debug_assertions))]
+fn pick_localhost_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|addr| addr.port())
+        .unwrap_or(49317)
+}
+
 pub fn run() {
     // Record crashes locally before anything else can panic (startup
     // `.expect()` calls, background threads, the tokio runtime).
@@ -351,7 +366,20 @@ pub fn run() {
     // Initialize cognitive event bus (required before engram/working-memory calls).
     opide_engine::engine::engram::cognitive_event::init();
 
-    tauri::Builder::default()
+    // Release builds serve the bundled frontend over http://localhost:<port>
+    // (see the localhost plugin + window creation in setup() below) so VS Code
+    // extension webviews can register their service workers. WKWebView rejects
+    // serviceWorker.register() on the tauri:// custom protocol. Dev already runs
+    // on http://localhost:5180 (vite), so this only affects release.
+    #[cfg(not(debug_assertions))]
+    let localhost_port: u16 = pick_localhost_port();
+    #[cfg(not(debug_assertions))]
+    log::info!("[opide] serving frontend over http://localhost:{localhost_port}");
+
+    // `mut` is only used in release (the localhost plugin is added below under
+    // cfg(not(debug_assertions))); allow it so debug builds don't warn.
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
         // Webview resource loading is handled by monaco-vscode-api's
         // workbench webview service worker (registered via
         // @codingame/monaco-vscode-view-common-service-override).
@@ -462,7 +490,31 @@ pub fn run() {
             let _ = app.emit("menu-action", id);
         })
         // ── Startup background tasks ──────────────────────────────────────────
-        .setup(|app| {
+        .setup(move |app| {
+            // ── Create the main window ────────────────────────────────────
+            // We build it here (not in tauri.conf.json) so release can point
+            // it at the in-process localhost server while dev keeps the normal
+            // devUrl flow. Settings mirror the previous tauri.conf window.
+            {
+                use tauri::{WebviewUrl, WebviewWindowBuilder};
+                #[cfg(not(debug_assertions))]
+                let url = WebviewUrl::External(
+                    format!("http://localhost:{localhost_port}")
+                        .parse()
+                        .expect("valid localhost url"),
+                );
+                #[cfg(debug_assertions)]
+                let url = WebviewUrl::default();
+
+                WebviewWindowBuilder::new(app, "main", url)
+                    .title("OPIDE")
+                    .inner_size(1440.0, 900.0)
+                    .min_inner_size(900.0, 600.0)
+                    .resizable(true)
+                    .center()
+                    .build()?;
+            }
+
             // Set OPIDE identity on the default agent
             {
                 let state = app.state::<opide_engine::engine::state::EngineState>();
@@ -624,7 +676,23 @@ pub fn run() {
             commands::mcp::engine_mcp_connect,
             commands::mcp::engine_mcp_disconnect,
             commands::mcp::engine_mcp_execute_tool,
-        ])
+        ]);
+
+    // Localhost asset server (release only). Serves the bundled frontend over
+    // http://localhost:<port> so VS Code extension webview service workers can
+    // register (WKWebView rejects them on the tauri:// custom protocol).
+    // We intentionally do NOT set COOP/COEP here: dev already runs on a plain
+    // http://localhost origin with no such headers and extension webviews work
+    // there, while COEP `require-corp` would risk blocking cross-origin asset
+    // and IPC loads. Matching dev keeps behaviour identical and low-risk.
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.plugin(
+            tauri_plugin_localhost::Builder::new(localhost_port).build(),
+        );
+    }
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running OPIDE");
 }

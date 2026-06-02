@@ -1288,58 +1288,163 @@ async function doUninstall(extensionId: string, btn: HTMLButtonElement): Promise
 // ─── Registration ────────────────────────────────────────────────────────────
 
 /**
- * Bind Cmd/Ctrl+Shift+X to OPIDE's Extensions panel. OPIDE hides VS Code's
- * built-in extensions viewlet, so its default Cmd+Shift+X would open nothing;
- * this action overrides it (high keybinding weight) and focuses our panel via
- * the auto-generated `opide.extensions.focus` command that every registered
- * view gets.
+ * Remove VS Code's built-in extensions viewlet entirely.
+ *
+ * The "not available for the Web platform" gallery is the built-in
+ * `workbench.view.extensions` VIEW CONTAINER. Hiding its activity-bar
+ * icon with CSS (workbench.ts) is cosmetic — the container is still
+ * openable via the activity bar's pane-composite service, the command
+ * palette, and gallery links. Deregistering the container from the
+ * ViewContainersRegistry is the real fix: no icon, and nothing can open
+ * it because it no longer exists. OPIDE's own Open VSX panel is a
+ * separate container ('opide.extensions') and is unaffected; installs go
+ * through a direct Open VSX fetch, not this viewlet.
+ *
+ * Retries because the container is registered by a workbench contribution
+ * that may land slightly after deferred features start, and re-subscribes
+ * so a late/re-registration gets torn down too.
+ */
+async function suppressBuiltinExtensionsViewlet(): Promise<void> {
+  const VIEWLET_ID = 'workbench.view.extensions'
+  try {
+    const { Registry } = (await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/registry/common/platform'
+    )) as any
+    const { Extensions } = (await import(
+      '@codingame/monaco-vscode-api/vscode/vs/workbench/common/views'
+    )) as any
+    const registry = Registry.as(Extensions.ViewContainersRegistry) as any
+    if (!registry) return
+
+    const tryRemove = (): boolean => {
+      try {
+        const container = registry.get?.(VIEWLET_ID)
+        if (container) {
+          registry.deregisterViewContainer(container)
+          console.log('[opide-ext] removed built-in extensions viewlet')
+          return true
+        }
+      } catch (e) {
+        console.warn('[opide-ext] deregister extensions viewlet failed:', e)
+      }
+      return false
+    }
+
+    // Tear it down if it ever (re-)registers.
+    try {
+      registry.onDidRegister?.((e: any) => {
+        if (e?.viewContainer?.id === VIEWLET_ID) tryRemove()
+      })
+    } catch { /* event may not exist; retries below still cover it */ }
+
+    // Immediate + a few retries to win the startup race.
+    if (tryRemove()) return
+    let attempts = 0
+    const timer = setInterval(() => {
+      attempts++
+      if (tryRemove() || attempts >= 20) clearInterval(timer)
+    }, 500)
+  } catch (e) {
+    console.warn('[opide-ext] suppressBuiltinExtensionsViewlet failed:', e)
+  }
+}
+
+/** Focus OPIDE's own Extensions panel via its auto-generated focus command. */
+async function focusOpidePanel(): Promise<void> {
+  try {
+    const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+    const { ICommandService } = await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+    )
+    const commandService = StandaloneServices.get(ICommandService) as any
+    // Every registerCustomView view gets a `${viewId}.focus` command.
+    await commandService?.executeCommand?.('opide.extensions.focus')
+  } catch (e) {
+    console.warn('[opide-ext] focus OPIDE extensions panel failed:', e)
+  }
+}
+
+/**
+ * Make VS Code's built-in extensions gallery unreachable and route every
+ * entry point to OPIDE's own Open VSX panel.
+ *
+ * Two layers:
+ *  1. A high-weight Cmd/Ctrl+Shift+X action so the keybinding opens our panel.
+ *  2. Override the built-in viewlet/gallery command ids via CommandsRegistry
+ *     (newest registration wins) so the command palette, activity bar, and any
+ *     in-editor "open extension" links also redirect here instead of showing
+ *     the "not available for the Web platform" built-in gallery.
  */
 async function registerExtensionsKeybinding(): Promise<void> {
+  // ── Layer 1: keybinding action ──────────────────────────────────────────
   try {
     const { Action2, registerAction2 } = (await import(
       '@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions'
     )) as any
-    if (!registerAction2 || !Action2) return
-
-    registerAction2(
-      class extends Action2 {
-        constructor() {
-          super({
-            id: 'opide.openExtensions',
-            title: {
-              value: 'Extensions: Open OPIDE Marketplace',
-              original: 'Extensions: Open OPIDE Marketplace',
-            },
-            f1: true,
-            keybinding: {
-              // CtrlCmd(2048) | Shift(1024) | KeyX(54). High weight so it beats
-              // the hidden built-in extensions viewlet's Cmd+Shift+X.
-              primary: 2048 | 1024 | 54,
-              weight: 1000,
-            },
-          })
-        }
-        async run(): Promise<void> {
-          try {
-            const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
-            const { ICommandService } = await import(
-              '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
-            )
-            const commandService = StandaloneServices.get(ICommandService) as any
-            await commandService?.executeCommand?.('opide.extensions.focus')
-          } catch (e) {
-            console.warn('[opide-ext] open extensions via keybinding failed:', e)
+    if (registerAction2 && Action2) {
+      registerAction2(
+        class extends Action2 {
+          constructor() {
+            super({
+              id: 'opide.openExtensions',
+              title: {
+                value: 'Extensions: Open OPIDE Marketplace',
+                original: 'Extensions: Open OPIDE Marketplace',
+              },
+              f1: true,
+              keybinding: {
+                // CtrlCmd(2048) | Shift(1024) | KeyX(54). High weight so it beats
+                // the built-in extensions viewlet's Cmd+Shift+X.
+                primary: 2048 | 1024 | 54,
+                weight: 1000,
+              },
+            })
           }
-        }
-      },
-    )
+          async run(): Promise<void> {
+            await focusOpidePanel()
+          }
+        },
+      )
+    }
   } catch (e) {
     console.warn('[opide-ext] extensions keybinding registration failed:', e)
+  }
+
+  // ── Layer 2: override built-in gallery command ids ──────────────────────
+  // CommandsRegistry.registerCommand unshifts, so the most-recent registration
+  // wins and disposing restores the original. Redirecting these covers every
+  // non-keybinding route into the built-in gallery.
+  try {
+    const { CommandsRegistry } = (await import(
+      '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+    )) as any
+    if (CommandsRegistry?.registerCommand) {
+      const redirectIds = [
+        'workbench.view.extensions',
+        'workbench.extensions.action.showInstalledExtensions',
+        'workbench.extensions.action.installExtensions',
+        'workbench.extensions.action.showRecommendedExtensions',
+        'workbench.extensions.action.showPopularExtensions',
+        'workbench.extensions.action.listOutdatedExtensions',
+        'workbench.extensions.action.showExtensionsForLanguage',
+        'extension.open',
+      ]
+      for (const id of redirectIds) {
+        try {
+          CommandsRegistry.registerCommand(id, () => focusOpidePanel())
+        } catch (e) {
+          console.warn(`[opide-ext] could not override built-in command ${id}:`, e)
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[opide-ext] built-in gallery command override failed:', e)
   }
 }
 
 export function registerOpideExtensions(): void {
   injectStyles()
+  void suppressBuiltinExtensionsViewlet()
   void registerExtensionsKeybinding()
 
   registerCustomView({

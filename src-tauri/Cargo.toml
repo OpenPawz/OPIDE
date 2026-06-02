@@ -25,7 +25,7 @@ tokio.workspace = true
 uuid.workspace = true
 async-trait.workspace = true
 
-tauri = { version = "2.10.3", features = [] }
+tauri = { version = "2.10.3", features = ["devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-opener = "2"
@@ -33,6 +33,10 @@ tauri-plugin-shell = "2"
 tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+# Serve the bundled frontend over http://localhost in release so VS Code
+# extension webviews can register service workers (WKWebView rejects them
+# on the tauri:// custom protocol). Dev already runs on http://localhost.
+tauri-plugin-localhost = "2.3.2"
 
 # Utility (used in lib.rs for multi-window URL encoding)
 urlencoding = "2"

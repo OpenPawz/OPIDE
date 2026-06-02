@@ -10,21 +10,8 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [
-      {
-        "title": "OPIDE",
-        "width": 1440,
-        "height": 900,
-        "minWidth": 900,
-        "minHeight": 600,
-        "resizable": true,
-        "fullscreen": false,
-        "decorations": true,
-        "center": true,
-        "additionalBrowserArgs": "--enable-features=SharedArrayBuffer",
-      "devtools": true
-      }
-    ],
+    "withGlobalTauri": true,
+    "windows": [],
     "security": {
       "csp": null,
       "dangerousDisableAssetCspModification": true,
@@ -49,6 +36,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../node-extension-host/dist/*": "node-extension-host/dist/"
+    },
     "macOS": {
       "minimumSystemVersion": "10.15",
       "entitlements": "entitlements.plist"
