@@ -142,27 +142,44 @@ async fn check_dns_rebinding(url: &str) -> Result<(), String> {
 }
 
 pub fn definitions() -> Vec<ToolDefinition> {
-    vec![ToolDefinition {
-        tool_type: "function".into(),
-        function: FunctionDefinition {
-            name: "fetch".into(),
-            description: "Make an HTTP request to any URL. Returns the response body. Use for API calls, web scraping, downloading content, or any HTTP interaction.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string", "description": "The URL to fetch" },
-                    "method": {
-                        "type": "string",
-                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
-                        "description": "HTTP method (default: GET)"
+    vec![
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "fetch".into(),
+                description: "Make an HTTP request to any URL. Returns the response body. Use for API calls, web scraping, downloading content, or reading a specific web page.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "The URL to fetch" },
+                        "method": {
+                            "type": "string",
+                            "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+                            "description": "HTTP method (default: GET)"
+                        },
+                        "headers": { "type": "object", "description": "HTTP headers as key-value pairs" },
+                        "body": { "description": "Request body for POST/PUT/PATCH. Pass a JSON object directly (preferred) or a JSON string." }
                     },
-                    "headers": { "type": "object", "description": "HTTP headers as key-value pairs" },
-                    "body": { "description": "Request body for POST/PUT/PATCH. Pass a JSON object directly (preferred) or a JSON string." }
-                },
-                "required": ["url"]
-            }),
+                    "required": ["url"]
+                }),
+            },
         },
-    }]
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "web_search".into(),
+                description: "Search the web and return a ranked list of result titles, URLs, and snippets. Use this to find current information, documentation, or examples, then read a specific result with the `fetch` tool.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "The search query" },
+                        "max_results": { "type": "integer", "description": "Maximum results to return (default 8, max 15)" }
+                    },
+                    "required": ["query"]
+                }),
+            },
+        },
+    ]
 }
 
 pub async fn execute(
@@ -176,8 +193,148 @@ pub async fn execute(
                 .await
                 .map_err(|e| e.to_string()),
         ),
+        "web_search" => Some(
+            execute_web_search(args, app_handle)
+                .await
+                .map_err(|e| e.to_string()),
+        ),
         _ => None,
     }
+}
+
+// ── web_search ─────────────────────────────────────────────────────────────────
+//
+// Keyless web search via DuckDuckGo's HTML endpoint. We reuse execute_fetch so
+// the SSRF protection, redirect re-validation, and connection pool all apply.
+// The HTML is parsed for result anchors (format verified against the live
+// endpoint). Best-effort: if the page format changes and nothing parses, we
+// return a clear message instead of failing, and the agent can fall back to
+// fetching a search URL directly.
+
+async fn execute_web_search(
+    args: &serde_json::Value,
+    app_handle: &tauri::AppHandle,
+) -> EngineResult<String> {
+    let query = args["query"]
+        .as_str()
+        .ok_or("web_search: missing 'query' argument")?
+        .trim();
+    if query.is_empty() {
+        return Err("web_search: 'query' is empty".into());
+    }
+    let max = args["max_results"].as_u64().unwrap_or(8).clamp(1, 15) as usize;
+
+    // Build the DDG HTML search URL with a properly-encoded query.
+    let qs = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("q", query)
+        .finish();
+    let search_url = format!("https://html.duckduckgo.com/html/?{qs}");
+
+    info!("[engine] web_search: {}", query);
+
+    // Reuse the hardened fetch path. DDG needs a browser-like User-Agent.
+    let fetch_args = serde_json::json!({
+        "url": search_url,
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        }
+    });
+    let html = execute_fetch(&fetch_args, app_handle).await?;
+
+    let results = parse_ddg_results(&html, max);
+    if results.is_empty() {
+        return Ok(format!(
+            "web_search: no results parsed for \"{query}\". The search page may have \
+             changed format or rate-limited the request. You can retry, or fetch a \
+             search URL directly with the `fetch` tool."
+        ));
+    }
+
+    let mut out = format!("Web search results for \"{query}\":\n\n");
+    for (i, (title, link, snippet)) in results.iter().enumerate() {
+        out.push_str(&format!("{}. {title}\n   {link}\n", i + 1));
+        if !snippet.is_empty() {
+            out.push_str(&format!("   {snippet}\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str("Use the `fetch` tool on a result URL to read the full page.");
+    Ok(out)
+}
+
+/// Strip HTML tags and unescape common entities from a fragment.
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&#x2F;", "/")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Parse DuckDuckGo HTML results into (title, url, snippet) tuples. Format
+/// (verified live 2026-06): result anchors carry `class="result__a"` and link
+/// through `//duckduckgo.com/l/?uddg=<percent-encoded-target>`; snippets carry
+/// `class="result__snippet"`.
+fn parse_ddg_results(html: &str, max: usize) -> Vec<(String, String, String)> {
+    let decode_uddg = |raw_href: &str| -> Option<String> {
+        let unescaped = raw_href.replace("&amp;", "&");
+        let full = if let Some(rest) = unescaped.strip_prefix("//") {
+            format!("https://{rest}")
+        } else {
+            unescaped.clone()
+        };
+        url::Url::parse(&full).ok().and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "uddg")
+                .map(|(_, v)| v.into_owned())
+        })
+    };
+
+    let inner_text = |block: &str| -> String {
+        // Text between the anchor's opening-tag close ('>') and '</a>'.
+        block
+            .split_once('>')
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split("</a>").next())
+            .map(strip_html)
+            .unwrap_or_default()
+    };
+
+    let mut results: Vec<(String, String, String)> = Vec::new();
+    for block in html.split("class=\"result__a\"").skip(1) {
+        if results.len() >= max {
+            break;
+        }
+        let href = block
+            .split_once("href=\"")
+            .and_then(|(_, rest)| rest.split_once('"').map(|(h, _)| h))
+            .unwrap_or("");
+        let link = decode_uddg(href).unwrap_or_default();
+        let title = inner_text(block);
+        let snippet = block
+            .find("result__snippet")
+            .map(|i| inner_text(&block[i..]))
+            .unwrap_or_default();
+        if !title.is_empty() && link.starts_with("http") {
+            results.push((title, link, snippet));
+        }
+    }
+    results
 }
 
 async fn execute_fetch(

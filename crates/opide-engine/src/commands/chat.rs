@@ -20,6 +20,80 @@ use crate::engine::providers::AnyProvider;
 use crate::engine::types::*;
 use crate::engine::util::safe_truncate;
 
+// ── Project rules (Cursor-style workspace AI instructions) ─────────────────────
+
+/// Read project-level AI rules from the open workspace and format them as a
+/// system-prompt block. Honours OPIDE-native, emerging-standard, and Cursor
+/// formats so users can drop in rules from any of them:
+///   - `.opide/rules.md`         (OPIDE native)
+///   - `AGENTS.md` / `CLAUDE.md`  (emerging standards, repo root)
+///   - `.cursorrules`            (legacy Cursor)
+///   - `.cursor/rules/*.md|.mdc` (current Cursor)
+///
+/// All found sources are concatenated. Best-effort: unreadable/empty files are
+/// skipped, and the total is capped so a huge rules file can't blow the token
+/// budget. Returns None when no rules exist.
+fn read_project_rules(workspace: &str) -> Option<String> {
+    use std::path::{Path, PathBuf};
+    let root = Path::new(workspace);
+    let mut blocks: Vec<String> = Vec::new();
+
+    let read_trimmed = |p: &Path| -> Option<String> {
+        std::fs::read_to_string(p).ok().and_then(|t| {
+            let t = t.trim().to_string();
+            if t.is_empty() { None } else { Some(t) }
+        })
+    };
+
+    // Single-file sources, in priority order.
+    for rel in [".opide/rules.md", "AGENTS.md", "CLAUDE.md", ".cursorrules"] {
+        if let Some(t) = read_trimmed(&root.join(rel)) {
+            blocks.push(format!("### {rel}\n{t}"));
+        }
+    }
+
+    // Cursor rules directory: .cursor/rules/*.md and *.mdc (sorted for stability).
+    if let Ok(entries) = std::fs::read_dir(root.join(".cursor").join("rules")) {
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| x == "md" || x == "mdc")
+            })
+            .collect();
+        files.sort();
+        for p in files {
+            if let Some(t) = read_trimmed(&p) {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("rule");
+                blocks.push(format!("### .cursor/rules/{name}\n{t}"));
+            }
+        }
+    }
+
+    if blocks.is_empty() {
+        return None;
+    }
+
+    let mut joined = blocks.join("\n\n");
+    const MAX: usize = 16_000; // ~4K tokens — generous, but bounded.
+    if joined.len() > MAX {
+        crate::engine::util::safe_truncate_in_place(
+            &mut joined,
+            MAX,
+            "\n\n[project rules truncated to fit context]",
+        );
+    }
+
+    Some(format!(
+        "## Project Rules\n\
+         The user has defined project-specific rules for this workspace. Treat \
+         them as binding instructions that override general defaults where they \
+         conflict.\n\n{joined}"
+    ))
+}
+
 // ── Chat ─────────────────────────────────────────────────────────────────────
 
 /// Send a chat message and run the agent loop.
@@ -253,10 +327,24 @@ pub async fn engine_chat_send(
     state.store.add_message(&user_msg)?;
 
     // ── Base system prompt ─────────────────────────────────────────────────
-    let base_system_prompt = request.system_prompt.clone().or_else(|| {
+    let mut base_system_prompt = request.system_prompt.clone().or_else(|| {
         let cfg = state.config.lock();
         cfg.default_system_prompt.clone()
     });
+
+    // ── Project Rules (Cursor-style workspace AI instructions) ─────────────
+    // Read .opide/rules.md / AGENTS.md / CLAUDE.md / .cursorrules / .cursor/rules
+    // from the open workspace and fold them into the base prompt. Folding into
+    // base_system_prompt means BOTH the Engram ContextBuilder path and the
+    // compose_chat_system_prompt fallback pick them up from one place.
+    if let Some(ws) = state.active_workspace.lock().clone() {
+        if let Some(rules) = read_project_rules(&ws) {
+            base_system_prompt = Some(match base_system_prompt {
+                Some(bp) if !bp.trim().is_empty() => format!("{bp}\n\n{rules}"),
+                _ => rules,
+            });
+        }
+    }
 
     // ── Soul context + today's memories ───────────────────────────────────
     let agent_id_owned = request

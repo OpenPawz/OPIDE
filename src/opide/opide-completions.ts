@@ -42,10 +42,11 @@ async function isCompletionsEnabled(): Promise<boolean> {
   }
 }
 
-const COMPLETION_SYSTEM_PROMPT = `You are a code completion engine. Given code context up to the cursor position, output ONLY the next 1-5 lines of code that should follow. Rules:
+const COMPLETION_SYSTEM_PROMPT = `You are a fill-in-the-middle code completion engine. You receive the code BEFORE the cursor (prefix) and the code AFTER the cursor (suffix). Output ONLY the code to insert at the cursor so prefix + your_output + suffix forms correct code. Rules:
 - Output raw code only — no markdown, no explanations, no fences.
+- Do NOT repeat any code that already appears in the suffix.
 - Match the existing style, indentation, and patterns.
-- If unsure, output nothing (empty string).
+- Usually 1-5 lines. If nothing should be inserted, output nothing.
 - Be conservative — only suggest when you're confident.`
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -119,6 +120,14 @@ async function registerInlineProvider(): Promise<void> {
 
         const range = new (monaco as any).Range(1, 1, position.lineNumber, position.column)
         const codeBeforeCursor = model.getValueInRange(range)
+        // Suffix (code after the cursor) for fill-in-the-middle, so completions
+        // bridge into existing code instead of blindly continuing the prefix.
+        const lastLine = model.getLineCount()
+        const lastCol = model.getLineMaxColumn(lastLine)
+        const suffixRange = new (monaco as any).Range(
+          position.lineNumber, position.column, lastLine, lastCol,
+        )
+        const codeAfterCursor = model.getValueInRange(suffixRange)
         const language = model.getLanguageId()
         const filePath = model.uri.fsPath || model.uri.path
 
@@ -127,7 +136,7 @@ async function registerInlineProvider(): Promise<void> {
         let cancelled = false
         token.onCancellationRequested?.(() => { cancelled = true })
 
-        const suggestion = await requestCompletion(codeBeforeCursor, filePath, language)
+        const suggestion = await requestCompletion(codeBeforeCursor, codeAfterCursor, filePath, language)
         if (cancelled || !suggestion) return { items: [] }
 
         return {
@@ -162,12 +171,17 @@ async function registerInlineProvider(): Promise<void> {
  */
 export async function requestCompletion(
   codeBeforeCursor: string,
+  codeAfterCursor: string,
   filePath: string,
   language: string,
 ): Promise<string | null> {
-  // Trim context to last N lines
-  const lines = codeBeforeCursor.split('\n')
-  const context = lines.slice(-MAX_CONTEXT_LINES).join('\n')
+  // Prefix: last N lines before the cursor. Suffix: first M lines after, so the
+  // model can fill the middle without duplicating what already follows.
+  const prefix = codeBeforeCursor.split('\n').slice(-MAX_CONTEXT_LINES).join('\n')
+  const suffix = codeAfterCursor
+    .split('\n')
+    .slice(0, Math.max(8, Math.floor(MAX_CONTEXT_LINES / 2)))
+    .join('\n')
 
   await ensureCompletionListener()
 
@@ -177,7 +191,7 @@ export async function requestCompletion(
     invoke<{ run_id: string; session_id: string }>('engine_chat_send', {
       request: {
         session_id: COMPLETION_SESSION_ID,
-        message: `[File: ${filePath}] [Language: ${language}]\n\n${context}`,
+        message: `[File: ${filePath}] [Language: ${language}]\n\n<|prefix|>\n${prefix}\n<|cursor|>\n<|suffix|>\n${suffix}`,
         system_prompt: COMPLETION_SYSTEM_PROMPT,
         tools_enabled: false,
         auto_approve_all: true,
