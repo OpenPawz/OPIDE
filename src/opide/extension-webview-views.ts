@@ -17,6 +17,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { findPreMountedSlot, markSlotAttached } from './extension-contributed-views.ts'
+import { getWorkspace } from './ide-context.ts'
 
 /** Pipe debug into OPIDE.log so we can trace what fires when. */
 function logToFile(msg: string): void {
@@ -147,7 +148,10 @@ async function buildWebview(inst: WebviewViewInst, root: HTMLElement): Promise<v
       allowScripts: enableScripts,
       allowForms: enableForms,
       localResourceRoots: localRoots,
-      enableCommandUris: false,
+      // Respect what the extension declared (VS Code default is false). When
+      // an extension opts in, command: links (e.g. command:vscode.open) work;
+      // plain file links are handled via onDidClickLink below regardless.
+      enableCommandUris: inst.options?.webviewOptions?.enableCommandUris ?? false,
     },
     extension: inst.extensionId
       ? { id: { value: inst.extensionId, _lower: inst.extensionId.toLowerCase() } }
@@ -164,6 +168,15 @@ async function buildWebview(inst: WebviewViewInst, root: HTMLElement): Promise<v
   webview.onMessage((ev: any) => {
     inst.onMessage(ev?.message)
   })
+
+  // Open file references clicked in the webview as editor tabs (Cursor/VS Code
+  // behaviour). Without this, a clicked file link resolves against the webview
+  // origin (http://localhost:<port>/assets/…) and goes nowhere.
+  try {
+    webview.onDidClickLink?.((uri: string) => { void handleWebviewLinkClick(uri) })
+  } catch (e) {
+    logToFile(`onDidClickLink subscribe failed for ${inst.viewId}: ${(e as Error)?.message || e}`)
+  }
 
   // First-mount: ask the extension to fill the html via resolveWebviewView.
   if (!inst.resolved) {
@@ -187,6 +200,106 @@ async function buildWebview(inst: WebviewViewInst, root: HTMLElement): Promise<v
     inst.pendingMessages.length = 0
   }
   traceLog(`buildWebview DONE for ${inst.viewId}`)
+}
+
+// ─── Webview link clicks → open in OPIDE editor ──────────────────────────
+//
+// VS Code webviews fire onDidClickLink with the resolved href when a link in
+// extension content is clicked (e.g. a file reference in Claude Code's chat).
+// We resolve it to a workspace file and open it as an editor tab; run command:
+// links via the command service; and send genuine external URLs to the OS
+// browser. A link we can't resolve to a file (a misrouted local asset URL) is
+// a no-op rather than a dead navigation.
+
+async function openFileInEditor(fsPath: string): Promise<void> {
+  const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+  const { IEditorService } = await import(
+    '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService'
+  )
+  const { URI } = await import('@codingame/monaco-vscode-api/vscode/vs/base/common/uri')
+  const editorService = StandaloneServices.get(IEditorService) as any
+  if (!editorService?.openEditor) return
+  await editorService.openEditor({ resource: URI.file(fsPath), options: { pinned: true } })
+}
+
+/** Existence probe: ide_read_file succeeds only for a readable file. */
+async function fileExists(path: string): Promise<boolean> {
+  try { await invoke('ide_read_file', { path }); return true } catch { return false }
+}
+
+/** Resolve a clicked href to an existing workspace file path, or null. */
+async function resolveClickedUriToFile(rawUri: string): Promise<string | null> {
+  let pathname = ''
+  let absolute = false
+  try {
+    if (rawUri.startsWith('file://')) {
+      pathname = decodeURIComponent(new URL(rawUri).pathname); absolute = true
+    } else if (rawUri.startsWith('vscode-webview://') || rawUri.startsWith('vscode-resource://')) {
+      let p = decodeURIComponent(new URL(rawUri).pathname)
+      p = p.replace(/^\/vscode-resource(\/file)?/, '').replace(/^\/file/, '')
+      pathname = p; absolute = pathname.startsWith('/')
+    } else if (/^https?:\/\//i.test(rawUri)) {
+      pathname = decodeURIComponent(new URL(rawUri).pathname)
+    } else if (rawUri.startsWith('/')) {
+      pathname = rawUri; absolute = true
+    } else {
+      pathname = '/' + rawUri
+    }
+  } catch { return null }
+
+  const candidates: string[] = []
+  if (absolute) candidates.push(pathname)
+  const ws = getWorkspace()
+  if (ws) {
+    const base = ws.replace(/\/+$/, '')
+    const rel = pathname.replace(/^\/assets\//, '').replace(/^\/+/, '')
+    candidates.push(`${base}/${rel}`)
+    if (!absolute) candidates.push(`${base}${pathname}`)
+  }
+  for (const c of candidates) {
+    if (await fileExists(c)) return c
+  }
+  return null
+}
+
+async function handleWebviewLinkClick(rawUri: string): Promise<void> {
+  if (!rawUri) return
+  try {
+    if (rawUri.startsWith('command:')) {
+      const body = rawUri.slice('command:'.length)
+      const q = body.indexOf('?')
+      const cmd = decodeURIComponent(q === -1 ? body : body.slice(0, q))
+      let args: any[] = []
+      if (q !== -1) {
+        try {
+          const parsed = JSON.parse(decodeURIComponent(body.slice(q + 1)))
+          args = Array.isArray(parsed) ? parsed : [parsed]
+        } catch { /* no args */ }
+      }
+      const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+      const { ICommandService } = await import(
+        '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
+      )
+      const cs = StandaloneServices.get(ICommandService) as any
+      await cs?.executeCommand?.(cmd, ...args)
+      return
+    }
+
+    const file = await resolveClickedUriToFile(rawUri)
+    if (file) { await openFileInEditor(file); return }
+
+    // Genuine external URL → OS browser. Our own localhost origin with no
+    // matching file is a misrouted local link; no-op rather than 404.
+    if (/^https?:\/\//i.test(rawUri)) {
+      let host = ''
+      try { host = new URL(rawUri).hostname } catch { /* ignore */ }
+      if (host && host !== 'localhost' && host !== '127.0.0.1') {
+        invoke('open_external', { url: rawUri }).catch(() => {})
+      }
+    }
+  } catch (e) {
+    logToFile(`webview link click failed for ${rawUri}: ${(e as Error)?.message || e}`)
+  }
 }
 
 // ─── Public API ────────────────────────────────────────────────────────
