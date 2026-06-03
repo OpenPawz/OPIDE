@@ -370,6 +370,9 @@ export async function initializeDeferredFeatures(): Promise<void> {
   import('./opide/opide-terminal-cmdk.ts')
     .then((m) => m.registerTerminalCmdK())
     .catch((e) => console.warn('[opide] terminal cmd+k failed:', e))
+  import('./opide/opide-add-to-chat.ts')
+    .then((m) => m.registerAddToChat())
+    .catch((e) => console.warn('[opide] add-to-chat failed:', e))
   registerMemoryPalace().catch(e => console.warn('[opide] memory palace failed:', e))
   initEditorIntegration().catch(e => console.warn('[opide] editor integration failed:', e))
 
