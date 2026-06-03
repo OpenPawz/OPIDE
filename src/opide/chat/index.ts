@@ -153,6 +153,40 @@ export async function updateModelSelect(): Promise<void> {
   } catch { /* ignore */ }
 }
 
+// ─── @git mention: attach the working-tree diff as context ─────────────────────
+
+function insertAtCaret(textarea: HTMLTextAreaElement, text: string): void {
+  const pos = textarea.selectionStart
+  textarea.value = textarea.value.slice(0, pos) + text + textarea.value.slice(pos)
+  const newPos = pos + text.length
+  textarea.setSelectionRange(newPos, newPos)
+  textarea.dispatchEvent(new Event('input'))
+  textarea.focus()
+}
+
+async function attachGitDiff(textarea: HTMLTextAreaElement): Promise<void> {
+  try {
+    const { getWorkspace } = await import('../ide-context.ts')
+    const ws = getWorkspace()
+    if (!ws) { insertAtCaret(textarea, '\n(no workspace open)\n'); return }
+    const staged = await invoke<Array<{ path: string; patch: string }>>('git_diff', { repoPath: ws, staged: true }).catch(() => [])
+    const unstaged = await invoke<Array<{ path: string; patch: string }>>('git_diff', { repoPath: ws, staged: false }).catch(() => [])
+    const all = [...(staged ?? []), ...(unstaged ?? [])]
+    if (all.length === 0) { insertAtCaret(textarea, '\n(no git changes)\n'); return }
+    let body = ''
+    let budget = 8000 // cap so a huge diff doesn't bloat the input
+    for (const d of all) {
+      const block = `### ${d.path}\n${d.patch}\n`
+      if (budget - block.length < 0) { body += '\n[diff truncated]\n'; break }
+      body += block
+      budget -= block.length
+    }
+    insertAtCaret(textarea, `\n\nMy current git changes:\n\`\`\`diff\n${body}\`\`\`\n`)
+  } catch (e) {
+    console.warn('[opide-chat] @git attach failed:', e)
+  }
+}
+
 // ─── Chat Styles ─────────────────────────────────────────────────────────────
 
 const CHAT_STYLES = `
@@ -976,7 +1010,7 @@ export function registerOpideChat(): void {
         // No participants → preserve old behaviour, just open file picker.
         if (participants.length === 0) { pickAndAttach(true); return }
 
-        const items: { kind: 'participant' | 'file'; id: string; label: string; hint?: string }[] = [
+        const items: { kind: 'participant' | 'file' | 'git'; id: string; label: string; hint?: string }[] = [
           ...participants.map((p) => ({
             kind: 'participant' as const,
             id: p.id,
@@ -984,6 +1018,7 @@ export function registerOpideChat(): void {
             hint: p.fullName,
           })),
           { kind: 'file', id: 'file', label: 'Pick a file…', hint: 'Insert @<filename> from disk' },
+          { kind: 'git', id: 'git', label: 'Git changes', hint: 'Attach the current working-tree diff' },
         ]
 
         const menu = document.createElement('div')
@@ -1056,6 +1091,15 @@ export function registerOpideChat(): void {
               textarea.setSelectionRange(pos - 1, pos - 1)
             }
             pickAndAttach(true)
+          } else if (it.kind === 'git') {
+            dismissMentionMenu()
+            // Strip the bare @ then inject the working-tree diff as context.
+            const pos = textarea.selectionStart
+            if (textarea.value.slice(pos - 1, pos) === '@') {
+              textarea.value = textarea.value.slice(0, pos - 1) + textarea.value.slice(pos)
+              textarea.setSelectionRange(pos - 1, pos - 1)
+            }
+            void attachGitDiff(textarea)
           } else {
             // Insert participant id in place of the bare @.
             dismissMentionMenu()
