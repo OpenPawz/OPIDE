@@ -367,6 +367,9 @@ export async function initializeDeferredFeatures(): Promise<void> {
   try { registerGhostCompletions() } catch (e) { console.warn('[opide] completions failed:', e) }
   try { registerOpideExtensions() } catch (e) { console.warn('[opide] extensions panel failed:', e) }
   try { registerActivityFeed() } catch (e) { console.warn('[opide] activity feed failed:', e) }
+  import('./opide/opide-terminal-cmdk.ts')
+    .then((m) => m.registerTerminalCmdK())
+    .catch((e) => console.warn('[opide] terminal cmd+k failed:', e))
   registerMemoryPalace().catch(e => console.warn('[opide] memory palace failed:', e))
   initEditorIntegration().catch(e => console.warn('[opide] editor integration failed:', e))
 
