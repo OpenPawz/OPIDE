@@ -42,9 +42,10 @@ async function isCompletionsEnabled(): Promise<boolean> {
   }
 }
 
-const COMPLETION_SYSTEM_PROMPT = `You are a fill-in-the-middle code completion engine. You receive the code BEFORE the cursor (prefix) and the code AFTER the cursor (suffix). Output ONLY the code to insert at the cursor so prefix + your_output + suffix forms correct code. Rules:
+const COMPLETION_SYSTEM_PROMPT = `You are a fill-in-the-middle code completion engine. You receive the code BEFORE the cursor (prefix), the code AFTER the cursor (suffix), and optionally the user's RECENT EDITS. Predict the most likely next code at the cursor, using the recent edits to anticipate the logical next change. Output ONLY the code to insert at the cursor so prefix + your_output + suffix forms correct code. Rules:
 - Output raw code only — no markdown, no explanations, no fences.
 - Do NOT repeat any code that already appears in the suffix.
+- Use the recent edits to stay consistent with the change the user is making (e.g. finish a rename, mirror a new parameter, complete a repeated pattern).
 - Match the existing style, indentation, and patterns.
 - Usually 1-5 lines. If nothing should be inserted, output nothing.
 - Be conservative — only suggest when you're confident.`
@@ -53,6 +54,32 @@ const COMPLETION_SYSTEM_PROMPT = `You are a fill-in-the-middle code completion e
 
 let _lastSuggestion: string | null = null
 let _providerDisposable: any = null
+
+// ─── Recent-edit tracking (Cursor "Tab"-style next-edit awareness) ──────────
+// We keep a small rolling log of the user's most recent edits and feed it to
+// the completion model, so suggestions predict the NEXT logical change given
+// the editing trajectory — not just a continuation of the prefix.
+const MAX_RECENT_EDITS = 6
+const _recentEdits: string[] = []
+const _hookedModels = new WeakSet<object>()
+
+function hookModelEdits(model: any): void {
+  if (!model || _hookedModels.has(model)) return
+  _hookedModels.add(model)
+  try {
+    model.onDidChangeModelContent?.((e: any) => {
+      const file = (model.uri?.fsPath || model.uri?.path || '').split('/').pop() || 'file'
+      for (const c of e?.changes ?? []) {
+        const text = String(c?.text ?? '').trim()
+        if (!text) continue // skip pure deletions for v1
+        const line = c?.range?.startLineNumber ?? 0
+        const desc = `${file}:${line} ${text.slice(0, 80).replace(/\s+/g, ' ')}`
+        _recentEdits.push(desc)
+        if (_recentEdits.length > MAX_RECENT_EDITS) _recentEdits.shift()
+      }
+    })
+  } catch { /* model without change events — ignore */ }
+}
 
 // Single shared listener for all completion runs. Each in-flight request
 // registers itself in `_completionResolvers` keyed by run_id, so events route
@@ -117,6 +144,9 @@ async function registerInlineProvider(): Promise<void> {
           return { items: [] }
         }
         if (token.isCancellationRequested) return { items: [] }
+
+        // Track edits on this model so future completions know the trajectory.
+        hookModelEdits(model)
 
         const range = new (monaco as any).Range(1, 1, position.lineNumber, position.column)
         const codeBeforeCursor = model.getValueInRange(range)
@@ -191,7 +221,9 @@ export async function requestCompletion(
     invoke<{ run_id: string; session_id: string }>('engine_chat_send', {
       request: {
         session_id: COMPLETION_SESSION_ID,
-        message: `[File: ${filePath}] [Language: ${language}]\n\n<|prefix|>\n${prefix}\n<|cursor|>\n<|suffix|>\n${suffix}`,
+        message: `[File: ${filePath}] [Language: ${language}]${
+          _recentEdits.length ? `\n\n<|recent_edits|>\n${_recentEdits.join('\n')}` : ''
+        }\n\n<|prefix|>\n${prefix}\n<|cursor|>\n<|suffix|>\n${suffix}`,
         system_prompt: COMPLETION_SYSTEM_PROMPT,
         tools_enabled: false,
         auto_approve_all: true,
