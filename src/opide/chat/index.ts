@@ -1007,8 +1007,10 @@ export function registerOpideChat(): void {
         dismissMentionMenu()
         const { listParticipants } = await import('../extension-chat-participants.ts')
         const participants = listParticipants()
-        // No participants → preserve old behaviour, just open file picker.
-        if (participants.length === 0) { pickAndAttach(true); return }
+        // The menu always shows now — even with zero chat participants it still
+        // offers File and Git context items. (Previously it skipped straight to
+        // the file picker when no participants were registered, which hid the
+        // Git option entirely.)
 
         const items: { kind: 'participant' | 'file' | 'git'; id: string; label: string; hint?: string }[] = [
           ...participants.map((p) => ({

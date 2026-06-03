@@ -153,6 +153,7 @@ export async function registerTerminalCmdK(): Promise<void> {
     if (!registerAction2 || !Action2) return
     registerAction2(
       class extends Action2 {
+        static readonly id = 'opide.terminal.generateCommand'
         constructor() {
           super({
             id: 'opide.terminal.generateCommand',

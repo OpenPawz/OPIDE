@@ -65,6 +65,7 @@ export async function registerAddToChat(): Promise<void> {
     if (!registerAction2 || !Action2) return
     registerAction2(
       class extends Action2 {
+        static readonly id = 'opide.addSelectionToChat'
         constructor() {
           super({
             id: 'opide.addSelectionToChat',
