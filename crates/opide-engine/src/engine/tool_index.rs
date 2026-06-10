@@ -747,11 +747,15 @@ mod tests {
         assert!(CORE_TOOLS.contains(&"read_file"));
         assert!(CORE_TOOLS.contains(&"write_file"));
         assert!(CORE_TOOLS.contains(&"request_tools"));
+        // Web access must be core: OPIDE blocks request_tools, so non-core
+        // tools are unreachable there (the bug that made web_search dead code).
+        assert!(CORE_TOOLS.contains(&"fetch"));
+        assert!(CORE_TOOLS.contains(&"web_search"));
     }
 
     #[test]
     fn core_tools_count() {
-        assert_eq!(CORE_TOOLS.len(), 21);
+        assert_eq!(CORE_TOOLS.len(), 23);
     }
 
     // ── domain_summaries ───────────────────────────────────────────

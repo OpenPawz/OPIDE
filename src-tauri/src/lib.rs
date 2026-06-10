@@ -373,8 +373,6 @@ pub fn run() {
     // on http://localhost:5180 (vite), so this only affects release.
     #[cfg(not(debug_assertions))]
     let localhost_port: u16 = pick_localhost_port();
-    #[cfg(not(debug_assertions))]
-    log::info!("[opide] serving frontend over http://localhost:{localhost_port}");
 
     // `mut` is only used in release (the localhost plugin is added below under
     // cfg(not(debug_assertions))); allow it so debug builds don't warn.
@@ -491,6 +489,11 @@ pub fn run() {
         })
         // ── Startup background tasks ──────────────────────────────────────────
         .setup(move |app| {
+            // Logged here (not at builder time) so it lands in opide.log —
+            // the log plugin only routes messages once the app is built.
+            #[cfg(not(debug_assertions))]
+            log::info!("[opide] serving frontend over http://localhost:{localhost_port}");
+
             // ── Create the main window ────────────────────────────────────
             // We build it here (not in tauri.conf.json) so release can point
             // it at the in-process localhost server while dev keeps the normal
