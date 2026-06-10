@@ -62,6 +62,8 @@ async function generateCommand(nl: string): Promise<string | null> {
         tools_enabled: false,
         auto_approve_all: true,
         temperature: 0.1,
+        // Project rules would corrupt the single-command output format.
+        skip_project_rules: true,
       },
     })
       .then(({ run_id }) => {

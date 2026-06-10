@@ -53,6 +53,13 @@ pub const CORE_TOOLS: &[&str] = &[
     "write_file",
     "list_directory",
     "request_tools",
+    // Web access — always-on. These MUST be core: in OPIDE `request_tools`
+    // (the dynamic tool loader) is execution-blocked, so any non-core tool
+    // is unreachable there. OPIDE's assembler allowlist already exposes
+    // both, but the Tool RAG filter dropped them before the assembler ever
+    // saw them — making fetch/web_search dead code in the IDE.
+    "fetch",
+    "web_search",
     // Canvas tools — always available since Canvas is a first-class UI panel
     "canvas_push",
     "canvas_update",

@@ -337,12 +337,23 @@ pub async fn engine_chat_send(
     // from the open workspace and fold them into the base prompt. Folding into
     // base_system_prompt means BOTH the Engram ContextBuilder path and the
     // compose_chat_system_prompt fallback pick them up from one place.
-    if let Some(ws) = state.active_workspace.lock().clone() {
-        if let Some(rules) = read_project_rules(&ws) {
-            base_system_prompt = Some(match base_system_prompt {
-                Some(bp) if !bp.trim().is_empty() => format!("{bp}\n\n{rules}"),
-                _ => rules,
-            });
+    //
+    // Skipped for internal utility requests (completions, terminal command
+    // generation, inline edit, extension LM) — their strict output-format
+    // prompts would be corrupted by user rules. Belt-and-braces: the explicit
+    // flag plus the `__opide_` internal-session prefix.
+    let is_internal_session = request
+        .session_id
+        .as_deref()
+        .is_some_and(|s| s.starts_with("__opide_"));
+    if !request.skip_project_rules && !is_internal_session {
+        if let Some(ws) = state.active_workspace.lock().clone() {
+            if let Some(rules) = read_project_rules(&ws) {
+                base_system_prompt = Some(match base_system_prompt {
+                    Some(bp) if !bp.trim().is_empty() => format!("{bp}\n\n{rules}"),
+                    _ => rules,
+                });
+            }
         }
     }
 

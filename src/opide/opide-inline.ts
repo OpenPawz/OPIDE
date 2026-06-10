@@ -274,6 +274,8 @@ async function executeInlineEdit(instruction: string, overlay: HTMLElement): Pro
         system_prompt: INLINE_SYSTEM_PROMPT,
         tools_enabled: false,
         auto_approve_all: true,
+        // Project rules would corrupt the raw rewritten-code output format.
+        skip_project_rules: true,
       },
     })
     _runId = response.run_id

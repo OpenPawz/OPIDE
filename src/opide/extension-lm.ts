@@ -156,6 +156,9 @@ export async function sendRequest(
         auto_approve_all: true,
         thinking_level: 'none',
         is_redirect: false,
+        // Extensions control their own prompts; injecting workspace project
+        // rules into their LM requests could corrupt expected output formats.
+        skip_project_rules: true,
       },
     }).catch(() => null)
 

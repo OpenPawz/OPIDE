@@ -33,15 +33,18 @@ async function addSelectionToChat(): Promise<void> {
     const file = (model.uri?.fsPath || model.uri?.path || 'file').split('/').pop()
     const block = `\n\`\`\`${lang}\n${text}\n\`\`\`\n(${file}:${selection.startLineNumber}-${selection.endLineNumber})\n`
 
-    // Reveal + focus the OPIDE chat panel.
+    // Reveal the auxiliary bar (where the OPIDE chat lives). The built-in
+    // workbench command is verified present in this build; the view-specific
+    // focus command is attempted as a best-effort extra.
     try {
       const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
       const { ICommandService } = await import(
         '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands'
       )
       const cs = StandaloneServices.get(ICommandService) as any
-      await cs?.executeCommand?.('opide.chat.focus')
-    } catch { /* chat focus is best-effort */ }
+      await cs?.executeCommand?.('workbench.action.focusAuxiliaryBar')
+      try { await cs?.executeCommand?.('opide.chat.focus') } catch { /* may not exist */ }
+    } catch { /* reveal is best-effort */ }
 
     const ta = S.textarea
     if (ta) {
@@ -51,6 +54,20 @@ async function addSelectionToChat(): Promise<void> {
       ta.setSelectionRange(np, np)
       ta.dispatchEvent(new Event('input'))
       ta.focus()
+    } else {
+      // Chat panel has never been rendered this session — say so instead of
+      // failing silently (the #1 "the button does nothing" complaint).
+      try {
+        const { StandaloneServices } = await import('@codingame/monaco-vscode-api/services')
+        const { INotificationService, Severity } = (await import(
+          '@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification'
+        )) as any
+        const svc = StandaloneServices.get(INotificationService) as any
+        svc?.notify?.({
+          severity: Severity?.Info,
+          message: 'Open the OPIDE chat panel first, then press Cmd+L again to add the selection.',
+        })
+      } catch { /* ignore */ }
     }
   } catch (e) {
     console.warn('[opide-add-to-chat] failed:', e)

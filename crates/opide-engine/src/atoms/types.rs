@@ -525,6 +525,12 @@ pub struct ChatRequest {
     /// redirect message has weight in the context instead of being drowned out.
     #[serde(default)]
     pub is_redirect: bool,
+    /// Skip workspace Project Rules injection. Set by internal utility callers
+    /// (ghost completions, terminal command generation, inline edit, extension
+    /// LM requests) whose strict output-format prompts would be corrupted by
+    /// appending user rules like "always start replies with X".
+    #[serde(default)]
+    pub skip_project_rules: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

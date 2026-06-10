@@ -228,6 +228,8 @@ export async function requestCompletion(
         tools_enabled: false,
         auto_approve_all: true,
         temperature: 0.2,
+        // Project rules would corrupt the strict raw-code output format.
+        skip_project_rules: true,
       },
     })
       .then((response) => {
