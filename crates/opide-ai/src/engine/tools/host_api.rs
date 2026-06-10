@@ -143,15 +143,21 @@ impl opide_sandbox::HostApi for OpideHostApi {
         // B194/B195 still refuse credential content + sensitive paths
         // unconditionally above, so the safety net for yolo-mode (where
         // the engine-tier prompt doesn't fire) is intact.
-        if !file_existed || is_tmp {
-            log::info!(
-                "[host-api] file_write: '{}' — auto-approved (new={}, tmp={})",
-                path, !file_existed, is_tmp
-            );
+        // Only scratch space (/tmp, /var/folders) bypasses review. New files
+        // in the workspace now go through the diff gate too — shown as an
+        // all-green addition — because that's the change coders most want to
+        // A/B before it lands, and previously they never saw it (B203 had
+        // auto-approved every new file). Existing-file edits already reviewed.
+        if is_tmp {
+            log::info!("[host-api] file_write: '{}' — auto-approved (scratch path)", path);
             return self.block_on(opide_shell::ide_mcp::ide_write_file(path, content));
         }
 
-        let desc = format!("Modify {} ({} bytes)", path, content.len());
+        let desc = if file_existed {
+            format!("Modify {} ({} bytes)", path, content.len())
+        } else {
+            format!("Create {} ({} bytes)", path, content.len())
+        };
         match self.block_on(crate::engine::frontend_bridge::request_edit_review(
             &self.app_handle, &path, &original, &content, "ide_write_file", &desc,
         )) {

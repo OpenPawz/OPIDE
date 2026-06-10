@@ -297,21 +297,22 @@ pub async fn execute(
             // Read current content for diff (empty string = new file)
             let original = tokio::fs::read_to_string(&path).await.unwrap_or_default();
 
-            // New files (no existing content) are auto-approved — no review needed.
-            // Only modifications to existing files require user review.
-            let approved = if original.is_empty() {
-                log::info!("[tools] ide_write_file: new file {} — auto-approved", path);
-                true
+            // Both new files (all-green addition) and edits go through the diff
+            // gate so coders A/B every change before it lands. (Previously new
+            // files were silently auto-approved, so the agent's most common
+            // action — creating files — was never reviewable.)
+            let desc = if original.is_empty() {
+                format!("Create {} ({} bytes)", path, content.len())
             } else {
-                let desc = format!("Modify {} ({} bytes)", path, content.len());
-                match crate::engine::frontend_bridge::request_edit_review(
-                    _app_handle, &path, &original, &content, "ide_write_file", &desc,
-                ).await {
-                    Ok(accepted) => accepted,
-                    Err(e) => {
-                        log::warn!("[tools] Edit review failed for {}: {}", path, e);
-                        return Some(Err(format!("Could not review changes to {}: {}", path, e)));
-                    }
+                format!("Modify {} ({} bytes)", path, content.len())
+            };
+            let approved = match crate::engine::frontend_bridge::request_edit_review(
+                _app_handle, &path, &original, &content, "ide_write_file", &desc,
+            ).await {
+                Ok(accepted) => accepted,
+                Err(e) => {
+                    log::warn!("[tools] Edit review failed for {}: {}", path, e);
+                    return Some(Err(format!("Could not review changes to {}: {}", path, e)));
                 }
             };
 

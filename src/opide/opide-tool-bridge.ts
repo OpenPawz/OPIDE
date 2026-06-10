@@ -363,26 +363,77 @@ async function showEditReview(req: EditReviewRequest): Promise<void> {
   showReviewToolbar(req, originalModel, proposedModel, fileName)
 }
 
+/** Cheap line-level add/delete count for the review badge. Uses a longest-
+ * common-subsequence-free heuristic (multiset diff): lines present only in
+ * proposed count as adds, only in original count as dels. Good enough for an
+ * at-a-glance "+N -M" badge without pulling in a full diff algorithm. */
+function countLineDiff(original: string, proposed: string): { adds: number; dels: number } {
+  if (original === proposed) return { adds: 0, dels: 0 }
+  const a = original ? original.split('\n') : []
+  const b = proposed ? proposed.split('\n') : []
+  const count = (arr: string[]) => {
+    const m = new Map<string, number>()
+    for (const l of arr) m.set(l, (m.get(l) ?? 0) + 1)
+    return m
+  }
+  const ma = count(a)
+  const mb = count(b)
+  let adds = 0
+  let dels = 0
+  const keys = new Set([...ma.keys(), ...mb.keys()])
+  for (const k of keys) {
+    const d = (mb.get(k) ?? 0) - (ma.get(k) ?? 0)
+    if (d > 0) adds += d
+    else if (d < 0) dels += -d
+  }
+  return { adds, dels }
+}
+
 function showReviewToolbar(
   req: EditReviewRequest,
   originalModel: any,
   proposedModel: any,
   fileName: string,
 ): void {
+  if (!document.getElementById('opide-review-toolbar-style')) {
+    const st = document.createElement('style')
+    st.id = 'opide-review-toolbar-style'
+    st.textContent = `@keyframes opideReviewIn {from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}`
+    document.head.appendChild(st)
+  }
+
+  // Compute a quick +adds / −dels badge from a line-level diff so the user
+  // sees the change size at a glance (VS Code-style).
+  const { adds, dels } = countLineDiff(originalModel.getValue(), proposedModel.getValue())
+  const isNew = (originalModel.getValue() || '').length === 0
+
   const toolbar = document.createElement('div')
   toolbar.className = 'opide-review-toolbar'
   toolbar.dataset.requestId = req.request_id
   toolbar.style.cssText = `
     position: fixed; bottom: 48px; left: 50%; transform: translateX(-50%);
     display: flex; gap: 8px; align-items: center;
-    padding: 8px 16px; background: #1e1e1e; border: 1px solid #E8B931;
-    border-radius: 8px; z-index: 10000; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-    font-family: var(--opide-font-ui);
+    padding: 9px 14px;
+    background: var(--vscode-editorWidget-background, #1e1e1e);
+    border: 1px solid var(--vscode-focusBorder, #E8B931);
+    border-radius: 8px; z-index: 10000;
+    box-shadow: 0 6px 28px rgba(0,0,0,0.55);
+    font-family: var(--vscode-font-family, system-ui);
+    animation: opideReviewIn 0.18s ease-out;
   `
 
   const label = document.createElement('span')
-  label.style.cssText = 'color: #ccc; font-size: 12px; margin-right: 8px;'
-  label.textContent = `Review: ${fileName}`
+  label.style.cssText = 'color: var(--vscode-foreground,#ccc); font-size: 12px; margin-right: 4px; display:flex; align-items:center; gap:8px;'
+  const verb = isNew ? 'Create' : 'Review'
+  const stat = document.createElement('span')
+  stat.style.cssText = 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px;'
+  stat.innerHTML =
+    (adds ? `<span style="color:#3fb950">+${adds}</span>` : '') +
+    (adds && dels ? ' ' : '') +
+    (dels ? `<span style="color:#f85149">-${dels}</span>` : '') ||
+    '<span style="color:var(--vscode-descriptionForeground,#9d9d9d)">no change</span>'
+  label.innerHTML = `<strong style="font-weight:600">${verb}</strong> <span style="color:var(--vscode-descriptionForeground,#9d9d9d)">${fileName}</span> `
+  label.appendChild(stat)
 
   const acceptBtn = document.createElement('button')
   acceptBtn.textContent = '✓ Accept'
