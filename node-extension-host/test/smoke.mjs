@@ -1,5 +1,7 @@
-// Extension host smoke test — protects the "run real VS Code extensions
-// outside VS Code" core from regressions.
+// Extension host smoke test — protects the "run real Open VSX extensions
+// (built against the VS Code extension API) outside VS Code" core from
+// regressions. OPIDE sources extensions from open-vsx.org, never the
+// Microsoft marketplace.
 //
 // Spawns the REAL dist/bootstrap.js against a throwaway extensions dir
 // containing a fixture extension, speaks the actual Content-Length framed

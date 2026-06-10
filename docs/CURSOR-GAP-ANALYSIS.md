@@ -32,7 +32,7 @@ we are missing specific marquee features.
 | Multi-file agent + reviewable diffs | Yes (Composer) | Yes (engine + edit-review Accept/Reject) | Even-ish (UX polish gap) |
 | Codebase indexing / memory | Yes (embeddings) | Yes (Engram HNSW + 13-lang AST) | **OPIDE ahead** (persistent memory) |
 | MCP | Yes | Yes | Even |
-| Extensions | Yes (VS Code marketplace) | Yes (Open VSX + sidecar) | Even (smaller registry) |
+| Extensions | Yes (Microsoft marketplace, TOS gray area for forks) | Yes (Open VSX + sidecar — clean licensing by construction) | Even (smaller registry, cleaner legal story) |
 | **Tab / next-edit prediction** | Yes (Sonic model) | Basic inline completions only | **Biggest gap** |
 | **Project Rules** (`.cursor/rules`) | Yes (globs/alwaysApply) | No | Gap (easy win) |
 | **Web / docs context** (@web, @docs) | Yes | No web-search tool | Gap |
