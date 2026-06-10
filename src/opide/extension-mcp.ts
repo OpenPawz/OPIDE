@@ -617,6 +617,17 @@ export async function uninstallExtension(extensionId: string): Promise<boolean> 
   try {
     await log(`Uninstalling ${extensionId}...`)
 
+    // Same validation as install (B63): the id is interpolated into shell
+    // commands below (`test -d`, `rm -rf`). Without this, a malformed or
+    // hostile id like `..` or one containing quotes escapes the extensions
+    // directory.
+    try {
+      validateExtensionId(extensionId)
+    } catch (e) {
+      await log(String(e))
+      return false
+    }
+
     const extBase = await getExtensionsBase()
     const extDir = `${extBase}/${extensionId}`
 
@@ -669,6 +680,14 @@ export async function uninstallExtension(extensionId: string): Promise<boolean> 
     }) as any
     if ((verifyResult?.stdout || '').trim() === 'removed') {
       await log(`Extension ${extensionId} uninstalled successfully`)
+      // Drop the id from the persisted disabled set — otherwise a future
+      // reinstall of the same extension starts mysteriously disabled.
+      try {
+        const disabled = await invoke<string[]>('ext_get_disabled')
+        if (disabled?.includes(extensionId)) {
+          await invoke('ext_set_disabled', { disabled: disabled.filter((d) => d !== extensionId) })
+        }
+      } catch { /* non-fatal */ }
       // Bounce the sidecar so its in-memory extension list drops the
       // removed entry. Otherwise the host keeps a stale reference and
       // the next activation event for that id would fail oddly.

@@ -24,12 +24,43 @@ interface FileContent {
 interface LoadedExtension {
   id: string
   dispose: () => Promise<void>
+  /** Blob object URLs created for this extension's resources — revoked on
+   * unload so uninstall/reload doesn't leak them. */
+  objectUrls: string[]
 }
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
 const _loadedExtensions = new Map<string, LoadedExtension>()
 let _cachedExtBase: string | null = null
+
+/** File extensions whose content is binary and must be read via
+ * ide_read_file_bytes (base64). Reading these through the text-based
+ * ide_read_file corrupts them — which broke icon themes that ship PNG
+ * icons or icon FONTS (Material Icon Theme et al): file icons rendered
+ * blank because the woff/png blobs were UTF-8 mangled. */
+const BINARY_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'woff', 'woff2', 'ttf', 'otf', 'eot'])
+
+function isBinaryPath(path: string): boolean {
+  return BINARY_EXTS.has(path.split('.').pop()?.toLowerCase() || '')
+}
+
+function base64ToBytes(b64: string) {
+  const bin = atob(b64)
+  const out = new Uint8Array(new ArrayBuffer(bin.length))
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+/** Read a resource as a Blob, routing binary types through the bytes IPC. */
+async function readResourceBlob(absPath: string, relPath: string): Promise<Blob> {
+  if (isBinaryPath(relPath)) {
+    const b64 = await invoke<string>('ide_read_file_bytes', { path: absPath })
+    return new Blob([base64ToBytes(b64)], { type: guessMime(relPath) })
+  }
+  const result = await invoke<FileContent>('ide_read_file', { path: absPath })
+  return new Blob([result.content], { type: guessMime(relPath) })
+}
 
 // ─── Core: Load a single extension from disk ────────────────────────────────
 
@@ -70,6 +101,7 @@ async function loadExtensionWithManifest(extDir: string, extensionId: string, ma
 
     // 4. Register contributed resource files
     const regFileUrl = (ext as any).registerFileUrl
+    const objectUrls: string[] = []
     if (regFileUrl) {
       // Collect direct contributes file paths (typically 1-5 files)
       const filePaths = collectContributedFilePaths(manifest)
@@ -79,10 +111,10 @@ async function loadExtensionWithManifest(extDir: string, extensionId: string, ma
       // Register ALL resource files in background — never block startup
       if (filePaths.size > 0 || manifest.contributes?.iconThemes) {
         setTimeout(() => {
-          registerFiles(extDir, filePaths, regFileUrl)
+          registerFiles(extDir, filePaths, regFileUrl, objectUrls)
             .then(() => {
               if (manifest.contributes?.iconThemes) {
-                return loadIconThemeResources(extDir, manifest, regFileUrl)
+                return loadIconThemeResources(extDir, manifest, regFileUrl, objectUrls)
               }
             })
             .catch(() => {})
@@ -93,6 +125,7 @@ async function loadExtensionWithManifest(extDir: string, extensionId: string, ma
     _loadedExtensions.set(extensionId, {
       id: extensionId,
       dispose: () => ext.dispose(),
+      objectUrls,
     })
 
     return true
@@ -131,14 +164,16 @@ async function registerFiles(
   extDir: string,
   filePaths: Set<string>,
   registerFileUrl: (path: string, url: string) => any,
+  objectUrls: string[],
 ): Promise<void> {
   // Read all in parallel — these are typically 1-5 small JSON files
   const reads = Array.from(filePaths).map(async (relPath) => {
     const absPath = `${extDir}/${relPath.replace(/^\.\//, '')}`
     try {
-      const result = await invoke<FileContent>('ide_read_file', { path: absPath })
-      const blob = new Blob([result.content], { type: guessMime(relPath) })
-      registerFileUrl(relPath, URL.createObjectURL(blob))
+      const blob = await readResourceBlob(absPath, relPath)
+      const url = URL.createObjectURL(blob)
+      objectUrls.push(url)
+      registerFileUrl(relPath, url)
     } catch { /* skip missing files */ }
   })
   await Promise.all(reads)
@@ -150,6 +185,7 @@ async function loadIconThemeResources(
   extDir: string,
   manifest: any,
   registerFileUrl: (path: string, url: string) => any,
+  objectUrls: string[],
 ): Promise<void> {
   for (const iconTheme of manifest.contributes.iconThemes) {
     if (!iconTheme.path) continue
@@ -182,10 +218,12 @@ async function loadIconThemeResources(
         await Promise.all(batch.map(async (relPath) => {
           const abs = `${extDir}/${relPath.replace(/^\.\//, '')}`
           try {
-            // For binary files (SVG, PNG, fonts), try text first then base64
-            const res = await invoke<FileContent>('ide_read_file', { path: abs })
-            const blob = new Blob([res.content], { type: guessMime(relPath) })
-            registerFileUrl(relPath, URL.createObjectURL(blob))
+            // Binary resources (PNG icons, woff/ttf icon fonts) go through
+            // the base64 bytes IPC; text (SVG, JSON) through the text IPC.
+            const blob = await readResourceBlob(abs, relPath)
+            const url = URL.createObjectURL(blob)
+            objectUrls.push(url)
+            registerFileUrl(relPath, url)
           } catch { /* skip */ }
         }))
       }
@@ -220,7 +258,17 @@ export async function loadAllInstalledExtensions(): Promise<void> {
     const list = await invoke<{ entries: { name: string; is_dir: boolean }[] }>('ide_list_dir', {
       path: extBase,
     }).catch(() => null)
-    const dirs = (list?.entries ?? []).filter(e => e.is_dir).map(e => e.name)
+
+    // Honour the user's disabled set. The sidecar already skips disabled
+    // extensions; without this the workbench loader still registered their
+    // themes/grammars/snippets, so "Disable" looked like it did nothing for
+    // appearance-type extensions.
+    const disabled = new Set<string>(
+      await invoke<string[]>('ext_get_disabled').catch(() => [] as string[]),
+    )
+    const dirs = (list?.entries ?? [])
+      .filter(e => e.is_dir && !disabled.has(e.name))
+      .map(e => e.name)
 
     await Promise.all(dirs.map(async (extId) => {
       try {
@@ -242,6 +290,11 @@ export async function unloadExtension(extensionId: string): Promise<void> {
         new Promise((resolve) => setTimeout(resolve, 2000)),
       ])
     } catch { /* ignore */ }
+    // Revoke the blob URLs created for this extension's resources so
+    // uninstall/reload cycles don't leak them.
+    for (const url of loaded.objectUrls) {
+      try { URL.revokeObjectURL(url) } catch { /* ignore */ }
+    }
     _loadedExtensions.delete(extensionId)
   }
 }

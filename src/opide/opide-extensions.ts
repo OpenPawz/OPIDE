@@ -272,6 +272,20 @@ async function toggleExtensionEnabled(id: string, btn: HTMLButtonElement): Promi
   else _disabledIds.delete(id)
   try {
     await invoke('ext_set_disabled', { disabled: Array.from(_disabledIds) })
+    // Apply to the workbench side too (themes/grammars/snippets) so the
+    // toggle takes effect now, not on next launch. The sidecar restart
+    // below covers the Node-extension side.
+    try {
+      const loader = await import('./extension-loader.ts')
+      if (willDisable) {
+        await loader.unloadExtension(id)
+      } else {
+        const home = (await homeDir()).replace(/[\\/]+$/, '')
+        await loader.loadExtensionFromDisk(`${home}/.opide/extensions/${id}`, id)
+      }
+    } catch (e) {
+      console.warn('[opide-ext] live workbench toggle failed (applies on restart):', e)
+    }
     const { restartExtensionHost } = await import('./extension-bridge.ts')
     await restartExtensionHost()
   } catch (e) {
