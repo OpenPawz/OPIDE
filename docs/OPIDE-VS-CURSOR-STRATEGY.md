@@ -66,24 +66,46 @@ Cursor pulls from Microsoft's marketplace as a non-VS-Code product. OPIDE uses
 **Open VSX** (Eclipse Foundation) exclusively — legally clean by construction.
 Minor today, real moat at enterprise procurement time.
 
-## What we have that Cursor does not (the platform dividend)
+## What we have that Cursor does not (VERIFIED against OPIDE source)
 
-These ship in the OpenPawz engine TODAY and have no Cursor equivalent:
+> **Honesty rule for this doc:** every row below was checked against actual
+> OPIDE wiring (allowlist `OPIDE_EXPOSED_TOOLS`, startup init, frontend
+> surface), NOT against tool names or planning docs. The OpenPawz engine
+> defines far more than OPIDE exposes — tool definitions existing in the crate
+> does NOT mean they work in OPIDE. See "OpenPawz-only — NOT in OPIDE" below.
 
-| Capability | What it is | Cursor equivalent |
-|---|---|---|
-| **Multi-agent squads** | `create_squad`, `squad_broadcast`, agent-to-agent messaging (`agent_send_message`/`agent_read_messages`), per-agent roles | None (single agent; Background Agents are parallel, not collaborative) |
-| **Persistent Engram memory** | HNSW vector + graph + consolidation across sessions; `memory_relate`, `memory_feedback`, `memory_knowledge` | Per-session embeddings only — forgets between sessions |
-| **WASM skills** | Sandboxed, user/agent-authored capability modules with their own storage (`skill_store_*`) | None |
-| **DAG planning** | `execute_plan` — parallelizable multi-step action graphs | Linear agent loop |
-| **Canvas dashboards** | Agent renders live dashboards/visualizations in-IDE (`canvas_*`, templates) | None |
-| **Soul files** | Durable agent identity/preferences (`soul_read/write/list`) | Rules files (static text only) |
-| **Working memory** | Per-session OPIDE_NOTES auto-injection | Manual context only |
-| **Encrypted vault** | OS-keychain AES-256-GCM credential store | None in-editor |
+| Capability | What it is | Verified | Cursor equivalent |
+|---|---|---|---|
+| **Persistent Engram memory** | HNSW vector + graph + consolidation across sessions; `cognitive_event::init()` at startup, `memory_*` tools exposed, ContextBuilder/WorkingMemory wired into the agent loop | ✅ real & active | Per-session embeddings only — forgets between sessions |
+| **Memory Palace** | Live graph visualization of the Engram memory (`src/opide/memory-palace/`) | ✅ real UI | None |
+| **Reviewable edit gate** | `request_edit_review` → green/red diff, Accept/Reject, Accept-All/Reject-All per turn — agent never silently mutates files | ✅ real & wired | None (Cursor has shipped silent unrelated-file edits) |
+| **Encrypted vault** | OS-keychain AES-256-GCM credential store; chat/config encrypted at rest | ✅ real | None in-editor |
+| **Injection-scanned tool results** | `engine::injection` wraps tool output before it re-enters the loop; SSRF-hardened fetch | ✅ real | None |
+| **Soul files** | Durable agent identity/preferences (`soul_read/write/list`), file-based | ✅ exposed, minor | Rules files (static text only) |
+| **DAG planning** | `execute_plan` referenced in the agent loop | ⚠️ reachable, depth unverified | Linear agent loop |
 
-Cursor's whole product is "a good agent in an editor." Ours is "an agent
-**organism** — memory, squads, skills, planning — that happens to live in a
-best-in-class editor." That's the overtake narrative.
+This is a **single-agent** IDE with genuinely persistent, visualized memory, a
+real edit-approval gate, and on-machine security. That's a true and defensible
+differentiator — but it is NOT the "agent organism with squads and skills"
+story; that belongs to the parent project (OpenPawz).
+
+## OpenPawz-only — NOT in OPIDE (do not market these for OPIDE)
+
+These exist in the shared engine crate (pulled from OpenPawz) but are
+unreachable or vestigial in OPIDE. Claiming them would be false:
+
+- **Multi-agent squads** — `create_squad`/`squad_broadcast`/etc. are NOT in
+  OPIDE's `OPIDE_EXPOSED_TOOLS` allowlist. Unreachable.
+- **Agent-to-agent messaging** — `agent_send_message`/`agent_read_messages` are
+  exposed, BUT `create_agent` is not and OPIDE runs a single "default agent" —
+  there is no second agent to message. Vestigial.
+- **WASM skills** — `engine::skills` was deleted in the OPIDE extraction;
+  `skill_tools()` returns an empty list. Gone.
+- **Canvas dashboards** — `canvas_*` tools are allowlisted but there is no
+  canvas rendering surface in the OPIDE frontend. Vestigial.
+
+If we WANT any of these in OPIDE, they are roadmap items requiring real wiring
+(multi-agent runtime, a skills host, a canvas panel), not existing features.
 
 ## Close-the-gap priorities (where Cursor is still ahead)
 
@@ -105,10 +127,12 @@ From CURSOR-GAP-ANALYSIS.md, ranked by leverage:
 4. Smaller: scoped terminal Cmd+K keybinding, richer @-mentions (@web/@terminal),
    BugBot-style PR review (we have the agent; needs the GitHub App).
 
-## Positioning one-liner candidates
-- "Your agent, your keys, your machine. No surprise bills. No eight middlemen."
-- "Cursor rents you an agent. OPIDE gives you an agent platform."
+## Positioning one-liner candidates (only claims that survive code-check)
+- "Your model, your keys, your machine. No surprise bills. No eight middlemen."
 - "The AI IDE that remembers — across every session, on your hardware."
+- "The agent never edits without your yes." (the reviewable edit gate)
+- Do NOT use "agent platform / organism / squads" for OPIDE — those are
+  OpenPawz, not OPIDE (see the NOT-in-OPIDE section).
 
 ## Sources
 - Cursor pricing timeline / backlash — https://www.wearefounders.uk/cursors-pricing-disaster-the-full-timeline-of-how-an-ai-coding-darling-burned-its-most-loyal-users/
