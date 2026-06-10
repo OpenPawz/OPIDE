@@ -6,7 +6,9 @@
   "main": "dist/bootstrap.js",
   "scripts": {
     "build": "tsc && node -e \"require('fs').writeFileSync('dist/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "pretest": "npm run build",
+    "test": "node test/smoke.mjs"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
