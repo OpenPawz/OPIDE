@@ -3,11 +3,9 @@
 
 use crate::atoms::error::EngineResult;
 use crate::atoms::types::*;
-use crate::engine::state::EngineState;
 use crate::engine::util::safe_truncate;
 use log::{info, warn};
 use std::sync::LazyLock;
-use tauri::Manager;
 use tokio::sync::Semaphore;
 
 /// B134: cap concurrent exec calls so one runaway agent (or 50 parallel

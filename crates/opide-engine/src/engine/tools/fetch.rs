@@ -5,7 +5,6 @@ use crate::atoms::error::EngineResult;
 use crate::atoms::types::*;
 use log::{info, warn};
 use std::time::Duration;
-use tauri::Manager;
 
 /// §Security: SSRF protection — block access to internal/private network addresses
 /// and cloud metadata endpoints. Applied unconditionally before any network policy.
@@ -339,7 +338,7 @@ fn parse_ddg_results(html: &str, max: usize) -> Vec<(String, String, String)> {
 
 async fn execute_fetch(
     args: &serde_json::Value,
-    app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle,
 ) -> EngineResult<String> {
     let url = args["url"]
         .as_str()
@@ -380,7 +379,9 @@ async fn execute_fetch(
     let mut injected_headers: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
-    let has_auth_header = args["headers"]
+    // Leftover from the removed Discord bot-token auto-injection (OPIDE phase 1);
+    // kept computed-but-unused-prefixed until the whole inject block is pruned.
+    let _has_auth_header = args["headers"]
         .as_object()
         .map(|h| h.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
         .unwrap_or(false);

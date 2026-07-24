@@ -95,6 +95,10 @@ fn load_vault_key_from_keychain() -> EngineResult<Zeroizing<Vec<u8>>> {
 
 /// Encrypt a plaintext credential value using AES-256-GCM.
 /// Returns "aes:" + base64(nonce || ciphertext_with_tag).
+// Deprecated `Nonce::from_slice` (generic-array 0.14 via aes-gcm 0.10.3)
+// suppressed pending a crypto dependency bump; behaviour is byte-identical and
+// changing it risks data already encrypted in the vault.
+#[allow(deprecated)]
 pub fn encrypt_credential(plaintext: &str, key: &[u8]) -> EngineResult<String> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| EngineError::Other("AES-256-GCM key must be exactly 32 bytes".into()))?;
@@ -129,6 +133,9 @@ pub fn decrypt_credential(encrypted: &str, key: &[u8]) -> EngineResult<String> {
 }
 
 /// AES-256-GCM decryption. Input is base64(nonce || ciphertext+tag).
+// See encrypt_credential: deprecated `Nonce::from_slice` suppressed pending an
+// aes-gcm upgrade; behaviour is byte-identical.
+#[allow(deprecated)]
 fn decrypt_aes_gcm(encoded: &str, key: &[u8]) -> EngineResult<String> {
     let packed = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
         .map_err(|e| EngineError::Other(e.to_string()))?;

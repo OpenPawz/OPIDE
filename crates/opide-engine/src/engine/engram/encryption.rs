@@ -603,6 +603,12 @@ pub fn resolve_edge_type(token: &str) -> String {
 /// Returns "enc:v1:" + base64(nonce || ciphertext+tag).
 ///
 /// Uses OsRng (kernel CSPRNG) for nonce generation — never thread_rng.
+// `Nonce::from_slice` is deprecated in generic-array 0.14 (used by aes-gcm
+// 0.10.3), which suggests a generic-array 1.x upgrade. That's a deliberate
+// crypto dependency bump, not a call-site tweak: rewriting nonce construction
+// here is zero functional change (identical 12 bytes) but nonzero risk to data
+// already encrypted on disk. Suppress the lint until aes-gcm is upgraded.
+#[allow(deprecated)]
 pub fn encrypt_memory_content(content: &str, key: &[u8]) -> EngineResult<String> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| EngineError::Other("AES key must be 32 bytes".into()))?;
@@ -629,6 +635,9 @@ pub fn encrypt_memory_content(content: &str, key: &[u8]) -> EngineResult<String>
 /// Supports both versioned ("enc:v1:") and legacy ("enc:") prefixes.
 /// Legacy content is decrypted with the raw key (pre-HKDF migration).
 /// Versioned content is decrypted with the provided (derived) key.
+// See encrypt_memory_content: deprecated `Nonce::from_slice` suppressed pending
+// an aes-gcm upgrade; behaviour is byte-identical.
+#[allow(deprecated)]
 pub fn decrypt_memory_content(content: &str, key: &[u8]) -> EngineResult<String> {
     let encoded = if let Some(e) = content.strip_prefix(ENC_PREFIX_VERSIONED) {
         e
