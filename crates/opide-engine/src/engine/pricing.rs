@@ -5,6 +5,11 @@
 use crate::atoms::types::*;
 
 pub fn model_price(model: &str) -> ModelPrice {
+    if let Some(p) = llm_prices::lookup(model) {
+        if let (Some(input), Some(output)) = (p.input, p.output) {
+            return ModelPrice { input, output };
+        }
+    }
     // Normalize: strip provider prefixes like "anthropic/"
     let m = model.split('/').next_back().unwrap_or(model);
     match m {
@@ -264,6 +269,18 @@ mod tests {
     }
 
     #[test]
+    fn current_models_use_list_price() {
+        let p = model_price("claude-opus-4-7");
+        assert_eq!((p.input, p.output), (5.00, 25.00));
+        let p = model_price("anthropic/claude-opus-4-5-20251101");
+        assert_eq!((p.input, p.output), (5.00, 25.00));
+        let p = model_price("gpt-5-mini");
+        assert_eq!((p.input, p.output), (0.25, 2.00));
+        let p = model_price("gpt-5.4");
+        assert_eq!((p.input, p.output), (2.50, 15.00));
+    }
+
+    #[test]
     fn claude_3_opus_price() {
         let p = model_price("claude-3-opus-20240229");
         assert_eq!(p.input, 15.00);
@@ -322,15 +339,15 @@ mod tests {
     #[test]
     fn gpt_4_1_mini_price() {
         let p = model_price("gpt-4.1-mini");
-        assert_eq!(p.input, 0.15);
-        assert_eq!(p.output, 0.60);
+        assert_eq!(p.input, 0.40);
+        assert_eq!(p.output, 1.60);
     }
 
     #[test]
     fn gpt_4_1_nano_price() {
         let p = model_price("gpt-4.1-nano");
-        assert_eq!(p.input, 0.15);
-        assert_eq!(p.output, 0.60);
+        assert_eq!(p.input, 0.10);
+        assert_eq!(p.output, 0.40);
     }
 
     #[test]
@@ -343,8 +360,8 @@ mod tests {
     #[test]
     fn gpt_4_1_price() {
         let p = model_price("gpt-4.1");
-        assert_eq!(p.input, 2.50);
-        assert_eq!(p.output, 10.00);
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 8.00);
     }
 
     #[test]
@@ -364,8 +381,8 @@ mod tests {
     #[test]
     fn o3_price() {
         let p = model_price("o3-2025-04-16");
-        assert_eq!(p.input, 10.00);
-        assert_eq!(p.output, 40.00);
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 8.00);
     }
 
     #[test]
@@ -378,8 +395,8 @@ mod tests {
     #[test]
     fn deepseek_chat_price() {
         let p = model_price("deepseek-chat");
-        assert_eq!(p.input, 0.27);
-        assert_eq!(p.output, 1.10);
+        assert_eq!(p.input, 0.30);
+        assert_eq!(p.output, 1.20);
     }
 
     #[test]
@@ -392,8 +409,8 @@ mod tests {
     #[test]
     fn deepseek_reasoner_price() {
         let p = model_price("deepseek-reasoner");
-        assert_eq!(p.input, 0.55);
-        assert_eq!(p.output, 2.19);
+        assert_eq!(p.input, 0.30);
+        assert_eq!(p.output, 1.20);
     }
 
     #[test]
